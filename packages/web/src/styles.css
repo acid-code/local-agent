@@ -128,8 +128,20 @@ button { cursor: pointer; }
 .trace { border-right: 0; border-left: 1px solid var(--line); }
 .thread { display: flex; flex-direction: column; min-width: 0; }
 .messages { flex: 1; overflow: auto; padding: 22px 8% 12px; }
+.face { display: inline-grid; place-items: center; border-radius: 999px; overflow: hidden; flex: none; }
+.face.initials { color: #1a140c; font-weight: 680; letter-spacing: -0.03em; }
+.persona-list { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 12px; overflow: auto; }
+.persona-row { border: 1px solid var(--line); border-left: 3px solid var(--accent, var(--brass)); border-radius: 12px; background: color-mix(in srgb, var(--accent, var(--brass)) 10%, transparent); }
+.persona-open { display: flex; gap: 8px; align-items: center; width: 100%; text-align: left; background: transparent; border: 0; padding: 8px; }
+.persona-open strong { display: block; font-size: 13px; }
+.persona-open small { display: block; color: var(--faint); font-size: 11px; }
+.persona-ops { display: flex; gap: 4px; padding: 0 6px 6px; flex-wrap: wrap; }
+.persona-ops .btn { padding: 2px 6px; font-size: 11px; }
+.preview-bubble { border-left: 3px solid var(--accent, var(--brass)); background: color-mix(in srgb, var(--accent, var(--brass)) 14%, var(--bg-2)); border-radius: 16px; padding: 12px; }
 .msg { margin: 0 0 18px; }
 .msg.user { margin-left: 18%; background: var(--bg-3); border: 1px solid var(--line); border-radius: 16px 16px 4px 16px; padding: 12px 14px; }
+.msg.from-agent { border-left: 3px solid var(--accent, var(--brass)); background: color-mix(in srgb, var(--accent, var(--brass)) 12%, transparent); border-radius: 16px; padding: 12px 14px; }
+.msg .who { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
 .msg .meta { color: var(--faint); font-size: 12px; margin-bottom: 6px; display: flex; gap: 8px; }
 .switch { color: var(--brass-2); font-size: 13px; margin-bottom: 8px; }
 .composer { padding: 12px 8% 18px; }

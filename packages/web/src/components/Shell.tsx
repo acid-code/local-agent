@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { Activity, BookOpen, Box, CalendarClock, Cpu, Gauge, ListChecks, Menu, MessageSquare, Radio, Settings, Sparkles, Users, Wrench } from 'lucide-react';
-import { api } from '../lib/api';
+import { api, post } from '../lib/api';
+import { Face, type FaceAgent } from './Face';
 
 const LINKS = [
   ['/', 'Chats', MessageSquare],
@@ -19,12 +20,21 @@ const LINKS = [
   ['/settings', 'Settings', Settings],
 ] as const;
 
+interface Persona extends FaceAgent { id: string; title?: string; pinned?: boolean; hidden?: boolean; unread?: number }
+
 export function Shell({ username, onLogout, children }: { username: string; onLogout: () => void; children: ReactNode }) {
   const [open, setOpen] = useState(false);
   const [palette, setPalette] = useState(false);
   const [query, setQuery] = useState('');
   const [pending, setPending] = useState(0);
+  const [personas, setPersonas] = useState<Persona[]>([]);
   const navigate = useNavigate();
+
+  async function loadPersonas() {
+    const data = await api<{ agents: Persona[] }>('/api/agents');
+    setPersonas(data.agents.filter((agent) => !agent.hidden));
+  }
+  useEffect(() => { void loadPersonas().catch(() => undefined); }, []);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -54,6 +64,15 @@ export function Shell({ username, onLogout, children }: { username: string; onLo
     return () => { clearInterval(id); socket?.close(); };
   }, []);
 
+  async function move(index: number, delta: number) {
+    const next = personas.slice();
+    const [row] = next.splice(index, 1);
+    if (!row) return;
+    next.splice(index + delta, 0, row);
+    setPersonas(next);
+    await post('/api/agents/reorder', { ids: next.map((persona) => persona.id) });
+  }
+
   const actions = useMemo(() => LINKS.map(([to, label]) => ({ to, label })), []);
   const filtered = actions.filter((item) => item.label.toLowerCase().includes(query.toLowerCase()));
 
@@ -71,6 +90,26 @@ export function Shell({ username, onLogout, children }: { username: string; onLo
             </NavLink>
           ))}
         </nav>
+        <div className="persona-list">
+          {personas.map((persona, index) => (
+            <div key={persona.id} className="persona-row" style={{ ['--accent' as string]: persona.accent || '#e4b56a' }}>
+              <button className="persona-open" onClick={() => { navigate(`/?persona=${persona.id}`); setOpen(false); }}>
+                <Face agent={persona} size={28} />
+                <span>
+                  <strong>{persona.emoji ? `${persona.emoji} ` : ''}{persona.name}</strong>
+                  {persona.title && <small>{persona.title}</small>}
+                </span>
+                {persona.unread ? <em className="badge" style={{ borderColor: persona.accent }}>{persona.unread}</em> : null}
+              </button>
+              <span className="persona-ops">
+                <button className="btn ghost" onClick={() => api(`/api/agents/${persona.id}`, { method: 'PATCH', body: JSON.stringify({ pinned: !persona.pinned }) }).then(loadPersonas)}>{persona.pinned ? 'Unpin' : 'Pin'}</button>
+                <button className="btn ghost" onClick={() => api(`/api/agents/${persona.id}`, { method: 'PATCH', body: JSON.stringify({ hidden: true }) }).then(loadPersonas)}>Hide</button>
+                <button className="btn ghost" disabled={index === 0} onClick={() => move(index, -1)}>Up</button>
+                <button className="btn ghost" disabled={index === personas.length - 1} onClick={() => move(index, 1)}>Down</button>
+              </span>
+            </div>
+          ))}
+        </div>
         <div className="side-foot">
           <div>{username}</div>
           <button className="btn ghost" onClick={onLogout}>Sign out</button>
