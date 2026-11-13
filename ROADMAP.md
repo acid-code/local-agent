@@ -16,8 +16,11 @@ These work end to end:
 - MCP import, registry browse, vetting, and a container spec for stdio servers.
 - Coding mode: editable plan, grep, glob, patch with a pre-image checkpoint and diff, git inside the workspace, folder grants, and an optional CLI handoff.
 - Vault: encrypted secrets, mid-run prompt, handles only for the model, redaction, reveal-with-password, rotate, revoke, audit.
-- Setup checklist with preview-then-run actions, resource page with previewed prune, cron schedules, single-user login, API tokens, PWA shell.
-- Tests for the loop, routing, context, discovery parsers, MCP framing, coding rollback, and the vault. CI runs test, typecheck, and build.
+- Setup checklist with preview-then-run actions, including a pull of `nomic-embed-text`, resource page with previewed prune, cron schedules, single-user login, API tokens, PWA shell.
+- Knowledge base: drop files or a folder, structure-aware chunks with overlap, Ollama embeddings (`nomic-embed-text`, hash if Ollama is down), sqlite-vec plus BM25, per-agent or shared collections, re-index when the bytes change, size on the resource page, and a `kb_search` tool that cites sources.
+- Skills: `skills/<slug>/SKILL.md` with a name and a when-to-use description, optional scripts and assets, a shared catalog, per-agent enable, version history, and import/export. A persona loads a skill with `load_skill` when the description fits.
+- Triggers: a secret-protected webhook, a signature-checked GitHub webhook, a debounced folder watch, and a read-only IMAP poll whose password comes from the vault. Each one starts a normal checkpointed run. The page shows status, recent events, and a test fire.
+- Tests for the loop, routing, context, discovery parsers, MCP framing, coding rollback, the vault, chunking, hybrid search, skills, and triggers. CI runs test, typecheck, and build.
 
 ## Partial, on purpose
 
@@ -38,21 +41,18 @@ These work end to end:
 
 ## Designed, not built
 
-These have a type stub in `packages/server/src/stubs.ts` and no runtime.
+Evals still have a type stub in `packages/server/src/stubs.ts` and no runtime.
 
-- **Knowledge base.** Drop a folder, chunk it, embed it with the same index the conversation already uses, and retrieve it beside pinned notes. The conversation index is the pattern. A separate corpus, watch on the folder, and citations in the answer are not built.
-- **Skills.** Reusable prompt-plus-tool bundles that any persona can enable, separate from the three built-in templates (operator, researcher, coder).
-- **Triggers.** Email, GitHub, a file watch, or a URL would start a run the way cron already does. The scheduler is the seam. The listeners are not.
 - **Evals.** Save a task and the trace you liked, rerun it after a model or prompt change, and diff the new trace. The trace store is the fixture format. The runner is not.
 
 ## Later
 
-- Native Android client on the existing HTTP and WebSocket API.
+- A richer Android client than the Capacitor shell (offline transcript, a share sheet that edits before send).
 - Multi-user accounts and SSO.
 - OS keyring or age for the vault master key, and per-container secret mounts that are not also process env.
 - Full streamable-HTTP MCP, including elicitation.
 - Branching run timelines, not only retry-from-checkpoint.
-- Official tokenizer files and a real local embedding model (nomic or Qwen3-Embedding) with a reindex job.
+- Official tokenizer files. The knowledge base already embeds with `nomic-embed-text` when Ollama has it.
 - Image upload and vision bytes through to Gemma 4 and Qwen3.6.
 - Deeper coding tools: multi-file unified diffs, test watchers, and a review queue that can block the next step until you accept the diff.
 - Voice, and a hook a video pipeline can drive without scraping the chat UI.

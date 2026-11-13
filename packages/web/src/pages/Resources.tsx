@@ -7,6 +7,7 @@ interface Snapshot {
   dataBytes: number;
   gpu: { name: string; note: string; vramBytes?: number; gttBytes?: number } | null;
   agents: { id: string; name: string; messageBytes: number; summaryBytes: number; embeddingBytes: number; workspaceBytes: number; notes: number }[];
+  knowledge?: { bytes: number; embeddingBytes: number; documents: number; chunks: number; collections: { id: string; name: string; bytes: number; chunks: number }[] };
   flags: { level: string; text: string }[];
 }
 
@@ -34,6 +35,15 @@ export function Resources() {
         <article className="card"><h3>Disk</h3><p>{gb(snap.disk.freeBytes)} free of {gb(snap.disk.totalBytes)}</p><p className="faint">Data directory {gb(snap.dataBytes)}</p></article>
         <article className="card"><h3>GPU / GTT</h3><p>{snap.gpu ? snap.gpu.name : 'Not visible'}</p><p className="muted">{snap.gpu?.note}</p></article>
       </div>
+      {snap.knowledge && (
+        <article className="card">
+          <h3>Knowledge base</h3>
+          <p>{snap.knowledge.documents} files · {snap.knowledge.chunks} chunks · {gb(snap.knowledge.bytes)} source · {gb(snap.knowledge.embeddingBytes)} embeddings</p>
+          {snap.knowledge.collections.map((collection) => (
+            <p key={collection.id} className="mono faint">{collection.name} · {collection.chunks} chunks · {collection.bytes} B</p>
+          ))}
+        </article>
+      )}
       {snap.flags.map((flag) => <p key={flag.text} className="badge warn">{flag.text}</p>)}
       <svg viewBox="0 0 240 48" width="100%" height="48" role="img" aria-label="Available memory trend">
         <polyline fill="none" stroke="#e4b56a" strokeWidth="2" points={samples.map((sample, index) => `${(index / Math.max(samples.length - 1, 1)) * 240},${46 - ((sample.availableGiB || 0) / max) * 40}`).join(' ')} />

@@ -4,6 +4,7 @@ import { readGpu, readMem } from './discovery.js';
 import type { DockerCtl } from './docker.js';
 import type { Store } from './db.js';
 import { nid } from './util.js';
+import { kbUsage } from './kb.js';
 
 export interface ResourceSnapshot {
   at: string;
@@ -13,6 +14,7 @@ export interface ResourceSnapshot {
   dataBytes: number;
   logBytes: number;
   agents: { id: string; name: string; messages: number; messageBytes: number; summaries: number; summaryBytes: number; notes: number; noteBytes: number; chunks: number; embeddingBytes: number; workspaceBytes: number }[];
+  knowledge: ReturnType<typeof kbUsage>;
   flags: { level: 'ok' | 'warn'; text: string }[];
 }
 
@@ -32,7 +34,9 @@ export function snapshotResources(store: Store, dataDir: string): ResourceSnapsh
     if (agent.workspaceBytes > 2 * 1024 ** 3) flags.push({ level: 'warn', text: `${agent.name}'s workspace is over 2 GB.` });
   }
   if (dataBytes > 8 * 1024 ** 3) flags.push({ level: 'warn', text: 'The local-agent data directory is over 8 GB.' });
-  const body: ResourceSnapshot = { at: new Date().toISOString(), memory: { totalGiB: total, availableGiB: available }, gpu: readGpu(), disk, dataBytes, logBytes: logBytes(store), agents, flags };
+  const knowledge = kbUsage(store);
+  if (knowledge.bytes > 2 * 1024 ** 3) flags.push({ level: 'warn', text: 'The knowledge base is over 2 GB.' });
+  const body: ResourceSnapshot = { at: new Date().toISOString(), memory: { totalGiB: total, availableGiB: available }, gpu: readGpu(), disk, dataBytes, logBytes: logBytes(store), agents, knowledge, flags };
   store.addSample({ availableGiB: available, freeBytes: disk.freeBytes, dataBytes });
   return body;
 }

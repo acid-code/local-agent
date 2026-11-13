@@ -21,6 +21,8 @@ import { Scheduler } from './scheduler.js';
 import { Notifier } from './notify.js';
 import { backupIfDue, watchOnce } from './ops.js';
 import { loadMasterKey, Vault } from './vault.js';
+import { ollamaEmbedder, reindexRoots } from './kb.js';
+import { TriggerRuntime } from './triggers.js';
 
 const PUBLIC = new Set(['GET /api/health', 'GET /api/auth/me', 'POST /api/auth/login', 'POST /api/setup']);
 
@@ -51,6 +53,8 @@ export async function buildApp(options: {
   const vectors = new VectorIndex(store.db);
   const vault = new Vault(store, loadMasterKey(config.dataDir));
   const engine = new Engine(store, bus, docker, vectors, vault, config.instanceId, options.fetchImpl ?? fetch, options.providerOverride);
+  engine.libraryDir = config.dataDir;
+  const triggers = new TriggerRuntime(store, engine, vault, bus);
   const mcp = new McpRuntime(store, docker);
   const scheduler = new Scheduler(store, engine);
   engine.recover();
@@ -58,10 +62,20 @@ export async function buildApp(options: {
   if (options.startScheduler !== false) {
     scheduler.start();
     notifier.start();
+    triggers.start();
   }
 
   const app = Fastify({ bodyLimit: 8 * 1024 * 1024, logger: false });
   app.addContentTypeParser(/^audio\//, { parseAs: 'buffer' }, (_req, body, done) => done(null, body));
+  app.addHook('preParsing', async (req, _reply, payload) => {
+    if (!req.url.startsWith('/api/hooks/')) return payload;
+    const chunks: Buffer[] = [];
+    for await (const chunk of payload) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const raw = Buffer.concat(chunks);
+    (req as { rawBody?: Buffer }).rawBody = raw;
+    const { Readable } = await import('node:stream');
+    return Readable.from(raw);
+  });
   await app.register(cookie, { secret: config.cookieSecret });
   await app.register(websocket);
 
@@ -80,7 +94,9 @@ export async function buildApp(options: {
   });
 
   app.addHook('preHandler', async (req, reply) => {
-    if (PUBLIC.has(`${req.method} ${req.url.split('?')[0]}`)) return;
+    const pathOnly = req.url.split('?')[0] ?? '';
+    if (PUBLIC.has(`${req.method} ${pathOnly}`)) return;
+    if (req.method === 'POST' && /^\/api\/hooks\/(?:github\/)?[A-Za-z0-9_-]+$/.test(pathOnly)) return;
     if (!req.url.startsWith('/api/')) return;
     const ok = await authenticate(store, req);
     if (!ok) return reply.code(401).send({ error: 'Sign in required.' });
@@ -124,10 +140,14 @@ export async function buildApp(options: {
     setInterval(() => {
       void backupIfDue(config.dataDir, store.getSettings()).catch((error: Error) => store.addLog('error', error.message));
     }, 60_000),
+    setInterval(() => {
+      void reindexRoots(store, ollamaEmbedder(options.fetchImpl ?? fetch)).catch((error: Error) => store.addLog('error', error.message));
+    }, 60_000),
   ];
   app.addHook('onClose', async () => {
     scheduler.stop();
     notifier.stop();
+    triggers.stop();
     for (const timer of background) clearInterval(timer);
     store.close();
   });

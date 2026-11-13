@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
-import { Activity, Box, CalendarClock, Cpu, ListChecks, MessageSquare, Settings, Users, Wrench, Gauge, Menu } from 'lucide-react';
+import { Activity, BookOpen, Box, CalendarClock, Cpu, Gauge, ListChecks, Menu, MessageSquare, Radio, Settings, Sparkles, Users, Wrench } from 'lucide-react';
 import { api } from '../lib/api';
 
 const LINKS = [
@@ -11,6 +11,9 @@ const LINKS = [
   ['/models', 'Models', Cpu],
   ['/containers', 'Containers', Box],
   ['/schedules', 'Schedules', CalendarClock],
+  ['/library', 'Library', BookOpen],
+  ['/skills', 'Skills', Sparkles],
+  ['/triggers', 'Triggers', Radio],
   ['/resources', 'Resources', Gauge],
   ['/setup', 'Setup', ListChecks],
   ['/settings', 'Settings', Settings],

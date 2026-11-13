@@ -9,7 +9,10 @@ import { Login } from './pages/Login';
 import { Models } from './pages/Models';
 import { Resources } from './pages/Resources';
 import { Runs } from './pages/Runs';
+import { Library } from './pages/Library';
 import { Schedules } from './pages/Schedules';
+import { Skills } from './pages/Skills';
+import { Triggers } from './pages/Triggers';
 import { Settings } from './pages/Settings';
 import { Setup } from './pages/Setup';
 import { Tools } from './pages/Tools';
@@ -40,6 +43,9 @@ export function App() {
         <Route path="/models" element={<Models />} />
         <Route path="/containers" element={<Containers />} />
         <Route path="/schedules" element={<Schedules />} />
+        <Route path="/library" element={<Library />} />
+        <Route path="/skills" element={<Skills />} />
+        <Route path="/triggers" element={<Triggers />} />
         <Route path="/setup" element={<Setup />} />
         <Route path="/resources" element={<Resources />} />
         <Route path="/settings" element={<Settings />} />

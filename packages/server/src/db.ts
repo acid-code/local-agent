@@ -168,6 +168,40 @@ export class Store {
       CREATE TABLE IF NOT EXISTS plan_items (id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, position INTEGER NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL, note TEXT);
       CREATE TABLE IF NOT EXISTS edit_batches (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT, label TEXT NOT NULL, files TEXT NOT NULL, diff TEXT NOT NULL, created_at TEXT NOT NULL, reverted_at TEXT);
       CREATE TABLE IF NOT EXISTS folder_grants (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, path TEXT NOT NULL, mode TEXT NOT NULL, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS kb_collections (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, agent_id TEXT, root_path TEXT, embedder TEXT NOT NULL,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS kb_documents (
+        id TEXT PRIMARY KEY, collection_id TEXT NOT NULL, name TEXT NOT NULL, path TEXT, mime TEXT,
+        bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, status TEXT NOT NULL, error TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS kb_chunks (
+        rowid INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, document_id TEXT NOT NULL,
+        collection_id TEXT NOT NULL, ordinal INTEGER NOT NULL, heading TEXT NOT NULL, text TEXT NOT NULL,
+        embedding BLOB, dim INTEGER NOT NULL, embedder TEXT NOT NULL, created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS skills (
+        slug TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL, body TEXT NOT NULL,
+        version INTEGER NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS skill_versions (
+        id TEXT PRIMARY KEY, slug TEXT NOT NULL, version INTEGER NOT NULL, name TEXT NOT NULL,
+        description TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS agent_skills (
+        agent_id TEXT NOT NULL, slug TEXT NOT NULL, enabled INTEGER NOT NULL, PRIMARY KEY (agent_id, slug)
+      );
+      CREATE TABLE IF NOT EXISTS triggers (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, agent_id TEXT NOT NULL, prompt TEXT NOT NULL,
+        secret_nonce TEXT, secret_ciphertext TEXT, config TEXT NOT NULL, enabled INTEGER NOT NULL,
+        status TEXT NOT NULL, last_error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS trigger_events (
+        id TEXT PRIMARY KEY, trigger_id TEXT NOT NULL, status TEXT NOT NULL, summary TEXT NOT NULL,
+        payload TEXT NOT NULL, run_id TEXT, created_at TEXT NOT NULL
+      );
     `);
     const sessionCols = this.many<Raw>('PRAGMA table_info(chat_sessions)').map((row) => String(row.name));
     if (!sessionCols.includes('mode')) this.db.exec(`ALTER TABLE chat_sessions ADD COLUMN mode TEXT NOT NULL DEFAULT 'chat'`);

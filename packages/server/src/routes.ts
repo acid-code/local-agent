@@ -18,6 +18,17 @@ import { createBackup, listBackups, shipBackup, stageRestore } from './ops.js';
 import { previewPrune, runPrune, snapshotResources } from './resources.js';
 import { speak, transcribe, voiceStatus, KOKORO_COMMAND, WHISPER_COMMAND } from './voice.js';
 import { listWorkspace, readWorkspaceFile } from './tools.js';
+import {
+  createCollection, ingestBuffer, ingestFolder, kbUsage, listCollections, ollamaEmbedder, searchKnowledge,
+} from './kb.js';
+import {
+  exportSkill, importSkill, listSkills, parseSkillMd, saveSkill, setSkillEnabled, skillFit, skillVersions,
+} from './skills.js';
+import {
+  createTrigger, fireTrigger, getTrigger, githubSignatureOk, listTriggerEvents, listTriggers, secretEquals, triggerSecret,
+  type TriggerKind,
+} from './triggers.js';
+import { secret as randomSecret } from './util.js';
 import type { Bus } from './bus.js';
 import type { Engine } from './engine.js';
 import type { Store } from './db.js';
@@ -550,6 +561,8 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       socket.on('close', () => off());
     })();
   });
+
+  registerLibrary(app, ctx);
 }
 
 function parse<T>(schema: z.ZodType<T>, value: unknown): T {
@@ -564,11 +577,149 @@ function http(statusCode: number, message: string) {
   return error;
 }
 
+function registerLibrary(app: FastifyInstance, ctx: Ctx) {
+  const { store, engine, vault, config, fetchImpl } = ctx;
+  const embed = () => ollamaEmbedder(fetchImpl);
+
+  app.get('/api/kb/collections', async () => ({ collections: listCollections(store), usage: kbUsage(store) }));
+  app.post('/api/kb/collections', async (req) => {
+    const body = parse(z.object({ name: z.string().min(1), agentId: z.string().nullable().optional(), rootPath: z.string().optional() }), req.body);
+    return { collection: createCollection(store, body) };
+  });
+  app.post('/api/kb/collections/:id/files', async (req) => {
+    const body = parse(z.object({
+      files: z.array(z.object({ name: z.string().min(1), contentBase64: z.string().min(1) })).min(1),
+    }), req.body);
+    const results = [];
+    for (const file of body.files) {
+      const bytes = Buffer.from(file.contentBase64, 'base64');
+      results.push({ name: file.name, ...(await ingestBuffer(store, (req.params as { id: string }).id, { name: file.name, bytes }, embed())) });
+    }
+    return { results, usage: kbUsage(store) };
+  });
+  app.post('/api/kb/collections/:id/folder', async (req) => {
+    const body = parse(z.object({ path: z.string().min(1) }), req.body);
+    return { results: await ingestFolder(store, (req.params as { id: string }).id, body.path, embed()) };
+  });
+  app.post('/api/kb/collections/:id/reindex', async (req) => {
+    const id = (req.params as { id: string }).id;
+    const row = store.db.prepare('SELECT root_path FROM kb_collections WHERE id = ?').get(id) as { root_path: string | null } | undefined;
+    if (!row?.root_path) throw http(400, 'This collection has no folder to re-index. Drop the files again.');
+    return { results: await ingestFolder(store, id, row.root_path, embed()) };
+  });
+  app.post('/api/kb/search', async (req) => {
+    const body = parse(z.object({ query: z.string().min(1), collectionId: z.string().optional(), agentId: z.string().optional() }), req.body);
+    return { hits: await searchKnowledge(store, body.query, { collectionId: body.collectionId, agentId: body.agentId, embed: embed() }) };
+  });
+
+  app.get('/api/skills', async (req) => ({ skills: listSkills(store, (req.query as { agentId?: string }).agentId) }));
+  app.post('/api/skills', async (req) => {
+    const body = parse(z.object({ skillMd: z.string().min(1), slug: z.string().optional() }), req.body);
+    return { skill: await saveSkill(store, config.dataDir, body.skillMd, body.slug) };
+  });
+  app.get('/api/skills/:slug', async (req) => {
+    const slug = (req.params as { slug: string }).slug;
+    const skill = listSkills(store).find((item) => item.slug === slug);
+    if (!skill) throw http(404, 'Skill not found.');
+    return { skill, versions: skillVersions(store, slug), markdown: `---\nname: ${skill.name}\ndescription: ${skill.description}\n---\n\n${skill.body}\n` };
+  });
+  app.post('/api/skills/:slug/enable', async (req) => {
+    const body = parse(z.object({ agentId: z.string(), enabled: z.boolean() }), req.body);
+    setSkillEnabled(store, body.agentId, (req.params as { slug: string }).slug, body.enabled);
+    return { ok: true };
+  });
+  app.post('/api/skills/test', async (req) => {
+    const body = parse(z.object({ text: z.string().min(1), agentId: z.string().optional() }), req.body);
+    const skills = listSkills(store, body.agentId);
+    const fits = skills.map((skill) => ({ slug: skill.slug, name: skill.name, score: skillFit(skill.description, body.text), enabled: skill.enabled !== false }));
+    fits.sort((a, b) => b.score - a.score);
+    return { fits };
+  });
+  app.post('/api/skills/:slug/test', async (req) => {
+    const body = parse(z.object({ text: z.string().min(1), agentId: z.string().optional() }), req.body);
+    const skills = listSkills(store, body.agentId);
+    const fits = skills.map((skill) => ({ slug: skill.slug, name: skill.name, score: skillFit(skill.description, body.text), enabled: skill.enabled !== false }));
+    fits.sort((a, b) => b.score - a.score);
+    return { fits };
+  });
+  app.get('/api/skills/:slug/export', async (req) => exportSkill(store, config.dataDir, (req.params as { slug: string }).slug));
+  app.post('/api/skills/import', async (req) => {
+    const body = parse(z.object({
+      slug: z.string().optional(),
+      skillMd: z.string().min(1),
+      files: z.array(z.object({ path: z.string(), content: z.string() })).optional(),
+    }), req.body);
+    parseSkillMd(body.skillMd);
+    return { skill: await importSkill(store, config.dataDir, body) };
+  });
+
+  app.get('/api/triggers', async () => ({
+    triggers: listTriggers(store).map((trigger) => ({ ...trigger, events: listTriggerEvents(store, trigger.id) })),
+  }));
+  app.post('/api/triggers', async (req) => {
+    const body = parse(z.object({
+      name: z.string().min(1),
+      kind: z.enum(['webhook', 'github', 'folder', 'imap']),
+      agentId: z.string(),
+      prompt: z.string().min(1),
+      config: z.object({
+        debounceMs: z.number().optional(),
+        path: z.string().optional(),
+        host: z.string().optional(),
+        port: z.number().optional(),
+        mailbox: z.string().optional(),
+        userSecret: z.string().optional(),
+        passwordSecret: z.string().optional(),
+      }).optional(),
+    }), req.body);
+    const secret = randomSecret(24);
+    const trigger = createTrigger(store, vault, { ...body, kind: body.kind as TriggerKind, secret });
+    ctx.bus.publish({ type: 'trigger', message: trigger.id });
+    return { trigger, secret, url: hookUrl(trigger.id, trigger.kind) };
+  });
+  app.post('/api/triggers/:id/test', async (req) => {
+    const body = parse(z.object({ event: z.unknown().optional() }), req.body);
+    const trigger = getTrigger(store, (req.params as { id: string }).id);
+    if (!trigger) throw http(404, 'Trigger not found.');
+    const event = body.event ?? { test: true, note: 'Fired from the triggers page.' };
+    return fireTrigger(store, engine, trigger, event, { test: true, wait: true });
+  });
+  app.delete('/api/triggers/:id', async (req) => {
+    store.db.prepare('DELETE FROM triggers WHERE id = ?').run((req.params as { id: string }).id);
+    ctx.bus.publish({ type: 'trigger', message: 'deleted' });
+    return { ok: true };
+  });
+  app.post('/api/hooks/github/:id', async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const trigger = getTrigger(store, id);
+    if (!trigger || trigger.kind !== 'github' || !trigger.enabled) return reply.code(404).send({ error: 'Unknown hook.' });
+    const raw = (req as { rawBody?: Buffer }).rawBody ?? Buffer.from(JSON.stringify(req.body ?? {}));
+    if (!githubSignatureOk(triggerSecret(store, vault, id), raw, req.headers['x-hub-signature-256'] as string | undefined)) {
+      return reply.code(401).send({ error: 'Bad GitHub signature.' });
+    }
+    const result = await fireTrigger(store, engine, trigger, req.body ?? {});
+    return { ok: true, runId: result.runId };
+  });
+  app.post('/api/hooks/:id', async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const trigger = getTrigger(store, id);
+    if (!trigger || trigger.kind !== 'webhook' || !trigger.enabled) return reply.code(404).send({ error: 'Unknown hook.' });
+    const provided = String(req.headers['x-local-agent-secret'] || '');
+    if (!secretEquals(provided, triggerSecret(store, vault, id))) return reply.code(401).send({ error: 'Bad hook secret.' });
+    const result = await fireTrigger(store, engine, trigger, req.body ?? {});
+    return { ok: true, runId: result.runId };
+  });
+}
+
+function hookUrl(id: string, kind: TriggerKind) {
+  return kind === 'github' ? `/api/hooks/github/${id}` : kind === 'webhook' ? `/api/hooks/${id}` : null;
+}
+
 async function runSetup(action: string, model: string | undefined, jobId: string, ctx: Ctx) {
   const { store, docker, fetchImpl } = ctx;
   try {
-    if (action === 'pull-model') {
-      const name = model || 'gemma4:e4b';
+    if (action === 'pull-model' || action === 'pull-embed') {
+      const name = action === 'pull-embed' ? 'nomic-embed-text' : (model || 'gemma4:e4b');
       const base = (process.env.OLLAMA_HOST || lastScan?.ollama?.url || 'http://127.0.0.1:11434').replace(/\/$/, '');
       const response = await fetchImpl(`${base}/api/pull`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, stream: true }) });
       if (!response.ok || !response.body) throw new Error(`Ollama pull failed (${response.status}).`);

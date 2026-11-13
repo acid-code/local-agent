@@ -2,6 +2,8 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { assessCommand, isBlockedUrl, resolveInside } from '@local-agent/shared';
+import { formatCitations, searchKnowledge } from './kb.js';
+import { loadSkill } from './skills.js';
 import type { Agent } from './db.js';
 import type { DockerCtl } from './docker.js';
 import type { Store } from './db.js';
@@ -22,6 +24,7 @@ export interface ToolContext {
   codeApproval?: Settings['codeApproval'];
   secretEnv?: () => Record<string, string>;
   consult?: (name: string, question: string) => Promise<string>;
+  libraryDir?: string;
 }
 
 export interface Tool {
@@ -270,6 +273,37 @@ export const BUILTIN_TOOLS: Tool[] = [
     },
   },
 ];
+
+export function kbSearchTool(): Tool {
+  return {
+    name: 'kb_search',
+    description: 'Search the knowledge base. Cite the numbered sources in the answer.',
+    parameters: obj({ query: { type: 'string' }, collectionId: { type: 'string' } }, ['query']),
+    mutates: () => false,
+    approval: () => null,
+    async execute(args, ctx) {
+      const hits = await searchKnowledge(ctx.store, String(args.query || ''), {
+        agentId: ctx.agent.id,
+        collectionId: args.collectionId ? String(args.collectionId) : null,
+        embed: undefined,
+      });
+      return formatCitations(hits);
+    },
+  };
+}
+
+export function loadSkillTool(): Tool {
+  return {
+    name: 'load_skill',
+    description: 'Load a shared skill by slug when its when-to-use description fits the task. Returns the instructions and any scripts.',
+    parameters: obj({ slug: { type: 'string' } }, ['slug']),
+    mutates: () => false,
+    approval: () => null,
+    async execute(args, ctx) {
+      return loadSkill(ctx.store, ctx.libraryDir || '', ctx.agent.id, String(args.slug || ''));
+    },
+  };
+}
 
 export function toolsFor(allow: string[]): Tool[] {
   const wanted = new Set(allow);

@@ -128,6 +128,20 @@ export class Vault {
     return env;
   }
 
+  sealText(value: string) {
+    return seal(this.key, value);
+  }
+
+  openText(nonce: string, ciphertext: string) {
+    return open(this.key, nonce, ciphertext);
+  }
+
+  valueByName(name: string, agentId?: string): string | null {
+    const meta = this.active(name, agentId);
+    if (!meta) return null;
+    return this.reveal(meta.id, 'trigger');
+  }
+
   active(name: string, agentId?: string): SecretMeta | null {
     const row = this.findRow(normalizeName(name), 'agent', agentId ?? null) ?? this.findRow(normalizeName(name), 'global', null);
     if (!row || row.revoked_at) return null;

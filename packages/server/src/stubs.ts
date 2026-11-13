@@ -1,28 +1,7 @@
 /**
- * Designed, not built. See ROADMAP.md. Calling one throws so a route cannot
- * pretend the feature exists.
+ * Designed, not built. Knowledge, skills, and triggers now have a runtime.
+ * Calling this throws so a route cannot pretend an eval runner exists.
  */
-
-export interface KnowledgeSource {
-  id: string;
-  path: string;
-  kind: 'file' | 'folder';
-  /** Chunk, embed, and retrieve beside the conversation index. Not wired. */
-}
-
-export interface SkillTemplate {
-  id: string;
-  name: string;
-  prompt: string;
-  tools: string[];
-  /** Shared across personas. Distinct from the three built-in persona templates. */
-}
-
-export interface ExternalTrigger {
-  id: string;
-  kind: 'email' | 'github' | 'file' | 'url';
-  /** Would start a run the way cron already does. */
-}
 
 export interface EvalCase {
   id: string;

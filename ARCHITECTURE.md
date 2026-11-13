@@ -95,6 +95,14 @@ Pasted keys are encrypted into `secret_captures` and stripped from the stored me
 
 Reveal checks the owner password and writes an audit row. Rotate re-seals. Revoke sets `revoked_at` and stops injection.
 
+## Library, skills, and triggers
+
+A knowledge collection is either shared or owned by one persona. Files are chunked on headings or declarations, then windowed with overlap. Embeddings come from Ollama `nomic-embed-text` when it answers, and from the local hash otherwise. Vectors live in a `sqlite-vec` table sized to the embedding, and search fuses that rank with BM25. `kb_search` returns numbered passages. A folder collection is re-indexed when the file hash changes.
+
+A skill is `data/skills/<slug>/SKILL.md` plus optional `scripts/` and `assets/`. The catalog (name and when-to-use line) is added to the persona prompt. `load_skill` returns the body only if that persona has the skill enabled. Each save keeps a version row.
+
+A trigger starts `startTurn`, the same checkpointed loop as chat and cron. Webhook calls check a per-trigger secret. GitHub calls check `X-Hub-Signature-256` over the raw body. A folder watch debounces. IMAP uses `EXAMINE` and `BODY.PEEK`, with the username and password read from the vault, and it has no send command.
+
 ## Auth
 
 Cookie sessions are signed and httpOnly. Bearer tokens (`la_…`) are stored as SHA-256 hashes for a future phone or video client. Cookie-authenticated writes must come from the same host. Bearer calls may come from another origin, without credentialed CORS. Login is rate-limited. There is no default password.

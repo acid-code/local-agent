@@ -18,7 +18,8 @@ import { indexText, retrieve, type VectorIndex } from './embeddings.js';
 import { countGeminiTokens, providerFor, type ModelProvider } from './providers.js';
 import type { Settings } from './settings.js';
 import { CODING_TOOLS } from './coding.js';
-import { toolsFor, type Tool, type ToolContext } from './tools.js';
+import { kbSearchTool, loadSkillTool, toolsFor, type Tool, type ToolContext } from './tools.js';
+import { skillCatalog } from './skills.js';
 import { CrashError, InterruptedToolError, StopError, clampText, now } from './util.js';
 import type { Vault } from './vault.js';
 
@@ -29,6 +30,7 @@ export class Engine {
   private readonly heldLarge = new Map<string, string>();
   residentLarge: string[] = [];
   extraTools: Tool[] = [];
+  libraryDir = '';
 
   constructor(
     private readonly store: Store,
@@ -495,7 +497,9 @@ export class Engine {
     const user = [...messages].reverse().find((message) => message.role === 'user');
     const retrieved = strategy === 'retrieval' ? retrieve(this.store, this.vectors, run.sessionId, user?.content ?? '', 4) : [];
     let budget = Math.min(model.contextWindow, model.practicalBudget);
-    const preambleGuess = `${agent.systemPrompt}\n${notes.map((note) => note.content).join('\n')}`;
+    const skillNote = skillCatalog(this.store, agent.id, user?.content ?? '');
+    const system = `${agent.systemPrompt}${skillNote}`;
+    const preambleGuess = `${system}\n${notes.map((note) => note.content).join('\n')}`;
     if (model.providerId === 'prov_gemini' && estimateTokens(preambleGuess, 'gemini') > budget * 0.75) {
       const key = process.env.GEMINI_API_KEY;
       if (key) {
@@ -505,7 +509,7 @@ export class Engine {
     }
     const plan = planContext({
       strategy, contextWindow: model.contextWindow, practicalBudget: budget, outputReserve: settings.outputReserveTokens,
-      system: agent.systemPrompt, pinned: notes.filter((note) => note.pinned).map((note) => note.content),
+      system, pinned: notes.filter((note) => note.pinned).map((note) => note.content),
       summaries, retrieved, tokenizer: model.tokenizer as 'gemma4',
       messages: messages.map((message) => ({ id: message.id, role: message.role as 'user', content: message.content })),
     });
@@ -564,8 +568,10 @@ export class Engine {
   private tools(agent: Agent, sessionMode?: string) {
     const names = new Set(agent.toolAllowlist);
     names.add('request_secret');
+    names.add('kb_search');
+    names.add('load_skill');
     if (sessionMode === 'code') for (const tool of CODING_TOOLS) names.add(tool.name);
-    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), ...this.extraTools];
+    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), kbSearchTool(), loadSkillTool(), ...this.extraTools];
     const seen = new Set<string>();
     return catalog.filter((tool) => {
       if (!names.has(tool.name) || seen.has(tool.name)) return false;
@@ -582,6 +588,7 @@ export class Engine {
       sandbox: settings.sandbox, store: this.store, depth: run.cursor.depth ?? 0,
       sessionId: run.sessionId, runId: run.id, codeApproval: settings.codeApproval,
       secretEnv: () => this.vault.envFor(agent.id, `run:${run.id}`),
+      libraryDir: this.libraryDir,
       consult: (name, question) => this.consult(run, name, question),
     };
   }
