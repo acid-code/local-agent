@@ -5,6 +5,7 @@ import path from 'node:path';
 import { scoreRisk, type Finding } from '@local-agent/shared';
 import type { McpServer, Store } from './db.js';
 import { mcpContainerSpec, type DockerCtl } from './docker.js';
+import { reputationSubject, runReputation, type ReputationCheck } from './reputation.js';
 import { nid, now } from './util.js';
 
 export interface ImportedMcp {
@@ -33,6 +34,7 @@ export interface VettingReport {
   score: number;
   level: string;
   llmReview?: string;
+  reputation?: ReputationCheck;
   createdAt: string;
   spec: ImportedMcp;
 }
@@ -91,7 +93,17 @@ export function guessPackage(spec: ImportedMcp): { ecosystem: VettingReport['eco
   return { ecosystem: command ? 'binary' : 'unknown', name: command || undefined };
 }
 
-export async function vetSpec(spec: ImportedMcp, fetchImpl: typeof fetch, llm?: (prompt: string) => Promise<string>): Promise<VettingReport> {
+export interface VetOptions {
+  llm?: (prompt: string) => Promise<string>;
+  /** Local SearXNG reputation search. On unless set false. */
+  reputation?: boolean;
+  searxngUrl?: string;
+  summarize?: (prompt: string) => Promise<string>;
+}
+
+export async function vetSpec(spec: ImportedMcp, fetchImpl: typeof fetch, options?: VetOptions | ((prompt: string) => Promise<string>)): Promise<VettingReport> {
+  const opts: VetOptions = typeof options === 'function' ? { llm: options } : options ?? {};
+  const llm = opts.llm;
   const guessed = guessPackage(spec);
   const findings: Finding[] = [];
   const permissions = new Set<string>();
@@ -185,10 +197,25 @@ export async function vetSpec(spec: ImportedMcp, fetchImpl: typeof fetch, llm?: 
   } else {
     findings.push({ severity: 'info', code: 'llm-review', detail: 'Optional model review was not run.' });
   }
+  let reputation: ReputationCheck | undefined;
+  if (opts.reputation !== false) {
+    const subject = reputationSubject(spec.name, guessed.name, repoUrl);
+    const ran = await runReputation({
+      subject: subject.subject,
+      repo: subject.repo,
+      fetchImpl,
+      searxngUrl: opts.searxngUrl,
+      summarize: opts.summarize,
+    });
+    reputation = ran.check;
+    findings.push(...ran.findings);
+  } else {
+    reputation = { enabled: false, skipped: true, queries: [], links: [] };
+  }
   const risk = scoreRisk(findings);
   return {
     id: nid('vet'), name: spec.name, ecosystem: guessed.ecosystem, packageName: guessed.name, version, publisher, license, repoUrl, stars, downloads,
-    permissions: [...permissions], findings, score: risk.score, level: risk.level, llmReview, createdAt: now(), spec,
+    permissions: [...permissions], findings, score: risk.score, level: risk.level, llmReview, reputation, createdAt: now(), spec,
   };
 }
 

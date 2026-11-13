@@ -40,6 +40,47 @@ const obj = (properties: Record<string, unknown>, required: string[] = []) => ({
   additionalProperties: false,
 });
 
+export interface SearchHit {
+  title: string;
+  url: string;
+  content: string;
+}
+
+/** SearXNG JSON search used by the web_search tool. No cloud search API. */
+export async function searxngSearch(base: string, query: string, fetchImpl: typeof fetch, signal?: AbortSignal): Promise<SearchHit[]> {
+  const root = base.replace(/\/$/, '');
+  if (!root) throw new Error('SearXNG is not configured. Start it from Setup.');
+  const response = await fetchImpl(`${root}/search?q=${encodeURIComponent(query)}&format=json`, {
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(12_000)]) : AbortSignal.timeout(12_000),
+  });
+  if (!response.ok) throw new Error(`SearXNG returned ${response.status}.`);
+  const json = await response.json() as { results?: { title?: string; url?: string; content?: string }[] };
+  return (json.results ?? []).slice(0, 6).map((result) => ({
+    title: result.title ?? '',
+    url: result.url ?? '',
+    content: result.content ?? '',
+  }));
+}
+
+/** Public page fetch used by the web_fetch tool. */
+export async function fetchPublicText(url: string, fetchImpl: typeof fetch, signal?: AbortSignal): Promise<string> {
+  const blocked = isBlockedUrl(url);
+  if (blocked) throw new Error(blocked);
+  const response = await fetchImpl(url, {
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000),
+    headers: { 'user-agent': 'local-agent/0.1' },
+  });
+  if (!response.ok) throw new Error(`Fetch returned ${response.status}.`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  const text = new TextDecoder().decode(bytes.slice(0, 500_000))
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text.slice(0, 12_000) || '(empty page)';
+}
+
 export const BUILTIN_TOOLS: Tool[] = [
   {
     name: 'list_dir',
@@ -126,15 +167,9 @@ export const BUILTIN_TOOLS: Tool[] = [
     mutates: () => false,
     approval: () => null,
     async execute(args, ctx) {
-      const base = ctx.searxngUrl.replace(/\/$/, '');
-      if (!base) throw new Error('SearXNG is not configured. Start it from Setup.');
-      const url = `${base}/search?q=${encodeURIComponent(String(args.query || ''))}&format=json`;
-      const response = await ctx.fetchImpl(url, { signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(12_000)]) });
-      if (!response.ok) throw new Error(`SearXNG returned ${response.status}.`);
-      const json = await response.json() as { results?: { title?: string; url?: string; content?: string }[] };
-      const results = (json.results ?? []).slice(0, 6);
+      const results = await searxngSearch(ctx.searxngUrl, String(args.query || ''), ctx.fetchImpl, ctx.signal);
       if (!results.length) return 'No results.';
-      return results.map((result, index) => `${index + 1}. ${result.title ?? ''}\n${result.url ?? ''}\n${result.content ?? ''}`).join('\n\n');
+      return results.map((result, index) => `${index + 1}. ${result.title}\n${result.url}\n${result.content}`).join('\n\n');
     },
   },
   {
@@ -144,15 +179,7 @@ export const BUILTIN_TOOLS: Tool[] = [
     mutates: () => false,
     approval: () => null,
     async execute(args, ctx) {
-      const target = String(args.url || '');
-      const blocked = isBlockedUrl(target);
-      if (blocked) throw new Error(blocked);
-      const response = await ctx.fetchImpl(target, { signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(15_000)]), headers: { 'user-agent': 'local-agent/0.1' } });
-      if (!response.ok) throw new Error(`Fetch returned ${response.status}.`);
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      const slice = bytes.slice(0, 500_000);
-      const text = new TextDecoder().decode(slice).replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-      return text.slice(0, 12_000) || '(empty page)';
+      return fetchPublicText(String(args.url || ''), ctx.fetchImpl, ctx.signal);
     },
   },
   {

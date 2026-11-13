@@ -12,6 +12,7 @@ import type { DockerCtl } from './docker.js';
 import { checklist, scanMachine, setupPreview } from './discovery.js';
 import type { McpRuntime } from './mcp.js';
 import { importConfigs, searchRegistry, vetSpec } from './mcp.js';
+import { localReputationSummarizer } from './reputation.js';
 import type { Notifier } from './notify.js';
 import { createBackup, listBackups, shipBackup, stageRestore } from './ops.js';
 import { previewPrune, runPrune, snapshotResources } from './resources.js';
@@ -368,8 +369,16 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   app.post('/api/mcp/vet', async (req) => {
     const body = parse(z.object({
       name: z.string(), command: z.string().optional(), args: z.array(z.string()).optional(), url: z.string().optional(), source: z.string().optional(),
+      reputation: z.boolean().optional(),
     }), req.body);
-    const report = await vetSpec({ name: body.name, transport: body.url ? 'http' : 'stdio', command: body.command, args: body.args, url: body.url, source: body.source || 'ui' }, fetchImpl);
+    const settings = store.getSettings();
+    const report = await vetSpec({
+      name: body.name, transport: body.url ? 'http' : 'stdio', command: body.command, args: body.args, url: body.url, source: body.source || 'ui',
+    }, fetchImpl, {
+      reputation: body.reputation !== false,
+      searxngUrl: settings.searxngUrl || process.env.SEARXNG_URL || '',
+      summarize: localReputationSummarizer(store, fetchImpl),
+    });
     store.saveVetting(report.id, report);
     return { report };
   });

@@ -140,7 +140,7 @@ Clones and pushes then work as `asaf` on the box. The phone never holds that key
 
 Projects you want a coder persona to touch have to be granted. They stay on the mini PC disk. In a coding chat, the agent calls `request_folder` with a path such as `/home/asaf/src/some-project`. You approve read or write. Until then, tools only see that persona’s workspace under `/opt/local-agent/data/workspaces/`.
 
-MCP servers are added in Tools. Import finds Cursor, Claude, VS Code, and `~/.config` configs on the mini PC. Each one stays off until you vet it. Stdio servers run in their own container. Do not put a raw token in the MCP form if you can keep it in the vault and let the agent’s shell use the handle. Env saved on an MCP server record is stored with that record, not in the encrypted vault.
+MCP servers are added in Tools. Import finds Cursor, Claude, VS Code, and `~/.config` configs on the mini PC. Each one stays off until you vet it. Vetting searches the public web through SearXNG on this box, not a cloud model, then asks the local model to summarize those pages into the risk score. If SearXNG is down, the approval card says so and can start it. You can skip that search for a single install. Stdio servers run in their own container. Do not put a raw token in the MCP form if you can keep it in the vault and let the agent’s shell use the handle. Env saved on an MCP server record is stored with that record, not in the encrypted vault.
 
 ## Laptop
 
