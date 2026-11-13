@@ -181,7 +181,9 @@ cat ~/.ssh/id_ed25519.pub
 
 Clones and pushes then work as `asaf` on the box. The phone never holds that key. A push still asks for approval in the UI or in Telegram.
 
-Projects you want a coder persona to touch have to be granted. They stay on the mini PC disk. In a coding chat, the agent calls `request_folder` with a path such as `/home/asaf/src/some-project`. You approve read or write. Until then, tools only see that persona’s workspace under `/opt/local-agent/data/workspaces/`.
+A workshop is how you work on more than one project in the same chat, the way a Cursor window can hold the server and the Android app together. In the chat list, open Workshop, give each folder a short label (`server`, `apk`) and its absolute path on the mini PC, and start the chat. The coder sees both trees in the prompt. File, shell, and git commands name the project (`server/src/index.ts`, git pull in `apk`). Pull and push wait for your approval. The turn is routed to a model that can code, and stays on a local one unless the usual rules escalate it. The folders have to already be on the box.
+
+A single folder can still be granted without a workshop. The agent calls `request_folder` with a path such as `/home/asaf/src/some-project`. You approve read or write. Until then, tools only see that persona’s workspace under `/opt/local-agent/data/workspaces/`.
 
 MCP servers are added in Tools. Import finds Cursor, Claude, VS Code, and `~/.config` configs on the mini PC. Each one stays off until you vet it. Vetting searches the public web through SearXNG on this box, not a cloud model, then asks the local model to summarize those pages into the risk score. If SearXNG is down, the approval card says so and can start it. You can skip that search for a single install. Stdio servers run in their own container. Do not put a raw token in the MCP form if you can keep it in the vault and let the agent’s shell use the handle. Env saved on an MCP server record is stored with that record, not in the encrypted vault.
 

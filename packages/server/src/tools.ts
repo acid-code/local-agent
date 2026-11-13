@@ -4,6 +4,7 @@ import path from 'node:path';
 import { assessCommand, isBlockedUrl, resolveInside } from '@local-agent/shared';
 import { formatCitations, searchKnowledge } from './kb.js';
 import { loadSkill } from './skills.js';
+import { locatePath, projectPath } from './workshops.js';
 import type { Agent } from './db.js';
 import type { DockerCtl } from './docker.js';
 import type { Store } from './db.js';
@@ -25,6 +26,7 @@ export interface ToolContext {
   secretEnv?: () => Record<string, string>;
   consult?: (name: string, question: string) => Promise<string>;
   libraryDir?: string;
+  roots?: { label: string; path: string }[];
 }
 
 export interface Tool {
@@ -87,27 +89,33 @@ export async function fetchPublicText(url: string, fetchImpl: typeof fetch, sign
 export const BUILTIN_TOOLS: Tool[] = [
   {
     name: 'list_dir',
-    description: 'List files in the agent workspace.',
-    parameters: obj({ path: { type: 'string', description: 'Relative directory. Defaults to the workspace root.' } }),
+    description: 'List files in the workspace, or in a workshop project when you pass its label (server, apk) or a path under it.',
+    parameters: obj({ path: { type: 'string', description: 'Project label, or a directory under it. Defaults to the only project, or lists every project.' } }),
     mutates: () => false,
     approval: () => null,
     async execute(args, ctx) {
-      const dir = await realInside(ctx.workspace, String(args.path || '.'));
-      const entries = await fs.readdir(dir, { withFileTypes: true });
+      const target = String(args.path || '');
+      if ((!target || target === '.') && (ctx.roots?.length ?? 0) > 1) {
+        return ctx.roots!.map((root) => `project ${root.label} ${root.path}`).join('\n');
+      }
+      const hit = locatePath({ workspace: ctx.workspace, roots: ctx.roots, target: target || '.' });
+      if (!hit) throw new Error('That folder is not in this workshop.');
+      const entries = await fs.readdir(hit.full, { withFileTypes: true });
       return entries.slice(0, 200).map((entry) => `${entry.isDirectory() ? 'dir ' : 'file'} ${entry.name}`).join('\n') || '(empty)';
     },
   },
   {
     name: 'read_file',
-    description: 'Read a text file inside the agent workspace.',
+    description: 'Read a text file in the workspace or a workshop project. Prefix the path with the project label, such as server/src/index.ts.',
     parameters: obj({ path: { type: 'string' } }, ['path']),
     mutates: () => false,
     approval: () => null,
     async execute(args, ctx) {
-      const file = await realInside(ctx.workspace, String(args.path || ''));
-      const stat = await fs.stat(file);
+      const hit = locatePath({ workspace: ctx.workspace, roots: ctx.roots, target: String(args.path || '') });
+      if (!hit) throw new Error('That file is not in this workshop.');
+      const stat = await fs.stat(hit.full);
       if (stat.size > 200_000) throw new Error('File is larger than 200 KB.');
-      return fs.readFile(file, 'utf8');
+      return fs.readFile(hit.full, 'utf8');
     },
   },
   {
@@ -117,16 +125,17 @@ export const BUILTIN_TOOLS: Tool[] = [
     mutates: () => true,
     approval: (args) => `Write ${args.path}`,
     async execute(args, ctx) {
-      const file = await realInside(ctx.workspace, String(args.path || ''));
-      await fs.mkdir(path.dirname(file), { recursive: true });
-      await fs.writeFile(file, String(args.content ?? ''), 'utf8');
-      return `Wrote ${path.relative(ctx.workspace, file)} (${String(args.content ?? '').length} bytes).`;
+      const hit = locatePath({ workspace: ctx.workspace, roots: ctx.roots, target: String(args.path || '') });
+      if (!hit?.write) throw new Error('That file is not in a writable project.');
+      await fs.mkdir(path.dirname(hit.full), { recursive: true });
+      await fs.writeFile(hit.full, String(args.content ?? ''), 'utf8');
+      return `Wrote ${hit.label ? `${hit.label}/` : ''}${path.relative(hit.root, hit.full)} (${String(args.content ?? '').length} bytes).`;
     },
   },
   {
     name: 'shell',
     description: 'Run a shell command. Docker sandbox when Docker is available, otherwise a workspace-jailed host process. Destructive commands need approval.',
-    parameters: obj({ command: { type: 'string' } }, ['command']),
+    parameters: obj({ command: { type: 'string' }, cwd: { type: 'string', description: 'Workshop project label, when this chat has more than one.' } }, ['command']),
     mutates: (args) => assessCommand(String(args.command || '')) !== 'ok',
     approval: (args) => {
       const command = String(args.command || '');
@@ -140,6 +149,7 @@ export const BUILTIN_TOOLS: Tool[] = [
       if (!command) throw new Error('Missing command.');
       if (command.length > 4000) throw new Error('Command is too long.');
       if (assessCommand(command) === 'blocked') throw new Error('That command is blocked.');
+      const cwd = (ctx.roots?.length ?? 0) > 0 ? projectPath(ctx.roots!, args.cwd ? String(args.cwd) : undefined, ctx.workspace) : ctx.workspace;
       if (ctx.sandbox !== 'host' && ctx.docker.available()) {
         const result = await ctx.docker.runCollect({
           Image: 'alpine:3.20',
@@ -153,14 +163,14 @@ export const BUILTIN_TOOLS: Tool[] = [
             CapDrop: ['ALL'],
             SecurityOpt: ['no-new-privileges:true'],
             NetworkMode: 'none',
-            Binds: [`${ctx.workspace}:/work`],
+            Binds: [`${cwd}:/work`],
             PidsLimit: 64,
           },
         });
         return `exit ${result.code}\n${result.output}`;
       }
       if (ctx.sandbox === 'docker-only') throw new Error('Docker sandbox is required and the Docker socket is not available.');
-      return hostJail(command, ctx);
+      return hostJail(command, ctx, cwd);
     },
   },
   {
@@ -328,10 +338,10 @@ async function realInside(root: string, relative: string) {
   }
 }
 
-function hostJail(command: string, ctx: ToolContext): Promise<string> {
+function hostJail(command: string, ctx: ToolContext, cwd = ctx.workspace): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn('bash', ['-lc', command], {
-      cwd: ctx.workspace,
+      cwd,
       env: { PATH: process.env.PATH || '/usr/bin:/bin', HOME: ctx.workspace, LANG: 'C.UTF-8', ...(ctx.secretEnv?.() ?? {}) },
       timeout: 20_000,
     });

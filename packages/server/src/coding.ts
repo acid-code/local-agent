@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { isInside } from '@local-agent/shared';
+import { locatePath, projectPath, type PathHit } from './workshops.js';
 import type { Store } from './db.js';
 import type { Tool, ToolContext } from './tools.js';
 import { nid, now } from './util.js';
@@ -102,13 +103,13 @@ export async function detectCodingClis(): Promise<string[]> {
   return found;
 }
 
-function allowedRoot(ctx: ToolContext, target: string): { root: string; write: boolean } | null {
-  const resolved = path.resolve(ctx.workspace, target);
-  if (isInside(ctx.workspace, resolved) || resolved === path.resolve(ctx.workspace)) return { root: ctx.workspace, write: true };
-  const grants = grantsFor(ctx.store, ctx.agent.id);
-  const hit = grants.find((grant) => isInside(grant.path, resolved) || path.resolve(grant.path) === resolved);
-  if (!hit) return null;
-  return { root: hit.path, write: hit.mode === 'write' };
+function allowedRoot(ctx: ToolContext, target: string): PathHit | null {
+  return locatePath({
+    workspace: ctx.workspace,
+    roots: ctx.roots,
+    grants: grantsFor(ctx.store, ctx.agent.id),
+    target,
+  });
 }
 
 export const CODING_TOOLS: Tool[] = [
@@ -141,8 +142,8 @@ export const CODING_TOOLS: Tool[] = [
     approval: () => null,
     async execute(args, ctx) {
       const root = allowedRoot(ctx, String(args.path || '.'));
-      if (!root) throw new Error('That folder is not granted.');
-      const hits = await walkGrep(root.root, String(args.pattern), 40);
+      if (!root) throw new Error('That folder is not in this workshop.');
+      const hits = await walkGrep(root.full, String(args.pattern), 40);
       return hits.join('\n') || 'No matches.';
     },
   },
@@ -154,9 +155,9 @@ export const CODING_TOOLS: Tool[] = [
     approval: () => null,
     async execute(args, ctx) {
       const root = allowedRoot(ctx, String(args.path || '.'));
-      if (!root) throw new Error('That folder is not granted.');
+      if (!root) throw new Error('That folder is not in this workshop.');
       const needle = String(args.pattern).replace(/\*/g, '').toLowerCase();
-      const hits = await walkNames(root.root, needle, 80);
+      const hits = await walkNames(root.full, needle, 80);
       return hits.join('\n') || 'No files.';
     },
   },
@@ -186,8 +187,8 @@ export const CODING_TOOLS: Tool[] = [
       for (const edit of edits) {
         const allowed = allowedRoot(ctx, edit.path);
         if (!allowed?.write) throw new Error(`Cannot write ${edit.path}.`);
-        const full = path.resolve(allowed.root, path.isAbsolute(edit.path) ? path.relative(allowed.root, edit.path) : edit.path);
-        if (!isInside(allowed.root, full)) throw new Error('Path escapes the granted folder.');
+        const full = allowed.full;
+        if (!isInside(allowed.root, full)) throw new Error('Path escapes the project.');
         let before: string | null = null;
         try { before = await fs.readFile(full, 'utf8'); } catch { before = null; }
         const after = before == null ? edit.replace : applySearchReplace(before, edit.search, edit.replace);
@@ -207,25 +208,34 @@ export const CODING_TOOLS: Tool[] = [
   },
   {
     name: 'git',
-    description: 'Git inside the workspace: status, diff, branch, commit, revert. Push always needs approval.',
-    parameters: obj({ action: { type: 'string' }, name: { type: 'string' }, message: { type: 'string' } }, ['action']),
+    description: 'Git in one workshop project: status, diff, branch, commit, pull, push, revert. Pass project when the workshop has several. Pull and push wait for approval.',
+    parameters: obj({ action: { type: 'string' }, project: { type: 'string' }, name: { type: 'string' }, message: { type: 'string' } }, ['action']),
     mutates: (args) => !['status', 'diff'].includes(String(args.action)),
     approval: (args) => {
       const action = String(args.action || '');
-      if (action === 'push' || action === 'revert') return `Git ${action}`;
+      if (action === 'push' || action === 'pull' || action === 'revert') return `Git ${action}${args.project ? ` in ${args.project}` : ''}`;
       return null;
     },
     async execute(args, ctx) {
       const action = String(args.action || '');
-      if (action === 'status') return git(ctx.workspace, ['status', '--short', '--branch']);
-      if (action === 'diff') return git(ctx.workspace, ['diff', '--', '.']);
-      if (action === 'branch') return git(ctx.workspace, ['checkout', '-b', String(args.name || '').trim() || 'agent']);
-      if (action === 'commit') {
-        await git(ctx.workspace, ['add', '-A']);
-        return git(ctx.workspace, ['-c', 'user.email=agent@local', '-c', 'user.name=local-agent', 'commit', '-m', String(args.message || 'agent edit')]);
+      const roots = ctx.roots ?? [];
+      const named = args.project ? String(args.project) : undefined;
+      if (action === 'status' && !named && roots.length > 1) {
+        const parts: string[] = [];
+        for (const root of roots) parts.push(`# ${root.label}\n${await git(root.path, ['status', '--short', '--branch'])}`);
+        return parts.join('\n');
       }
-      if (action === 'revert') return git(ctx.workspace, ['revert', '--no-edit', 'HEAD']);
-      if (action === 'push') return git(ctx.workspace, ['push']);
+      const cwd = projectPath(roots, named, ctx.workspace);
+      if (action === 'status') return git(cwd, ['status', '--short', '--branch']);
+      if (action === 'diff') return git(cwd, ['diff', '--', '.']);
+      if (action === 'branch') return git(cwd, ['checkout', '-b', String(args.name || '').trim() || 'agent']);
+      if (action === 'commit') {
+        await git(cwd, ['add', '-A']);
+        return git(cwd, ['-c', 'user.email=agent@local', '-c', 'user.name=local-agent', 'commit', '-m', String(args.message || 'agent edit')]);
+      }
+      if (action === 'pull') return git(cwd, ['pull', '--ff-only']);
+      if (action === 'revert') return git(cwd, ['revert', '--no-edit', 'HEAD']);
+      if (action === 'push') return git(cwd, ['push']);
       throw new Error('Unknown git action.');
     },
   },

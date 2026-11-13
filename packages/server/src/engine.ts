@@ -20,6 +20,8 @@ import type { Settings } from './settings.js';
 import { CODING_TOOLS } from './coding.js';
 import { kbSearchTool, loadSkillTool, toolsFor, type Tool, type ToolContext } from './tools.js';
 import { skillCatalog } from './skills.js';
+import { getWorkshop, workshopBrief } from './workshops.js';
+import { listSharedRepos, matchRepos, repoSyncTool, sharedRepoBrief } from './repos.js';
 import { CrashError, InterruptedToolError, StopError, clampText, now } from './util.js';
 import type { Vault } from './vault.js';
 
@@ -202,13 +204,15 @@ export class Engine {
   private async stepRoute(run: RunRow) {
     const agent = this.store.getAgent(run.agentId);
     if (!agent) throw new Error('Persona disappeared.');
-    const decision = this.choose(agent, run);
+    const staged = { ...run, cursor: { ...run.cursor, stage: stageFor(this.store, run) } };
+    const decision = this.choose(agent, staged);
     const cursor: RunCursor = {
       ...run.cursor,
       phase: 'context',
       modelId: decision.modelId,
       routingReason: decision.reason,
       switched: decision.switched,
+      stage: staged.cursor.stage,
       agentUpdatedAt: agent.updatedAt,
       configVersion: this.store.getSettings().version,
       weightNote: decision.unload.length ? `Unload ${decision.unload.join(', ')} before loading ${decision.modelName}.` : undefined,
@@ -238,7 +242,7 @@ export class Engine {
     await this.waitIfPaused(run.id, signal);
     const settings = this.store.getSettings();
     const sessionMode = this.store.getSession(run.sessionId)?.mode;
-    const maxSteps = sessionMode === 'code' ? Math.max(settings.maxSteps, 24) : settings.maxSteps;
+    const maxSteps = sessionMode === 'code' || run.cursor.stage ? Math.max(settings.maxSteps, 24) : settings.maxSteps;
     let current = this.store.getRun(run.id)!;
     if (current.cursor.turn >= maxSteps) {
       this.store.updateRun(run.id, { cursor: { ...current.cursor, phase: 'summarize' } });
@@ -275,7 +279,7 @@ export class Engine {
       this.bus.publish({ type: 'quota', runId: run.id, exhausted: true });
     }
     const provider = this.provider(model);
-    const tools = this.tools(agent, this.store.getSession(run.sessionId)?.mode).map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
+    const tools = this.tools(agent, this.store.getSession(run.sessionId)?.mode, current.cursor.stage).map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
     const step = this.store.addStep({
       runId: run.id, kind: 'model', name: model.name, status: 'running', input: { turn: current.cursor.turn, budget: built.plan.budgetTokens, estimated: built.plan.estimatedTokens, notes: built.plan.notes },
       output: null, toolCallId: null, turn: current.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now(),
@@ -327,11 +331,12 @@ export class Engine {
   private async stepTools(run: RunRow, signal: AbortSignal) {
     const calls = run.cursor.toolCalls ?? [];
     const completed = new Set(run.cursor.completedToolIds ?? []);
+    let handoff = false;
     for (const call of calls) {
       if (completed.has(call.id)) continue;
       await this.waitIfPaused(run.id, signal);
       if (signal.aborted) throw new StopError();
-      const tools = this.tools(this.store.getAgent(run.agentId)!, this.store.getSession(run.sessionId)?.mode);
+      const tools = this.tools(this.store.getAgent(run.agentId)!, this.store.getSession(run.sessionId)?.mode, run.cursor.stage);
       const tool = tools.find((item) => item.name === call.name);
       const args = parseArgs(call.arguments);
       const existing = this.store.findToolStep(run.id, call.id);
@@ -408,11 +413,15 @@ export class Engine {
         this.store.updateStep(step.id, { status: 'failed', error: message, endedAt: now(), latencyMs: Date.now() - started });
         this.persistTool(run, call, `Error: ${message}`, 'failed', false);
       }
+      if (call.name === 'plan' && Array.isArray(args.items) && args.items.length && run.cursor.stage === 'plan') handoff = true;
       completed.add(call.id);
       this.bumpTools(run.id, completed);
     }
     const latest = this.store.getRun(run.id)!;
-    const next: RunCursor = { ...latest.cursor, phase: latest.cursor.turn + 1 >= this.store.getSettings().maxSteps ? 'summarize' : 'model', turn: latest.cursor.turn + 1, toolCalls: undefined, completedToolIds: [], approvalId: undefined };
+    const turn = latest.cursor.turn + 1;
+    const next: RunCursor = handoff
+      ? { ...latest.cursor, phase: 'route', stage: 'implement', modelId: undefined, turn, toolCalls: undefined, completedToolIds: [], approvalId: undefined }
+      : { ...latest.cursor, phase: turn >= this.store.getSettings().maxSteps ? 'summarize' : 'model', turn, toolCalls: undefined, completedToolIds: [], approvalId: undefined };
     this.store.updateRun(run.id, { cursor: next, status: 'running' });
     this.checkpoint(run.id, next, 'Tools finished');
   }
@@ -444,6 +453,9 @@ export class Engine {
       busyLocalLarge: [...this.heldLarge.entries()].find(([id]) => id !== run.id)?.[1] ?? null,
       residentLarge: this.residentLarge,
       localFailures: this.localFailureCount(agent.id),
+      preferPlanner: run.cursor.stage === 'plan',
+      preferCode: run.cursor.stage === 'implement' || (session?.mode === 'code' && run.cursor.stage !== 'plan'),
+      implementing: run.cursor.stage === 'implement',
     });
     if (session && session.activeModelId !== decision.modelId) this.store.updateSession(session.id, { activeModelId: decision.modelId });
     return decision;
@@ -497,8 +509,15 @@ export class Engine {
     const user = [...messages].reverse().find((message) => message.role === 'user');
     const retrieved = strategy === 'retrieval' ? retrieve(this.store, this.vectors, run.sessionId, user?.content ?? '', 4) : [];
     let budget = Math.min(model.contextWindow, model.practicalBudget);
+    const session = this.store.getSession(run.sessionId);
+    const workshopNote = session?.workshopId ? workshopBrief(this.store, session.workshopId) : '';
+    const stageNote = run.cursor.stage === 'plan'
+      ? '\n\nYou are planning a change to a shared repo. Pull it with repo_sync, summarize what changed, and consult the coder persona with that summary if one exists. Search the web when the task depends on current facts. Save the plan with the plan tool. Do not edit files yet.'
+      : run.cursor.stage === 'implement'
+        ? '\n\nThe plan is saved. Implement it in the shared repos. Commit when the checks pass. Push only after the owner approves.'
+        : '';
     const skillNote = skillCatalog(this.store, agent.id, user?.content ?? '');
-    const system = `${agent.systemPrompt}${skillNote}`;
+    const system = `${agent.systemPrompt}${sharedRepoBrief(this.store)}${workshopNote}${stageNote}${skillNote}`;
     const preambleGuess = `${system}\n${notes.map((note) => note.content).join('\n')}`;
     if (model.providerId === 'prov_gemini' && estimateTokens(preambleGuess, 'gemini') > budget * 0.75) {
       const key = process.env.GEMINI_API_KEY;
@@ -565,13 +584,17 @@ export class Engine {
     }
   }
 
-  private tools(agent: Agent, sessionMode?: string) {
+  private tools(agent: Agent, sessionMode?: string, stage?: 'plan' | 'implement') {
     const names = new Set(agent.toolAllowlist);
     names.add('request_secret');
     names.add('kb_search');
     names.add('load_skill');
-    if (sessionMode === 'code') for (const tool of CODING_TOOLS) names.add(tool.name);
-    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), kbSearchTool(), loadSkillTool(), ...this.extraTools];
+    names.add('repo_sync');
+    if (stage === 'plan') {
+      for (const name of ['web_search', 'web_fetch', 'read_file', 'list_dir', 'grep', 'glob', 'plan', 'recall', 'consult_agent']) names.add(name);
+    }
+    if (stage === 'implement' || sessionMode === 'code') for (const tool of CODING_TOOLS) names.add(tool.name);
+    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), ...this.extraTools];
     const seen = new Set<string>();
     return catalog.filter((tool) => {
       if (!names.has(tool.name) || seen.has(tool.name)) return false;
@@ -589,6 +612,7 @@ export class Engine {
       sessionId: run.sessionId, runId: run.id, codeApproval: settings.codeApproval,
       secretEnv: () => this.vault.envFor(agent.id, `run:${run.id}`),
       libraryDir: this.libraryDir,
+      roots: turnRoots(this.store, run),
       consult: (name, question) => this.consult(run, name, question),
     };
   }
@@ -642,7 +666,7 @@ export class Engine {
     const safe = this.vault.redact(output);
     this.store.insertMessage({
       sessionId: run.sessionId, role: 'tool', content: safe, toolCallId: call.id, toolName: call.name, toolCalls: null,
-      agentId: run.agentId, runId: run.id, imageUrl: null, routingNote: null,
+      agentId: senderFor(this.store, run.agentId, call), runId: run.id, imageUrl: null, routingNote: null,
     });
     if (writeStep && status !== 'completed') {
       this.store.addStep({
@@ -785,6 +809,35 @@ export class Engine {
       this.approvalWaiters.set(id, finish);
     });
   }
+}
+
+function senderFor(store: Store, fallback: string, call: ToolCall) {
+  if (call.name !== 'consult_agent') return fallback;
+  const other = store.getAgentByName(String(parseArgs(call.arguments).agent || ''));
+  return other?.id || fallback;
+}
+
+function stageFor(store: Store, run: RunRow): 'plan' | 'implement' | undefined {
+  if ((run.cursor.depth ?? 0) > 0) return undefined;
+  if (run.cursor.stage === 'implement') return 'implement';
+  const session = store.getSession(run.sessionId);
+  const text = [...store.listMessages(run.sessionId)].reverse().find((message) => message.role === 'user')?.content ?? '';
+  const match = matchRepos(text, listSharedRepos(store));
+  if (session?.workshopId || match.wantsChange) return 'plan';
+  return undefined;
+}
+
+function turnRoots(store: Store, run: RunRow) {
+  const session = store.getSession(run.sessionId);
+  const write = run.cursor.stage === 'implement' || (session?.mode === 'code' && run.cursor.stage !== 'plan');
+  const roots = new Map<string, { label: string; path: string; write: boolean }>();
+  for (const repo of listSharedRepos(store)) roots.set(repo.path, { label: repo.label, path: repo.path, write });
+  if (session?.workshopId) {
+    for (const project of getWorkshop(store, session.workshopId)?.projects ?? []) {
+      roots.set(project.path, { label: project.label, path: project.path, write });
+    }
+  }
+  return [...roots.values()];
 }
 
 function requestSecretTool(): Tool {

@@ -29,6 +29,8 @@ import {
   type TriggerKind,
 } from './triggers.js';
 import { secret as randomSecret } from './util.js';
+import { createWorkshop, getWorkshop, listWorkshops } from './workshops.js';
+import { ACCENT_DEFAULT, FACES, accentOk, avatarPath, saveAvatar } from './avatars.js';
 import type { Bus } from './bus.js';
 import type { Engine } from './engine.js';
 import type { Store } from './db.js';
@@ -200,7 +202,12 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     return { ok: true };
   });
 
-  app.get('/api/agents', async () => ({ agents: store.listAgents(), templates: TEMPLATES }));
+  app.get('/api/agents', async () => ({ agents: store.listAgents(), templates: TEMPLATES, faces: FACES }));
+  app.post('/api/agents/reorder', async (req) => {
+    const body = parse(z.object({ ids: z.array(z.string()).min(1) }), req.body);
+    store.reorderAgents(body.ids);
+    return { agents: store.listAgents() };
+  });
   app.post('/api/agents', async (req) => {
     const body = parse(z.object({
       name: z.string().min(1).max(80),
@@ -231,10 +238,49 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       modelId: z.string().nullable().optional(), routing: z.enum(['auto', 'pinned']).optional(),
       strategy: z.enum(['rolling', 'hierarchical', 'pinned', 'retrieval']).nullable().optional(),
       toolAllowlist: z.array(z.string()).optional(), memoryEnabled: z.boolean().optional(),
+      title: z.string().max(80).optional(),
+      avatarKind: z.enum(['initials', 'builtin', 'upload']).optional(),
+      avatarRef: z.string().max(80).optional(),
+      accent: z.string().optional(),
+      emoji: z.string().max(16).optional(),
+      pinned: z.boolean().optional(),
+      hidden: z.boolean().optional(),
+      sortOrder: z.number().int().optional(),
+      workshopIds: z.array(z.string()).optional(),
     }), req.body);
+    if (body.accent && !accentOk(body.accent)) throw http(400, 'Accent colors look like #e4b56a.');
+    if (body.avatarKind === 'builtin' && body.avatarRef && !FACES.some((face) => face.id === body.avatarRef)) throw http(400, 'That face is not in the built-in set.');
     const agent = store.updateAgent((req.params as { id: string }).id, body);
     if (!agent) throw http(404, 'Persona not found.');
     return { agent };
+  });
+  app.get('/api/agents/:id', async (req) => {
+    const agent = store.getAgent((req.params as { id: string }).id);
+    if (!agent) throw http(404, 'Persona not found.');
+    return { agent };
+  });
+  app.post('/api/agents/:id/read', async (req) => {
+    store.markAgentRead((req.params as { id: string }).id);
+    return { ok: true };
+  });
+  app.post('/api/agents/:id/avatar', async (req) => {
+    const agent = store.getAgent((req.params as { id: string }).id);
+    if (!agent) throw http(404, 'Persona not found.');
+    const body = parse(z.object({ contentBase64: z.string().min(1) }), req.body);
+    const bytes = Buffer.from(body.contentBase64, 'base64');
+    let saved;
+    try { saved = saveAvatar(config.dataDir, agent.id, bytes); }
+    catch (error) { throw http(400, error instanceof Error ? error.message : 'Could not save that image.'); }
+    return { agent: store.updateAgent(agent.id, { avatarKind: 'upload', avatarRef: saved.file }) };
+  });
+  app.get('/api/agents/:id/avatar', async (req, reply) => {
+    const agent = store.getAgent((req.params as { id: string }).id);
+    if (!agent || agent.avatarKind !== 'upload') throw http(404, 'No uploaded face.');
+    const file = avatarPath(config.dataDir, agent.avatarRef);
+    if (!file) throw http(404, 'No uploaded face.');
+    const type = file.endsWith('.png') ? 'image/png' : file.endsWith('.webp') ? 'image/webp' : file.endsWith('.gif') ? 'image/gif' : 'image/jpeg';
+    reply.type(type);
+    return reply.send(fs.readFileSync(file));
   });
   app.delete('/api/agents/:id', async (req) => {
     store.deleteAgent((req.params as { id: string }).id);
@@ -258,6 +304,26 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     return { room: store.createRoom(body.name, body.agentIds) };
   });
 
+  app.get('/api/workshops', async () => ({ workshops: listWorkshops(store) }));
+  app.post('/api/workshops', async (req) => {
+    const body = parse(z.object({
+      name: z.string().min(1),
+      agentId: z.string().optional(),
+      projects: z.array(z.object({ label: z.string().min(1), path: z.string().min(1) })).min(1).max(8),
+    }), req.body);
+    let workshop;
+    try {
+      workshop = createWorkshop(store, body);
+    } catch (error) {
+      throw http(400, error instanceof Error ? error.message : 'Could not open that workshop.');
+    }
+    const coder = store.listAgents().find((agent) => agent.toolAllowlist.includes('git')) ?? store.listAgents()[0];
+    const agentId = body.agentId || coder?.id;
+    if (!agentId) throw http(400, 'Create a persona first. The coder is the one that should own a workshop.');
+    const session = store.createSession({ agentId, title: workshop.name });
+    store.updateSession(session.id, { mode: 'code', workshopId: workshop.id });
+    return { workshop, session: store.getSession(session.id) };
+  });
   app.get('/api/sessions', async () => ({ sessions: store.listSessions() }));
   app.post('/api/sessions', async (req) => {
     const body = parse(z.object({ agentId: z.string().optional(), roomId: z.string().optional(), title: z.string().optional(), mode: z.enum(['chat', 'code']).optional() }), req.body);
@@ -269,7 +335,8 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const id = (req.params as { id: string }).id;
     const session = store.getSession(id);
     if (!session) throw http(404, 'Chat not found.');
-    return { session, messages: store.listMessages(id), summaries: store.listSummaries(id), plan: readPlan(store, id), edits: listEdits(store, id), archived: store.listArchived(id) };
+    const workshop = session.workshopId ? getWorkshop(store, session.workshopId) : null;
+    return { session, messages: store.listMessages(id), summaries: store.listSummaries(id), plan: readPlan(store, id), edits: listEdits(store, id), archived: store.listArchived(id), workshop };
   });
   app.patch('/api/sessions/:id', async (req) => {
     const body = parse(z.object({ title: z.string().optional(), mode: z.enum(['chat', 'code']).optional() }), req.body);

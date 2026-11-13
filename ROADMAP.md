@@ -14,9 +14,11 @@ These work end to end:
 - Checkpoints, leases, heartbeats, resume, and retry-from-checkpoint. Mutating tools interrupted mid-flight are not repeated automatically.
 - Shell (Docker sandbox when the socket exists, otherwise a workspace jail), files, SearXNG search, fetch, Docker list/inspect/run/remove, and memory tools.
 - MCP import, registry browse, vetting, and a container spec for stdio servers.
-- Coding mode: editable plan, grep, glob, patch with a pre-image checkpoint and diff, git inside the workspace, folder grants, and an optional CLI handoff.
+- Coding mode: editable plan, grep, glob, patch with a pre-image checkpoint and diff, git (including pull and push, both approved), folder grants, and an optional CLI handoff.
+- Workshops: one coding chat over several project folders, with the project named on git, shell, and edits, and routing toward a model that can code.
 - Vault: encrypted secrets, mid-run prompt, handles only for the model, redaction, reveal-with-password, rotate, revoke, audit.
 - Setup checklist with preview-then-run actions, including a pull of `nomic-embed-text`, resource page with previewed prune, cron schedules, single-user login, API tokens, PWA shell.
+- Persona faces: a name, title, emoji, accent color, initials or a built-in face or an uploaded image stored on the box. The sidebar can pin, hide, and reorder them. Agent-to-agent messages wear the sender's face and color.
 - Knowledge base: drop files or a folder, structure-aware chunks with overlap, Ollama embeddings (`nomic-embed-text`, hash if Ollama is down), sqlite-vec plus BM25, per-agent or shared collections, re-index when the bytes change, size on the resource page, and a `kb_search` tool that cites sources.
 - Skills: `skills/<slug>/SKILL.md` with a name and a when-to-use description, optional scripts and assets, a shared catalog, per-agent enable, version history, and import/export. A persona loads a skill with `load_skill` when the description fits.
 - Triggers: a secret-protected webhook, a signature-checked GitHub webhook, a debounced folder watch, and a read-only IMAP poll whose password comes from the vault. Each one starts a normal checkpointed run. The page shows status, recent events, and a test fire.

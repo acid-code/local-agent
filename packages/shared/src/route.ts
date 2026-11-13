@@ -37,6 +37,12 @@ export interface RouteInput {
   residentLarge?: string[];
   /** Recent failed runs on a local model. Two or more is a reason to escalate. */
   localFailures?: number;
+  /** A workshop or coding session should use a model that can write code. */
+  preferCode?: boolean;
+  /** A smart model should pull, search, and write the plan before a coder edits. */
+  preferPlanner?: boolean;
+  /** The plan is already written and a coder should implement it. */
+  implementing?: boolean;
 }
 
 export interface RouteDecision {
@@ -102,7 +108,12 @@ function shouldEscalate(classified: Classification, localPick: RouteCandidate | 
 }
 
 export function decideRoute(input: RouteInput): RouteDecision {
-  const classified = classifyRequest(input.text, !!input.hasImage);
+  const raw = classifyRequest(input.text, !!input.hasImage);
+  const classified = input.preferPlanner && (raw.kind === 'chat' || raw.kind === 'code')
+    ? { ...raw, kind: 'research' as const, confidence: Math.max(raw.confidence, 0.72), signals: [...raw.signals, 'planner'] }
+    : input.preferCode && raw.kind === 'chat'
+      ? { ...raw, kind: 'code' as const, confidence: Math.max(raw.confidence, 0.7), signals: [...raw.signals, 'workshop'] }
+      : raw;
   const models = input.models.filter((model) => model.enabled);
   const fallback = models.find((model) => model.providerKind === 'rehearsal') ?? models[0];
   if (!fallback) {
@@ -127,9 +138,14 @@ export function decideRoute(input: RouteInput): RouteDecision {
 
   const session = byId(models, input.sessionModelId);
   const baseline = session ?? agent ?? byId(models, input.goodModelId);
+  const rank = input.preferPlanner
+    ? (model: RouteCandidate) => ((model.strengths.includes('research') || model.strengths.includes('hard-reasoning')) ? 40 : 0) + localRank(model)
+    : classified.kind === 'code'
+      ? (model: RouteCandidate) => (model.strengths.includes('code') ? 40 : 0) + localRank(model)
+      : localRank;
   const locals = models
     .filter((model) => model.local && model.providerKind !== 'rehearsal' && usable(model, classified.kind, input))
-    .sort((a, b) => localRank(b) - localRank(a));
+    .sort((a, b) => rank(b) - rank(a));
   const clouds = models
     .filter((model) => !model.local && model.providerKind !== 'rehearsal' && usable(model, classified.kind, input))
     .sort((a, b) => cloudRank(b, classified) - cloudRank(a, classified));
@@ -162,6 +178,17 @@ export function decideRoute(input: RouteInput): RouteDecision {
     pick = localPick;
     trace = 'prefer local';
     reason = `Switched to ${localPick.name} — ordinary turns stay on this machine.`;
+  }
+
+  if (input.preferCode && pick.strengths.includes('code') && baseline && pick.id !== baseline.id && trace === 'local by default') {
+    trace = 'workshop code';
+    reason = input.implementing
+      ? `Plan is set. Switched to ${pick.name} to implement it.`
+      : `Switched to ${pick.name} — this turn changes a project.`;
+  }
+  if (input.preferPlanner && baseline && pick.id !== baseline.id && trace === 'local by default') {
+    trace = 'workshop plan';
+    reason = `Planning on ${pick.name}. It will pull the repo, look at what changed, and write a plan. A coder model then implements it.`;
   }
 
   const switched = baseline ? pick.id !== baseline.id : false;

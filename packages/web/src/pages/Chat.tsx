@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, post } from '../lib/api';
 import { Markdown } from '../components/Markdown';
+import { Face, type FaceAgent } from '../components/Face';
 
-interface Session { id: string; title: string; agentId: string | null; mode: 'chat' | 'code' }
-interface Agent { id: string; name: string }
-interface Message { id: string; role: string; content: string; toolName?: string | null; routingNote?: string | null; toolCalls?: { name: string }[] | null }
+interface Session { id: string; title: string; agentId: string | null; mode: 'chat' | 'code'; workshopId?: string | null }
+interface ProjectDraft { label: string; path: string }
+interface Agent extends FaceAgent { id: string; name: string }
+interface Message { id: string; role: string; content: string; agentId?: string | null; toolName?: string | null; routingNote?: string | null; toolCalls?: { name: string }[] | null }
 interface Step { id: string; kind: string; name: string; status: string; latencyMs?: number; output?: unknown; error?: string | null }
 interface Plan { id: string; items: { id: string; text: string; status: string }[] }
 interface Edit { id: string; label: string; diff: string; revertedAt: string | null }
@@ -29,6 +31,9 @@ export function Chat() {
   const [voiceNote, setVoiceNote] = useState('');
   const recorder = useRef<MediaRecorder | null>(null);
   const [mode, setMode] = useState<'chat' | 'code'>('chat');
+  const [projects, setProjects] = useState<ProjectDraft[]>([{ label: 'server', path: '' }, { label: 'apk', path: '' }]);
+  const [shopName, setShopName] = useState('Server and app');
+  const [shopNote, setShopNote] = useState('');
   const [rail, setRail] = useState(false);
   const [trace, setTrace] = useState(false);
   const box = useRef<HTMLDivElement>(null);
@@ -51,12 +56,26 @@ export function Chat() {
     setEdits(data.edits);
     setMode(data.session.mode);
     setStreaming('');
+    if (data.session.agentId) await post(`/api/agents/${data.session.agentId}/read`, {}).catch(() => undefined);
   }
 
   useEffect(() => {
     const share = new URLSearchParams(window.location.search).get('share');
     if (share) setDraft(share);
-    refreshLists().then((rows) => { if (rows[0]) void openSession(rows[0].id); }).catch(() => undefined);
+    const persona = new URLSearchParams(window.location.search).get('persona');
+    refreshLists().then(async (rows) => {
+      if (persona) {
+        const existing = rows.find((session) => session.agentId === persona);
+        if (existing) await openSession(existing.id);
+        else {
+          const created = await post<{ session: Session }>('/api/sessions', { agentId: persona, title: 'New chat' });
+          await openSession(created.session.id);
+        }
+        await post(`/api/agents/${persona}/read`, {});
+        return;
+      }
+      if (rows[0]) void openSession(rows[0].id);
+    }).catch(() => undefined);
   }, []);
   useEffect(() => { box.current?.scrollTo({ top: box.current.scrollHeight }); }, [messages, streaming]);
 
@@ -85,6 +104,19 @@ export function Chat() {
     };
     return () => source.close();
   }, [runId]);
+
+  async function createWorkshop(event: { preventDefault(): void }) {
+    event.preventDefault();
+    const filled = projects.filter((project) => project.path.trim());
+    try {
+      const created = await post<{ session: Session }>('/api/workshops', { name: shopName, projects: filled });
+      setShopNote('');
+      await refreshLists();
+      await openSession(created.session.id);
+    } catch (error) {
+      setShopNote(error instanceof Error ? error.message : 'Could not open the workshop.');
+    }
+  }
 
   async function createChat(nextMode: 'chat' | 'code') {
     if (!agents[0]) return;
@@ -148,10 +180,26 @@ export function Chat() {
           <button className="btn" onClick={() => createChat('chat')}>New chat</button>
           <button className="btn" onClick={() => createChat('code')}>Code</button>
         </div>
+        <form className="card" onSubmit={createWorkshop}>
+          <strong>Workshop</strong>
+          <p className="faint">Several projects in one coding chat. The turn goes to a model that can code.</p>
+          <input value={shopName} onChange={(event) => setShopName(event.target.value)} placeholder="Name" />
+          {projects.map((project, index) => (
+            <div key={project.label + index} className="row">
+              <input value={project.label} onChange={(event) => setProjects((rows) => rows.map((row, i) => i === index ? { ...row, label: event.target.value } : row))} placeholder="label" />
+              <input value={project.path} onChange={(event) => setProjects((rows) => rows.map((row, i) => i === index ? { ...row, path: event.target.value } : row))} placeholder="/home/asaf/src/server" />
+            </div>
+          ))}
+          <div className="row">
+            <button className="btn" type="button" onClick={() => setProjects((rows) => [...rows, { label: '', path: '' }])}>Add project</button>
+            <button className="btn primary" type="submit">Open workshop</button>
+          </div>
+          {shopNote && <p className="muted">{shopNote}</p>}
+        </form>
         {sessions.map((session) => (
           <button key={session.id} className={session.id === current ? 'session-item active' : 'session-item'} onClick={() => openSession(session.id)}>
             <strong>{session.title}</strong>
-            <div className="faint">{session.mode === 'code' ? 'Coding' : 'Chat'}</div>
+            <div className="faint">{session.workshopId ? 'Workshop' : session.mode === 'code' ? 'Coding' : 'Chat'}</div>
           </button>
         ))}
         {agents.length < 2 && <p className="muted">Create two personas under Agents. The house operator and the researcher are one click each.</p>}
@@ -161,7 +209,7 @@ export function Chat() {
           <button className="btn ghost" onClick={() => setRail((value) => !value)}>Chats</button>
           <button className="btn ghost" onClick={() => setTrace((value) => !value)}>Trace</button>
           {status && <span className="badge">{status}</span>}
-          {mode === 'code' && <span className="badge warn">coding</span>}
+          {mode === 'code' && <span className="badge warn">{sessions.find((session) => session.id === current)?.workshopId ? 'workshop' : 'coding'}</span>}
         </div>
         <div className="messages" ref={box}>
           {messages.length === 0 && (
@@ -194,13 +242,17 @@ export function Chat() {
               </div>
             </form>
           )}
-          {messages.map((message) => (
-            <article key={message.id} className={message.role === 'user' ? 'msg user' : 'msg'}>
-              <div className="meta"><span>{message.role}</span>{message.toolName && <span className="mono">{message.toolName}</span>}</div>
+          {messages.map((message) => {
+            const speaker = message.agentId ? agents.find((agent) => agent.id === message.agentId) : undefined;
+            const fromAgent = message.role !== 'user' && speaker;
+            return (
+            <article key={message.id} className={message.role === 'user' ? 'msg user' : fromAgent ? 'msg from-agent' : 'msg'} style={fromAgent ? { ['--accent' as string]: speaker.accent || '#e4b56a' } : undefined}>
+              {fromAgent ? <div className="who"><Face agent={speaker} size={28} /><span className="meta">{speaker.emoji ? `${speaker.emoji} ` : ''}{speaker.name}{message.toolName ? ` · ${message.toolName}` : ''}</span></div> : <div className="meta"><span>{message.role}</span>{message.toolName && <span className="mono">{message.toolName}</span>}</div>}
               {message.routingNote && <div className="switch">{message.routingNote}</div>}
               {message.role === 'tool' ? <pre className="mono">{message.content}</pre> : <Markdown text={message.content} />}
             </article>
-          ))}
+            );
+          })}
           {streaming && <article className="msg"><Markdown text={streaming} streaming /></article>}
           {mode === 'code' && plan && (
             <div className="card">

@@ -64,4 +64,6 @@ export interface RunCursor {
   lastMessageId?: string;
   weightNote?: string;
   depth?: number;
+  /** Workshop or a change to a shared repo: plan first, then implement. */
+  stage?: 'plan' | 'implement';
 }

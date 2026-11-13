@@ -17,14 +17,16 @@ export interface ModelRow {
   family: string | null; source: string; embedding: boolean; freeTier: boolean | null; enabled: boolean;
 }
 export interface Agent {
-  id: string; name: string; slug: string; description: string; systemPrompt: string; modelId: string | null;
+  id: string; name: string; slug: string; title: string; description: string; systemPrompt: string; modelId: string | null;
   routing: 'auto' | 'pinned'; strategy: StrategyName | null; toolAllowlist: string[]; memoryEnabled: boolean;
-  workspacePath: string; createdAt: string; updatedAt: string;
+  workspacePath: string; avatarKind: 'initials' | 'builtin' | 'upload'; avatarRef: string; accent: string; emoji: string;
+  pinned: boolean; hidden: boolean; sortOrder: number; lastReadAt: string | null; unread: number; workshopIds: string[];
+  createdAt: string; updatedAt: string;
 }
 export interface Room { id: string; name: string; createdAt: string; agentIds: string[] }
 export interface Session {
   id: string; agentId: string | null; roomId: string | null; title: string; summary: string;
-  activeModelId: string | null; archived: boolean; mode: 'chat' | 'code'; createdAt: string; updatedAt: string;
+  activeModelId: string | null; archived: boolean; mode: 'chat' | 'code'; workshopId: string | null; createdAt: string; updatedAt: string;
 }
 export interface Message {
   id: string; sessionId: string; seq: number; role: string; content: string; toolCallId: string | null;
@@ -168,6 +170,18 @@ export class Store {
       CREATE TABLE IF NOT EXISTS plan_items (id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, position INTEGER NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL, note TEXT);
       CREATE TABLE IF NOT EXISTS edit_batches (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT, label TEXT NOT NULL, files TEXT NOT NULL, diff TEXT NOT NULL, created_at TEXT NOT NULL, reverted_at TEXT);
       CREATE TABLE IF NOT EXISTS folder_grants (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, path TEXT NOT NULL, mode TEXT NOT NULL, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS workshops (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS workshop_projects (
+        id TEXT PRIMARY KEY, workshop_id TEXT NOT NULL, label TEXT NOT NULL, path TEXT NOT NULL, created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS shared_repos (
+        id TEXT PRIMARY KEY, label TEXT NOT NULL UNIQUE, path TEXT NOT NULL, remote TEXT, created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS agent_workshops (
+        agent_id TEXT NOT NULL, workshop_id TEXT NOT NULL, PRIMARY KEY (agent_id, workshop_id)
+      );
       CREATE TABLE IF NOT EXISTS kb_collections (
         id TEXT PRIMARY KEY, name TEXT NOT NULL, agent_id TEXT, root_path TEXT, embedder TEXT NOT NULL,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -205,6 +219,18 @@ export class Store {
     `);
     const sessionCols = this.many<Raw>('PRAGMA table_info(chat_sessions)').map((row) => String(row.name));
     if (!sessionCols.includes('mode')) this.db.exec(`ALTER TABLE chat_sessions ADD COLUMN mode TEXT NOT NULL DEFAULT 'chat'`);
+    if (!sessionCols.includes('workshop_id')) this.db.exec(`ALTER TABLE chat_sessions ADD COLUMN workshop_id TEXT`);
+    const agentCols = this.many<Raw>('PRAGMA table_info(agents)').map((row) => String(row.name));
+    const addAgentCol = (name: string, ddl: string) => { if (!agentCols.includes(name)) this.db.exec(`ALTER TABLE agents ADD COLUMN ${ddl}`); };
+    addAgentCol('title', `title TEXT NOT NULL DEFAULT ''`);
+    addAgentCol('avatar_kind', `avatar_kind TEXT NOT NULL DEFAULT 'initials'`);
+    addAgentCol('avatar_ref', `avatar_ref TEXT NOT NULL DEFAULT ''`);
+    addAgentCol('accent', `accent TEXT NOT NULL DEFAULT '#e4b56a'`);
+    addAgentCol('emoji', `emoji TEXT NOT NULL DEFAULT ''`);
+    addAgentCol('pinned', `pinned INTEGER NOT NULL DEFAULT 0`);
+    addAgentCol('hidden', `hidden INTEGER NOT NULL DEFAULT 0`);
+    addAgentCol('sort_order', `sort_order INTEGER NOT NULL DEFAULT 0`);
+    addAgentCol('last_read_at', `last_read_at TEXT`);
     if (!this.one('SELECT id FROM settings WHERE id = 1')) {
       this.db.prepare('INSERT INTO settings (id, json, version, updated_at) VALUES (1, ?, 1, ?)').run(JSON.stringify(DEFAULT_SETTINGS), now());
     }
@@ -396,24 +422,51 @@ export class Store {
     const current = this.getAgent(id);
     if (!current) return null;
     const next = { ...current, ...patch, updatedAt: now() };
-    this.db.prepare(`UPDATE agents SET name=?, description=?, system_prompt=?, model_id=?, routing=?, strategy=?, tool_allowlist=?, memory_enabled=?, updated_at=? WHERE id=?`).run(
-      next.name, next.description, next.systemPrompt, next.modelId, next.routing, next.strategy, JSON.stringify(next.toolAllowlist), next.memoryEnabled ? 1 : 0, next.updatedAt, id,
+    this.db.prepare(`UPDATE agents SET name=?, title=?, description=?, system_prompt=?, model_id=?, routing=?, strategy=?, tool_allowlist=?, memory_enabled=?, avatar_kind=?, avatar_ref=?, accent=?, emoji=?, pinned=?, hidden=?, sort_order=?, updated_at=? WHERE id=?`).run(
+      next.name, next.title, next.description, next.systemPrompt, next.modelId, next.routing, next.strategy, JSON.stringify(next.toolAllowlist), next.memoryEnabled ? 1 : 0,
+      next.avatarKind, next.avatarRef, next.accent, next.emoji, next.pinned ? 1 : 0, next.hidden ? 1 : 0, next.sortOrder, next.updatedAt, id,
     );
+    if (patch.workshopIds) this.setAgentWorkshops(id, patch.workshopIds);
     return this.getAgent(id);
   }
 
+  setAgentWorkshops(agentId: string, workshopIds: string[]) {
+    this.db.prepare('DELETE FROM agent_workshops WHERE agent_id = ?').run(agentId);
+    const insert = this.db.prepare('INSERT INTO agent_workshops (agent_id, workshop_id) VALUES (?, ?)');
+    for (const workshopId of [...new Set(workshopIds)]) insert.run(agentId, workshopId);
+  }
+
+  reorderAgents(ids: string[]) {
+    ids.forEach((id, index) => this.db.prepare('UPDATE agents SET sort_order = ? WHERE id = ?').run(index, id));
+  }
+
+  markAgentRead(id: string) {
+    this.db.prepare('UPDATE agents SET last_read_at = ? WHERE id = ?').run(now(), id);
+  }
+
   listAgents(): Agent[] {
-    return this.many<Raw>('SELECT * FROM agents ORDER BY name').map(mapAgent);
+    return this.many<Raw>('SELECT * FROM agents ORDER BY pinned DESC, sort_order ASC, name').map((row) => this.hydrateAgent(row));
+  }
+
+  private hydrateAgent(row: Raw): Agent {
+    const agent = mapAgent(row);
+    const workshops = this.many<Raw>('SELECT workshop_id FROM agent_workshops WHERE agent_id = ?', agent.id);
+    agent.workshopIds = workshops.map((item) => String(item.workshop_id));
+    const since = agent.lastReadAt ?? '1970-01-01T00:00:00.000Z';
+    const unread = this.one<Raw>(`SELECT COUNT(*) AS n FROM messages m JOIN chat_sessions s ON s.id = m.session_id
+      WHERE s.agent_id = ? AND m.role = 'assistant' AND m.created_at > ?`, agent.id, since);
+    agent.unread = Number(unread?.n ?? 0);
+    return agent;
   }
 
   getAgent(id: string): Agent | null {
     const row = this.one<Raw>('SELECT * FROM agents WHERE id = ?', id);
-    return row ? mapAgent(row) : null;
+    return row ? this.hydrateAgent(row) : null;
   }
 
   getAgentByName(name: string): Agent | null {
     const row = this.one<Raw>('SELECT * FROM agents WHERE lower(name) = lower(?) OR slug = ?', name, slugify(name));
-    return row ? mapAgent(row) : null;
+    return row ? this.hydrateAgent(row) : null;
   }
 
   deleteAgent(id: string) {
@@ -461,12 +514,12 @@ export class Store {
     return row ? mapSession(row) : null;
   }
 
-  updateSession(id: string, patch: Partial<Pick<Session, 'title' | 'summary' | 'activeModelId' | 'archived' | 'mode'>>) {
+  updateSession(id: string, patch: Partial<Pick<Session, 'title' | 'summary' | 'activeModelId' | 'archived' | 'mode' | 'workshopId'>>) {
     const current = this.getSession(id);
     if (!current) return null;
     const next = { ...current, ...patch, updatedAt: now() };
-    this.db.prepare('UPDATE chat_sessions SET title=?, summary=?, active_model_id=?, archived=?, mode=?, updated_at=? WHERE id=?').run(
-      next.title, next.summary, next.activeModelId, next.archived ? 1 : 0, next.mode, next.updatedAt, id,
+    this.db.prepare('UPDATE chat_sessions SET title=?, summary=?, active_model_id=?, archived=?, mode=?, workshop_id=?, updated_at=? WHERE id=?').run(
+      next.title, next.summary, next.activeModelId, next.archived ? 1 : 0, next.mode, next.workshopId, next.updatedAt, id,
     );
     return this.getSession(id);
   }
@@ -880,10 +933,14 @@ function mapModel(row: Raw): ModelRow {
 }
 
 function mapAgent(row: Raw): Agent {
+  const kind = String(row.avatar_kind || 'initials');
   return {
-    id: String(row.id), name: String(row.name), slug: String(row.slug), description: String(row.description), systemPrompt: String(row.system_prompt),
+    id: String(row.id), name: String(row.name), slug: String(row.slug), title: String(row.title || ''), description: String(row.description), systemPrompt: String(row.system_prompt),
     modelId: row.model_id ? String(row.model_id) : null, routing: String(row.routing) as 'auto' | 'pinned', strategy: row.strategy ? String(row.strategy) as StrategyName : null,
     toolAllowlist: parseJson<string[]>(String(row.tool_allowlist), []), memoryEnabled: Boolean(row.memory_enabled), workspacePath: String(row.workspace_path),
+    avatarKind: kind === 'builtin' || kind === 'upload' ? kind : 'initials', avatarRef: String(row.avatar_ref || ''), accent: String(row.accent || '#e4b56a'), emoji: String(row.emoji || ''),
+    pinned: Boolean(row.pinned), hidden: Boolean(row.hidden), sortOrder: Number(row.sort_order || 0), lastReadAt: row.last_read_at ? String(row.last_read_at) : null,
+    unread: 0, workshopIds: [],
     createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   };
 }
@@ -892,7 +949,7 @@ function mapSession(row: Raw): Session {
   return {
     id: String(row.id), agentId: row.agent_id ? String(row.agent_id) : null, roomId: row.room_id ? String(row.room_id) : null,
     title: String(row.title), summary: String(row.summary ?? ''), activeModelId: row.active_model_id ? String(row.active_model_id) : null,
-    archived: Boolean(row.archived), mode: row.mode === 'code' ? 'code' : 'chat', createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+    archived: Boolean(row.archived), mode: row.mode === 'code' ? 'code' : 'chat', workshopId: row.workshop_id ? String(row.workshop_id) : null, createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   };
 }
 

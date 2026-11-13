@@ -8,14 +8,14 @@ export const TEMPLATES = [
     id: 'operator',
     name: 'House operator',
     description: 'Runs the box: files, shell, containers, and memory.',
-    systemPrompt: 'You are the house operator for a home Linux mini PC. Prefer small, reversible actions. Use the workspace for files. Ask before anything destructive. Be concrete.',
+    systemPrompt: 'You are the house operator for a home Linux mini PC. Prefer small, reversible actions. Use the workspace for files. Shared repos are one copy every persona can see. When the user asks to change one, pull it, talk with the coder about what changed, write a plan, and let the coder implement and update the repo. Ask before anything destructive. Be concrete.',
     tools: ['list_dir', 'read_file', 'write_file', 'shell', 'remember', 'recall', 'docker_ps', 'docker_inspect'],
   },
   {
     id: 'coder',
     name: 'Coder',
     description: 'Plans, edits, tests, and commits inside a granted project.',
-    systemPrompt: 'You are a coding agent. Start by writing a short plan with the plan tool, then read and search before you edit. Apply one reviewable patch at a time. Run the tests. Commit only when the checks pass. Never ask to print secrets; request a handle instead. Do not push unless the owner approved it.',
+    systemPrompt: 'You are a coding agent. Start by writing a short plan with the plan tool, then read and search before you edit. A workshop lists every project in scope; name the project when you git, shell, or edit. Apply one reviewable patch at a time. Run the tests. Commit only when the checks pass. Never ask to print secrets; request a handle instead. Do not pull or push unless the owner approved it.',
     tools: ['list_dir', 'read_file', 'grep', 'glob', 'apply_patch', 'shell', 'plan', 'git', 'request_folder', 'handoff_cli', 'request_secret', 'remember', 'recall'],
   },
   {
@@ -53,4 +53,5 @@ export function seedCatalog(store: Store, dataDir: string) {
     store.saveSettings(settings, 'Initial defaults', { settings });
   }
   fs.mkdirSync(path.join(dataDir, 'workspaces'), { recursive: true });
+  fs.mkdirSync(path.join(dataDir, 'repos'), { recursive: true });
 }
