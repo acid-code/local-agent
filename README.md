@@ -13,6 +13,8 @@ TypeScript, end to end.
 
 React, Vite, and Tailwind sit in `packages/web`. The server serves the built files in production. Dev mode runs Vite on port 5173 and the API on 8787.
 
+Day to day setup for the mini PC, the laptop, and the phone, including where API keys live, is in [SETUP.md](SETUP.md).
+
 ## Run it
 
 Docker, from this directory:
