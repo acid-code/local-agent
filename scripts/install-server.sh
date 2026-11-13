@@ -228,9 +228,34 @@ else
   run sudo -u "$APP_USER" bash -lc "cd '$INSTALL_ROOT' && docker compose pull || true"
   run sudo -u "$APP_USER" bash -lc "cd '$INSTALL_ROOT' && docker compose build"
 fi
+TOKEN_FILE="$INSTALL_ROOT/data/setup.token"
+USED_FILE="$INSTALL_ROOT/data/setup-token.used"
+HASH_FILE="$INSTALL_ROOT/data/setup-token.sha256"
+SETUP_TOKEN=""
+if [[ ! -f "$USED_FILE" && ! -f "$HASH_FILE" ]]; then
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "+ write a one-time setup token to $TOKEN_FILE (mode 600) and print it"
+  else
+    SETUP_TOKEN="$(openssl rand -hex 16)"
+    umask 077
+    printf '%s' "$SETUP_TOKEN" > "$TOKEN_FILE"
+    chown "$APP_USER:$APP_USER" "$TOKEN_FILE"
+    chmod 600 "$TOKEN_FILE"
+  fi
+fi
+
 run systemctl restart local-agent
 
-LAN="$(hostname -I 2>/dev/null | awk '{print $1}')"
+LAN=""
+LAN172=""
+for ip in $(hostname -I 2>/dev/null); do
+  case "$ip" in
+    10.*|192.168.*) LAN="$ip"; break ;;
+    172.17.*) ;;
+    172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) LAN172="${LAN172:-$ip}" ;;
+  esac
+done
+LAN="${LAN:-$LAN172}"
 TS=""
 if command -v tailscale >/dev/null 2>&1; then
   TS="$(tailscale ip -4 2>/dev/null | head -n 1 || true)"
@@ -242,4 +267,13 @@ if [[ -n "$TS" ]]; then
 else
   echo "Tailscale: not up. Install with --with-tailscale, then run: tailscale up"
 fi
-echo "First visit asks you to create the owner account. Do not forward port $PORT on the router."
+echo "Setup (LAN only): http://${LAN:-<lan-ip>}:8788"
+if [[ -n "$SETUP_TOKEN" ]]; then
+  echo "Setup token (one time): $SETUP_TOKEN"
+elif [[ "$DRY_RUN" -eq 1 ]]; then
+  echo "Setup token: a real run prints a one-time token, unless the owner account already exists."
+else
+  echo "Setup token: already issued. Sign in with the owner password."
+fi
+echo "The setup page answers only on private LAN addresses. Tailscale and public addresses are refused."
+echo "First visit on the LAN setup page creates the owner account. Do not forward port $PORT or 8788 on the router."

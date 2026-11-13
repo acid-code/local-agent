@@ -21,7 +21,25 @@ sudo bash scripts/install-server.sh --user asaf --with-ollama --with-tailscale
 
 `--dry-run` prints every command and changes nothing. `--native` installs Node 22 and runs the process directly. Without that flag the systemd unit runs `docker compose up`. `--user` is the Linux account that owns the files. It is created if it does not exist, and it is added to the `docker` group. Vulkan/Mesa (`mesa-vulkan-drivers`, `libvulkan1`) is installed for the Radeon 780M. A cookie secret is generated into `.env` only when that file is missing.
 
-The script prints the LAN URL and, once Tailscale is up, the Tailscale URL. Then finish `tailscale up` if you asked for Tailscale, and continue at “Create the owner account” below. The manual steps under that are the same work the script does, if you want to see each piece.
+The script prints the LAN URL, the Tailscale URL once Tailscale is up, and a one-time setup token. Then finish `tailscale up` if you asked for Tailscale. Open the LAN setup page next. The manual steps under that are the same packages the script installs, if you want to see each piece.
+
+### LAN setup site
+
+Keys, the owner password, Telegram, IMAP, model defaults, quotas, and backup targets are entered on a separate page. It listens on port 8788 and only on LAN addresses (RFC1918, link-local, and the machine itself). A request from Tailscale (`100.64.0.0/10`) or from a public address is refused. Docker publishes this page with host networking so the process sees the real client address and can bind those LAN interfaces. It is not mapped on `0.0.0.0`.
+
+From a laptop on the same network:
+
+```text
+http://<lan-ip>:8788
+```
+
+The installer prints a one-time token. Paste it on the first screen, then choose the owner username and password. The token stops working after that. Later visits use the owner password. If you start the server yourself and miss the token, it is also printed on the process stdout the first time.
+
+The wizard scans for a local model, then optionally saves a Gemini or OpenRouter key, a Telegram bot, IMAP, and a backup target. Test buttons check a key or send one Telegram message. Saving writes the encrypted vault and, for provider and Telegram values, `data/secrets.env` on this machine. Nothing on that form is synced, and the values are not returned to the page or given to a model. IMAP username and password stay in the vault. Host, port, and mailbox are ordinary settings.
+
+An extra network can be allowed with `LA_SETUP_ALLOW` (comma-separated IPs or CIDRs) in the environment. Leave the tailnet out of that list. Do not forward port 8788 on the router.
+
+If the app is already running in Docker, restart it after changing a provider key or Telegram token so the main process reloads `secrets.env`. A native install applies those values in the same process.
 
 To remove the service and keep the data and keys:
 
@@ -106,7 +124,9 @@ curl -s http://127.0.0.1:8787/api/health
 
 ### 3. Create the owner account
 
-On the LAN, from the laptop, open `http://<lan-ip>:8787`. The first screen is “Claim this machine.” Pick a username and a password of at least 8 characters. That account is stored only on the mini PC. There is no default password.
+Use the LAN setup page, `http://<lan-ip>:8788`, with the one-time token. That is also where provider keys, Telegram, IMAP, quotas, and backup targets belong. The chat UI on port 8787 can still claim the machine if you open it on the LAN before the setup page, but do not type keys into the chat UI from Tailscale.
+
+On the LAN, from the laptop, you can also open `http://<lan-ip>:8787`. The first screen is “Claim this machine.” Pick a username and a password of at least 8 characters. That account is stored only on the mini PC. There is no default password.
 
 If you would rather not use the LAN yet, tunnel it:
 
@@ -118,7 +138,7 @@ Then open `http://127.0.0.1:8787` on the laptop. The page is still the app on th
 
 ### 4. Put credentials on the box
 
-Two stores. Both stay on the mini PC.
+The LAN setup page is the place to type these. The same two stores are what it writes. Both stay on the mini PC.
 
 **Provider keys and Telegram** are plain env values in `/opt/local-agent/data/secrets.env`, mode `0600`. The Gemini client and the Telegram bot read these. They are not shown to a model. Write them over SSH so the value never sits in the laptop browser or in shell history:
 

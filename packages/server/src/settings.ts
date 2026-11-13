@@ -22,6 +22,9 @@ export interface Settings {
   backupCron: string;
   backupTransport: 'none' | 'rsync' | 'rclone' | 's3';
   backupTarget: string;
+  imapHost: string;
+  imapPort: number;
+  imapMailbox: string;
   agentLimits: Record<string, { maxTokensPerDay?: number; maxSpendUsd?: number; maxRunMs?: number; readOnly?: boolean }>;
 }
 
@@ -46,6 +49,9 @@ export const DEFAULT_SETTINGS: Settings = {
   backupCron: '0 3 * * *',
   backupTransport: 'none',
   backupTarget: '',
+  imapHost: '',
+  imapPort: 993,
+  imapMailbox: 'INBOX',
   agentLimits: {},
 };
 

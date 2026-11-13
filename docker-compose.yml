@@ -9,6 +9,7 @@ services:
       DATA_DIR: /data
       LA_HOST: 0.0.0.0
       LA_PORT: 8787
+      LA_DISABLE_SETUP: "1"
     volumes:
       - ./data:/data
       - /var/run/docker.sock:/var/run/docker.sock
@@ -17,6 +18,20 @@ services:
     # devices:
     #   - /dev/dri:/dev/dri
     #   - /dev/kfd:/dev/kfd
+
+  # Host network so the setup page sees real client addresses and can bind
+  # only to LAN interfaces. It is not published on 0.0.0.0.
+  setup:
+    build: .
+    network_mode: host
+    environment:
+      DATA_DIR: /data
+      LA_SETUP_ONLY: "1"
+      LA_SETUP_PORT: "8788"
+    volumes:
+      - ./data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
 
   whisper:
     profiles: ["voice"]
