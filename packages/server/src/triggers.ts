@@ -157,6 +157,7 @@ export function listTriggerEvents(store: Store, triggerId: string, limit = 8) {
 
 export async function fireTrigger(store: Store, engine: Engine, trigger: TriggerRecord, event: unknown, opts?: { test?: boolean; wait?: boolean }) {
   if (!trigger.enabled && !opts?.test) throw new Error('Trigger is off.');
+  if (!event || typeof event !== 'object' || Array.isArray(event)) throw new Error('A trigger event must be an object. The run was not started.');
   const content = renderTriggerPrompt(trigger.prompt, event);
   const session = store.createSession({ agentId: trigger.agentId, title: trigger.name });
   const run = await engine.startTurn({ sessionId: session.id, agentId: trigger.agentId, content, wait: opts?.wait ?? false });

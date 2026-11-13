@@ -71,8 +71,8 @@ describe('workshops', () => {
     expect(workshopBrief(store, body.workshop.id)).toMatch(/server/);
     expect(workshopBrief(store, body.workshop.id)).toMatch(/apk/);
     const gitTool = CODING_TOOLS.find((tool) => tool.name === 'git')!;
-    expect(gitTool.approval({ action: 'pull', project: 'apk' }, {} as ToolContext)).toMatch(/pull in apk/);
-    expect(gitTool.approval({ action: 'push' }, {} as ToolContext)).toMatch(/push/);
+    expect(gitTool.approval({ action: 'pull', project: 'apk' }, {} as ToolContext)).toMatch(/Pull apk/);
+    expect(gitTool.approval({ action: 'push' }, {} as ToolContext)).toMatch(/[Pp]ush/);
     const ctx = { workspace: dir, roots: body.workshop.projects, store, agent: store.listAgents()[0] } as ToolContext;
     await expect(gitTool.execute({ action: 'commit', message: 'x' }, ctx)).rejects.toThrow(/Name the project/);
     fs.mkdirSync(path.join(server, '.git'));

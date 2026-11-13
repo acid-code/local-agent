@@ -2,30 +2,9 @@ import { MODEL_REGISTRY, publicProfile } from '@local-agent/shared';
 import type { Store } from './db.js';
 import fs from 'node:fs';
 import path from 'node:path';
+import { personaTemplate } from './contracts.js';
 
-export const TEMPLATES = [
-  {
-    id: 'operator',
-    name: 'House operator',
-    description: 'Runs the box: files, shell, containers, and memory.',
-    systemPrompt: 'You are the house operator for a home Linux mini PC. Prefer small, reversible actions. Use the workspace for files. Shared repos are one copy every persona can see. When the user asks to change one, pull it, talk with the coder about what changed, write a plan, and let the coder implement and update the repo. Ask before anything destructive. Be concrete.',
-    tools: ['list_dir', 'read_file', 'write_file', 'shell', 'remember', 'recall', 'docker_ps', 'docker_inspect'],
-  },
-  {
-    id: 'coder',
-    name: 'Coder',
-    description: 'Plans, edits, tests, and commits inside a granted project.',
-    systemPrompt: 'You are a coding agent. Start by writing a short plan with the plan tool, then read and search before you edit. A workshop lists every project in scope; name the project when you git, shell, or edit. Apply one reviewable patch at a time. Run the tests. Commit only when the checks pass. Never ask to print secrets; request a handle instead. Do not pull or push unless the owner approved it.',
-    tools: ['list_dir', 'read_file', 'grep', 'glob', 'apply_patch', 'shell', 'plan', 'git', 'request_folder', 'handoff_cli', 'request_secret', 'remember', 'recall'],
-  },
-  {
-    id: 'researcher',
-    name: 'Researcher',
-    description: 'Searches, reads, and keeps pinned notes.',
-    systemPrompt: 'You are a careful researcher. Search and fetch before you claim a current fact. Pin durable findings to memory. Cite URLs you actually fetched.',
-    tools: ['web_search', 'web_fetch', 'list_dir', 'read_file', 'remember', 'recall', 'consult_agent'],
-  },
-];
+export const TEMPLATES = ['general', 'coder', 'planner', 'researcher', 'voice'].map((slug) => personaTemplate(slug));
 
 export function seedCatalog(store: Store, dataDir: string) {
   store.upsertProvider({ id: 'prov_rehearsal', kind: 'rehearsal', name: 'Rehearsal', enabled: true });

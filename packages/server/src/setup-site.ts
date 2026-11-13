@@ -9,6 +9,7 @@ import { scanMachine } from './discovery.js';
 import { isLanAddress } from './lan.js';
 import type { Store } from './db.js';
 import { consumeSetupToken, setupTokenValid } from './setup-token.js';
+import { contractWarnings } from './contracts.js';
 import type { Settings } from './settings.js';
 import type { Vault } from './vault.js';
 
@@ -56,7 +57,8 @@ export async function buildSetupApp(options: {
     const authed = owner ? await authenticate(options.store, req) : false;
     if (!owner) return { needsOwner: true, authenticated: false };
     if (!authed) return reply.code(401).send({ needsOwner: false, authenticated: false });
-    return { needsOwner: false, authenticated: true, ...publicState(options.store, options.vault) };
+    const warnings = contractWarnings(options.store.listModels().filter((model) => model.local && model.embedding).map((model) => model.name));
+    return { needsOwner: false, authenticated: true, warnings, ...publicState(options.store, options.vault) };
   });
 
   app.post('/api/setup/owner', async (req, reply) => {
@@ -142,6 +144,9 @@ export async function buildSetupApp(options: {
       imapHost: z.string().max(200).optional(),
       imapPort: z.number().int().optional(),
       imapMailbox: z.string().max(80).optional(),
+      gitName: z.string().max(80).optional(),
+      gitEmail: z.string().max(120).optional(),
+      gitSshKey: z.string().max(300).optional(),
       dailyTokenLimit: z.number().int().nullable().optional(),
       dailySpendLimitUsd: z.number().nullable().optional(),
     }), req.body);
@@ -185,6 +190,9 @@ function publicSettings(settings: Settings) {
     imapHost: settings.imapHost,
     imapPort: settings.imapPort,
     imapMailbox: settings.imapMailbox,
+    gitName: settings.gitName,
+    gitEmail: settings.gitEmail,
+    gitSshKey: settings.gitSshKey,
     dailyTokenLimit: settings.dailyTokenLimit,
     dailySpendLimitUsd: settings.dailySpendLimitUsd,
   };
@@ -199,6 +207,9 @@ function validateDefaults(store: Store, body: {
   imapHost?: string;
   imapPort?: number;
   imapMailbox?: string;
+  gitName?: string;
+  gitEmail?: string;
+  gitSshKey?: string;
   dailyTokenLimit?: number | null;
   dailySpendLimitUsd?: number | null;
 }): string | null {
@@ -225,6 +236,8 @@ function validateDefaults(store: Store, body: {
   if (body.imapHost && !/^[a-zA-Z0-9.-]+$/.test(body.imapHost)) return 'IMAP host should be a hostname.';
   if (body.imapPort != null && (body.imapPort < 1 || body.imapPort > 65535)) return 'IMAP port is out of range.';
   if (body.imapMailbox && !/^[A-Za-z0-9._-]+$/.test(body.imapMailbox)) return 'Mailbox names use letters, numbers, dots, and dashes.';
+  if (body.gitEmail && !/^[^\s@]+@[^\s@]+$/.test(body.gitEmail)) return 'Git email should look like a mailbox.';
+  if (body.gitSshKey && (!body.gitSshKey.startsWith('/') || /[\r\n]/.test(body.gitSshKey))) return 'The SSH key has to be an absolute path on this machine.';
   if (body.dailyTokenLimit != null && body.dailyTokenLimit < 1) return 'Daily token limit must be empty or at least 1.';
   if (body.dailySpendLimitUsd != null && body.dailySpendLimitUsd < 0) return 'Daily spend limit cannot be negative.';
   return null;
@@ -458,13 +471,18 @@ const PAGE = `<!doctype html>
       const s = state.settings || {};
       const options = (state.models || []).map((model) => '<option value="' + model.id + '"' + (model.id === s.goodModelId ? ' selected' : '') + '>' + model.name + '</option>').join('');
       const flags = (state.secrets || []).map((item) => item.key + ': ' + (item.set ? 'saved' : 'empty')).join(' · ');
-      show('<form class="card" id="f"><h2>Defaults</h2><p>' + flags + '</p>'
+      const warnings = (state.warnings || []).map((line) => '<p class="warn">' + line + '</p>').join('');
+      show(warnings + '<form class="card" id="f"><h2>Defaults</h2><p>' + flags + '</p>'
         + '<label>Default model</label><select name="goodModelId"><option value="">Automatic</option>' + options + '</select>'
         + '<label>Gemini tier</label><select name="geminiTier"><option' + (s.geminiTier !== 'paid' ? ' selected' : '') + '>free</option><option' + (s.geminiTier === 'paid' ? ' selected' : '') + '>paid</option></select>'
         + field('Backup cron', 'backupCron', 'text', s.backupCron || '0 3 * * *')
         + '<label>Backup transport</label><select name="backupTransport"><option>none</option><option>rsync</option><option>rclone</option><option>s3</option></select>'
         + field('Backup target', 'backupTarget', 'text', s.backupTarget || '')
         + field('Daily token cap', 'dailyTokenLimit', 'number', s.dailyTokenLimit || '')
+        + '<h3>Git</h3><p class="muted">Commits use this name and email. The SSH key is a path on the mini PC, not the key itself.</p>'
+        + field('Git name', 'gitName', 'text', s.gitName || 'local-agent')
+        + field('Git email', 'gitEmail', 'text', s.gitEmail || 'agent@local')
+        + field('SSH key path', 'gitSshKey', 'text', s.gitSshKey || '')
         + '<button>Save defaults</button><p id="msg"></p></form>'
         + '<form class="card" id="pw"><h2>Owner password</h2>' + field('Current', 'current', 'password') + field('New', 'next', 'password') + '<button>Change password</button><p id="pwmsg"></p></form>'
         + '<p><button class="ghost" id="wiz" type="button">Run the wizard again</button></p>');

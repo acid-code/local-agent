@@ -21,7 +21,8 @@ import { CODING_TOOLS } from './coding.js';
 import { kbSearchTool, loadSkillTool, toolsFor, type Tool, type ToolContext } from './tools.js';
 import { skillCatalog } from './skills.js';
 import { getWorkshop, workshopBrief } from './workshops.js';
-import { listSharedRepos, matchRepos, repoSyncTool, sharedRepoBrief } from './repos.js';
+import { checkOrRepair, contractForAgent, pickAutoRole, toolArgumentsSchema, toolParameters } from './contracts.js';
+import { addProjectNote, changesSince, ensureTaskBranch, isSmallEdit, listSharedRepos, matchRepos, refreshRepo, releaseRepoLocks, repoSyncTool, sharedRepoBrief, taskBranchName, tryLockRepo, type GitIdentity } from './repos.js';
 import { CrashError, InterruptedToolError, StopError, clampText, now } from './util.js';
 import type { Vault } from './vault.js';
 
@@ -110,6 +111,7 @@ export class Engine {
     } finally {
       clearInterval(beat);
       if (limitTimer) clearTimeout(limitTimer);
+      releaseRepoLocks(this.store, runId);
       this.heldLarge.delete(runId);
       this.inflight.delete(runId);
       this.bus.publish({ type: 'done', runId, run: this.store.getRun(runId) });
@@ -204,23 +206,33 @@ export class Engine {
   private async stepRoute(run: RunRow) {
     const agent = this.store.getAgent(run.agentId);
     if (!agent) throw new Error('Persona disappeared.');
-    const staged = { ...run, cursor: { ...run.cursor, stage: stageFor(this.store, run) } };
+    const stage = stageFor(this.store, run);
+    const prepared = await prepareRepos(this.store, run, stage);
+    const staged = { ...run, cursor: { ...run.cursor, stage: prepared.stage, syncNote: prepared.syncNote, branched: prepared.branched } };
     const decision = this.choose(agent, staged);
+    let reason = prepared.lockedOut || decision.reason;
+    let switched = prepared.lockedOut ? true : decision.switched;
+    if (prepared.stage === 'implement' && this.store.getSession(run.sessionId)?.mode !== 'code') {
+      reason = `Switched to coder mode on ${prepared.labels || 'this project'} — you asked to change it.`;
+      switched = true;
+    }
     const cursor: RunCursor = {
       ...run.cursor,
       phase: 'context',
       modelId: decision.modelId,
-      routingReason: decision.reason,
-      switched: decision.switched,
-      stage: staged.cursor.stage,
+      routingReason: reason,
+      switched,
+      stage: prepared.stage,
+      syncNote: prepared.syncNote,
+      branched: prepared.branched,
       agentUpdatedAt: agent.updatedAt,
       configVersion: this.store.getSettings().version,
       weightNote: decision.unload.length ? `Unload ${decision.unload.join(', ')} before loading ${decision.modelName}.` : undefined,
     };
-    this.store.updateRun(run.id, { cursor, modelId: decision.modelId, routingNote: decision.reason, switched: decision.switched, configVersion: cursor.configVersion });
+    this.store.updateRun(run.id, { cursor, modelId: decision.modelId, routingNote: reason, switched, configVersion: cursor.configVersion });
     this.store.addStep({
       runId: run.id, kind: 'routing', name: decision.modelName, status: 'completed', input: { kind: decision.kind, signals: decision.signals },
-      output: { reason: decision.reason, switched: decision.switched, trace: decision.trace, unload: decision.unload },
+      output: { reason, switched, trace: decision.trace, unload: decision.unload, autoRole: pickAutoRole(([...this.store.listMessages(run.sessionId)].reverse().find((message) => message.role === 'user')?.content) || '').role },
       toolCallId: null, turn: 0, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now(),
     });
     this.checkpoint(run.id, cursor, 'Routed');
@@ -338,7 +350,34 @@ export class Engine {
       if (signal.aborted) throw new StopError();
       const tools = this.tools(this.store.getAgent(run.agentId)!, this.store.getSession(run.sessionId)?.mode, run.cursor.stage);
       const tool = tools.find((item) => item.name === call.name);
-      const args = parseArgs(call.arguments);
+      let args = parseArgs(call.arguments);
+      const speaker = this.store.getAgent(run.agentId);
+      const contract = speaker ? contractForAgent(speaker.name) : null;
+      if (contract && contract.tools.length && !contract.tools.includes(call.name) && !['request_secret', 'kb_search', 'load_skill'].includes(call.name)) {
+        const message = `${contract.name} is not allowed to call ${call.name}.`;
+        this.store.addStep({ runId: run.id, kind: 'contract', name: call.name, status: 'failed', input: args, output: message, toolCallId: call.id, turn: run.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: message, startedAt: now() });
+        this.persistTool(run, call, message, 'failed');
+        completed.add(call.id);
+        this.bumpTools(run.id, completed);
+        continue;
+      }
+      const modelForRepair = run.modelId ? this.store.getModel(run.modelId) : null;
+      const checked = await checkOrRepair(toolArgumentsSchema(call.name), args, async (error) => {
+        if (!modelForRepair) throw new Error(error);
+        const text = await this.completeText(modelForRepair, `The tool call does not match its contract. ${error}\nOriginal: ${call.arguments}\nReply with one JSON object and nothing else.`);
+        const start = text.indexOf('{');
+        const end = text.lastIndexOf('}');
+        if (start < 0 || end < start) throw new Error('Repair did not return JSON.');
+        return JSON.parse(text.slice(start, end + 1));
+      });
+      if (!checked.ok) {
+        this.store.addStep({ runId: run.id, kind: 'contract', name: call.name, status: 'failed', input: args, output: checked.error, toolCallId: call.id, turn: run.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: checked.error, startedAt: now() });
+        this.persistTool(run, call, checked.error, 'failed');
+        completed.add(call.id);
+        this.bumpTools(run.id, completed);
+        continue;
+      }
+      args = checked.value as Record<string, unknown>;
       const existing = this.store.findToolStep(run.id, call.id);
       if (existing?.status === 'completed') {
         completed.add(call.id);
@@ -419,17 +458,31 @@ export class Engine {
     }
     const latest = this.store.getRun(run.id)!;
     const turn = latest.cursor.turn + 1;
-    const next: RunCursor = handoff
-      ? { ...latest.cursor, phase: 'route', stage: 'implement', modelId: undefined, turn, toolCalls: undefined, completedToolIds: [], approvalId: undefined }
-      : { ...latest.cursor, phase: turn >= this.store.getSettings().maxSteps ? 'summarize' : 'model', turn, toolCalls: undefined, completedToolIds: [], approvalId: undefined };
+    let next: RunCursor = { ...latest.cursor, phase: turn >= this.store.getSettings().maxSteps ? 'summarize' : 'model', turn, toolCalls: undefined, completedToolIds: [], approvalId: undefined };
+    if (handoff) {
+      const approval = this.store.createApproval({ runId: run.id, toolCallId: 'plan', toolName: 'plan', args: { stage: 'plan' }, reason: 'Start coding from this plan. Edit the plan first if you want to change it.' });
+      const waiting = { ...latest.cursor, phase: 'tools' as const, stage: 'plan' as const, approvalId: approval.id };
+      this.store.updateRun(run.id, { status: 'awaiting_approval', cursor: waiting });
+      this.checkpoint(run.id, waiting, 'Waiting for the plan');
+      this.bus.publish({ type: 'approval', runId: run.id, approval });
+      await this.waitApproval(approval.id, run.id, signal);
+      const decided = this.store.getApproval(approval.id);
+      next = decided?.status === 'approved'
+        ? { ...latest.cursor, phase: 'route', stage: 'implement', modelId: undefined, turn, toolCalls: undefined, completedToolIds: [], approvalId: undefined }
+        : { ...latest.cursor, phase: 'summarize', stage: 'plan', turn, toolCalls: undefined, completedToolIds: [], approvalId: undefined };
+    }
     this.store.updateRun(run.id, { cursor: next, status: 'running' });
-    this.checkpoint(run.id, next, 'Tools finished');
+    this.checkpoint(run.id, next, handoff ? 'Plan decision' : 'Tools finished');
   }
 
   private async stepSummarize(run: RunRow) {
     const agent = this.store.getAgent(run.agentId);
     const model = run.modelId ? this.store.getModel(run.modelId) : null;
     if (agent && model) await this.maybeFold(run.sessionId, agent, model).catch(() => undefined);
+    if (agent && run.cursor.stage === 'implement') {
+      const labels = turnRoots(this.store, run).map((root) => root.label);
+      for (const label of labels) addProjectNote(this.store, { label, agentId: agent.id, kind: 'change', body: `${agent.name} finished a change on ${label}.` });
+    }
     const cursor = { ...this.store.getRun(run.id)!.cursor, phase: 'done' as const };
     this.store.updateRun(run.id, { cursor, status: 'completed', endedAt: now() });
     this.checkpoint(run.id, cursor, 'Finished');
@@ -511,13 +564,14 @@ export class Engine {
     let budget = Math.min(model.contextWindow, model.practicalBudget);
     const session = this.store.getSession(run.sessionId);
     const workshopNote = session?.workshopId ? workshopBrief(this.store, session.workshopId) : '';
-    const stageNote = run.cursor.stage === 'plan'
+    const stageNote = run.cursor.syncNote ? `\n\nWhat changed since you last looked:\n${run.cursor.syncNote}` : '';
+    const roleNote = run.cursor.stage === 'plan'
       ? '\n\nYou are planning a change to a shared repo. Pull it with repo_sync, summarize what changed, and consult the coder persona with that summary if one exists. Search the web when the task depends on current facts. Save the plan with the plan tool. Do not edit files yet.'
       : run.cursor.stage === 'implement'
         ? '\n\nThe plan is saved. Implement it in the shared repos. Commit when the checks pass. Push only after the owner approves.'
         : '';
     const skillNote = skillCatalog(this.store, agent.id, user?.content ?? '');
-    const system = `${agent.systemPrompt}${sharedRepoBrief(this.store)}${workshopNote}${stageNote}${skillNote}`;
+    const system = `${agent.systemPrompt}${sharedRepoBrief(this.store)}${workshopNote}${stageNote}${roleNote}${skillNote}`;
     const preambleGuess = `${system}\n${notes.map((note) => note.content).join('\n')}`;
     if (model.providerId === 'prov_gemini' && estimateTokens(preambleGuess, 'gemini') > budget * 0.75) {
       const key = process.env.GEMINI_API_KEY;
@@ -600,7 +654,7 @@ export class Engine {
       if (!names.has(tool.name) || seen.has(tool.name)) return false;
       seen.add(tool.name);
       return true;
-    });
+    }).map((tool) => ({ ...tool, parameters: toolParameters(tool.name).properties ? toolParameters(tool.name) : tool.parameters }));
   }
 
   private contextFor(run: RunRow, signal: AbortSignal): ToolContext {
@@ -613,6 +667,7 @@ export class Engine {
       secretEnv: () => this.vault.envFor(agent.id, `run:${run.id}`),
       libraryDir: this.libraryDir,
       roots: turnRoots(this.store, run),
+      gitIdentity: gitIdentity(this.store.getSettings()),
       consult: (name, question) => this.consult(run, name, question),
     };
   }
@@ -823,8 +878,46 @@ function stageFor(store: Store, run: RunRow): 'plan' | 'implement' | undefined {
   const session = store.getSession(run.sessionId);
   const text = [...store.listMessages(run.sessionId)].reverse().find((message) => message.role === 'user')?.content ?? '';
   const match = matchRepos(text, listSharedRepos(store));
-  if (session?.workshopId || match.wantsChange) return 'plan';
-  return undefined;
+  const relevant = Boolean(session?.workshopId) || match.wantsChange;
+  if (!relevant) return undefined;
+  if (isSmallEdit(text)) return 'implement';
+  return 'plan';
+}
+
+function gitIdentity(settings: Settings): GitIdentity {
+  return { name: settings.gitName, email: settings.gitEmail, sshKey: settings.gitSshKey || undefined };
+}
+
+async function prepareRepos(store: Store, run: RunRow, stage: 'plan' | 'implement' | undefined) {
+  const session = store.getSession(run.sessionId);
+  const text = [...store.listMessages(run.sessionId)].reverse().find((message) => message.role === 'user')?.content ?? session?.title ?? 'task';
+  const all = listSharedRepos(store);
+  const workshop = session?.workshopId ? getWorkshop(store, session.workshopId) : null;
+  const labels = new Set((workshop?.projects ?? matchRepos(text, all).projects).map((project) => project.label));
+  const repos = all.filter((repo) => labels.has(repo.label));
+  let lockedOut = '';
+  const notes: string[] = [];
+  let branched = run.cursor.branched ?? false;
+  if (stage && !run.cursor.syncNote) {
+    for (const repo of repos) {
+      const lock = tryLockRepo(store, repo.label, run.id, run.agentId);
+      if (!lock.ok) {
+        lockedOut = `${repo.label} is being edited by ${lock.holder}. You can still read it.`;
+        continue;
+      }
+      notes.push(await refreshRepo(repo.path));
+      notes.push(await changesSince(store, repo, run.agentId));
+      if (stage === 'implement') notes.push(await ensureTaskBranch(repo.path, taskBranchName(text), gitIdentity(store.getSettings())));
+    }
+    if (stage === 'implement') branched = true;
+  }
+  return {
+    stage: lockedOut && stage === 'implement' ? undefined : stage,
+    syncNote: run.cursor.syncNote || notes.filter(Boolean).join('\n'),
+    branched,
+    lockedOut,
+    labels: repos.map((repo) => repo.label).join(' and '),
+  };
 }
 
 function turnRoots(store: Store, run: RunRow) {

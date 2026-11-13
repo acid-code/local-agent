@@ -181,6 +181,8 @@ cat ~/.ssh/id_ed25519.pub
 
 Clones and pushes then work as `asaf` on the box. The phone never holds that key. A push still asks for approval in the UI or in Telegram.
 
+What each shipped persona is allowed to read, write, and approve is in [docs/personas.md](docs/personas.md). The LAN setup page warns when a configured local model is an embedding model, because those cannot take tool calls.
+
 A workshop is how you work on more than one project in the same chat, the way a Cursor window can hold the server and the Android app together. In the chat list, open Workshop, give each folder a short label (`server`, `apk`) and its absolute path on the mini PC, and start the chat. The coder sees both trees in the prompt. File, shell, and git commands name the project (`server/src/index.ts`, git pull in `apk`). Pull and push wait for your approval. The turn is routed to a model that can code, and stays on a local one unless the usual rules escalate it. The folders have to already be on the box.
 
 A single folder can still be granted without a workshop. The agent calls `request_folder` with a path such as `/home/asaf/src/some-project`. You approve read or write. Until then, tools only see that persona’s workspace under `/opt/local-agent/data/workspaces/`.

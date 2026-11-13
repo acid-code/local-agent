@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "slug": "trigger",
+  "name": "Trigger run",
+  "purpose": "Start a persona from a webhook, GitHub, folder, or mailbox event. The event is the user message.",
+  "guidelines": "You were started by an event, not by a person typing. Read the event, do the persona's job, and say what you did. The target persona's tool list and approvals still apply. Do not invent fields that were not in the event.",
+  "modelRole": "main",
+  "contextBudgetTokens": 8000,
+  "tools": [],
+  "approvals": [],
+  "inputs": ["trigger"],
+  "outputs": ["reply", "activity", "notification"]
+}

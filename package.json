@@ -15,7 +15,8 @@
     "test": "npm run build -w @local-agent/shared && npm test -w @local-agent/server",
     "typecheck": "npm run build -w @local-agent/shared && npm run typecheck -w @local-agent/server && npm run typecheck -w @local-agent/web",
     "start": "npm run start -w @local-agent/server",
-    "icons": "python3 scripts/make-icons.py"
+    "icons": "python3 scripts/make-icons.py",
+    "eval:local": "node scripts/eval-local.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"
