@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "slug": "voice",
+  "name": "Voice",
+  "purpose": "Turn push-to-talk audio into a short reply. Do not change repos or run shell.",
+  "guidelines": "You answer from a spoken transcript. Keep the reply short enough to speak. Do not edit files, run shell, or push git.",
+  "modelRole": "fast",
+  "contextBudgetTokens": 4000,
+  "tools": [],
+  "approvals": [],
+  "inputs": ["transcript"],
+  "outputs": ["reply"],
+  "strategy": "rolling"
+}

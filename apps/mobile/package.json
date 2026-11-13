@@ -1,0 +1,19 @@
+{
+  "name": "local-agent-android",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Thin Capacitor shell for the local-agent web console.",
+  "scripts": {
+    "cap": "cap",
+    "sync": "cap sync android",
+    "open": "cap open android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^7.4.3",
+    "@capacitor/core": "^7.4.3"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.4.3",
+    "typescript": "^5.9.3"
+  }
+}

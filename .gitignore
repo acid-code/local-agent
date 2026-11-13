@@ -1,0 +1,16 @@
+node_modules
+dist
+data
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+.DS_Store
+coverage
+*.log
+*.keystore
+*.jks
+.vite

@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "persona": "router",
+      "input": { "text": "hello there" },
+      "expectRole": "fast"
+    },
+    {
+      "persona": "router",
+      "input": { "text": "summarize this in one line" },
+      "expectRole": "fast"
+    },
+    {
+      "persona": "router",
+      "input": { "text": "fix the typo in the server readme" },
+      "expectRole": "coder"
+    },
+    {
+      "persona": "router",
+      "input": { "text": "think harder about this design" },
+      "expectRole": "thinking"
+    },
+    {
+      "persona": "router",
+      "input": { "text": "/smart explain the failure" },
+      "expectRole": "cloud"
+    },
+    {
+      "persona": "planner",
+      "input": { "kind": "chat", "content": "Plan a readme fix for the server repo." },
+      "mockOutput": { "items": ["Read server/README.md", "Fix the install line", "Show the diff"] },
+      "expectOutput": "plan"
+    },
+    {
+      "persona": "coder",
+      "input": { "kind": "plan", "items": ["Fix the install line"] },
+      "mockOutput": { "content": "Updated the install line.", "diff": "--- a/README.md\n+++ b/README.md\n@@\n-old\n+new\n" },
+      "expectOutput": "patch",
+      "forbid": "push-without-approval"
+    },
+    {
+      "persona": "researcher",
+      "input": { "kind": "chat", "content": "What is SearXNG?" },
+      "mockOutput": { "content": "SearXNG is a local search service. Source: http://127.0.0.1:8088" },
+      "expectOutput": "reply"
+    },
+    {
+      "persona": "voice",
+      "input": { "kind": "transcript", "transcript": "remind me about the backup" },
+      "mockOutput": { "content": "Backups run at 3 in the morning." },
+      "expectOutput": "reply"
+    },
+    {
+      "persona": "trigger",
+      "input": { "kind": "github", "event": { "zen": "keep going" } },
+      "mockOutput": { "content": "GitHub said: keep going." },
+      "expectOutput": "reply"
+    },
+    {
+      "persona": "general",
+      "input": { "kind": "chat", "content": "how much disk is free?" },
+      "mockOutput": { "content": "I will check the resource page before I answer." },
+      "expectOutput": "reply"
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+services:
+  local-agent:
+    build: .
+    ports:
+      - "8787:8787"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      DATA_DIR: /data
+      LA_HOST: 0.0.0.0
+      LA_PORT: 8787
+      LA_DISABLE_SETUP: "1"
+    volumes:
+      - ./data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    # Uncomment on the mini PC so the container can see the Radeon iGPU.
+    # devices:
+    #   - /dev/dri:/dev/dri
+    #   - /dev/kfd:/dev/kfd
+
+  # Host network so the setup page sees real client addresses and can bind
+  # only to LAN interfaces. It is not published on 0.0.0.0.
+  setup:
+    build: .
+    network_mode: host
+    environment:
+      DATA_DIR: /data
+      LA_SETUP_ONLY: "1"
+      LA_SETUP_PORT: "8788"
+    volumes:
+      - ./data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+  whisper:
+    profiles: ["voice"]
+    image: fedirz/faster-whisper-server:latest-cpu
+    ports:
+      - "8091:8000"
+    restart: unless-stopped
+
+  kokoro:
+    profiles: ["voice"]
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
+    ports:
+      - "8880:8880"
+    restart: unless-stopped

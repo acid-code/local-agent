@@ -1,0 +1,27 @@
+name: ci
+on:
+  push:
+  pull_request:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run build
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Installer dry-run
+        run: |
+          bash -n scripts/install-server.sh
+          bash -n scripts/uninstall-server.sh
+          bash scripts/install-server.sh --dry-run --with-ollama --with-tailscale
+          bash scripts/uninstall-server.sh --dry-run --purge

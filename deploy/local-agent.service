@@ -1,0 +1,20 @@
+[Unit]
+Description=local-agent personal agent platform
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/local-agent
+Environment=NODE_ENV=production
+Environment=DATA_DIR=/opt/local-agent/data
+Environment=LA_HOST=0.0.0.0
+Environment=LA_PORT=8787
+EnvironmentFile=-/opt/local-agent/.env
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning /opt/local-agent/packages/server/dist/index.js
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
