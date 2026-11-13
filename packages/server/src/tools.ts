@@ -26,7 +26,8 @@ export interface ToolContext {
   secretEnv?: () => Record<string, string>;
   consult?: (name: string, question: string) => Promise<string>;
   libraryDir?: string;
-  roots?: { label: string; path: string }[];
+  roots?: { label: string; path: string; write?: boolean }[];
+  gitIdentity?: { name?: string; email?: string; sshKey?: string };
 }
 
 export interface Tool {

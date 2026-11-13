@@ -231,6 +231,19 @@ export class Store {
     addAgentCol('hidden', `hidden INTEGER NOT NULL DEFAULT 0`);
     addAgentCol('sort_order', `sort_order INTEGER NOT NULL DEFAULT 0`);
     addAgentCol('last_read_at', `last_read_at TEXT`);
+    const repoCols = this.many<Raw>('PRAGMA table_info(shared_repos)').map((row) => String(row.name));
+    if (!repoCols.includes('lock_run_id')) this.db.exec(`ALTER TABLE shared_repos ADD COLUMN lock_run_id TEXT`);
+    if (!repoCols.includes('lock_agent_id')) this.db.exec(`ALTER TABLE shared_repos ADD COLUMN lock_agent_id TEXT`);
+    if (!repoCols.includes('lock_at')) this.db.exec(`ALTER TABLE shared_repos ADD COLUMN lock_at TEXT`);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS project_notes (
+        id TEXT PRIMARY KEY, repo_label TEXT NOT NULL, agent_id TEXT, kind TEXT NOT NULL, body TEXT NOT NULL, sha TEXT, created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS repo_views (
+        repo_label TEXT NOT NULL, agent_id TEXT NOT NULL, last_sha TEXT NOT NULL, seen_at TEXT NOT NULL,
+        PRIMARY KEY (repo_label, agent_id)
+      );
+    `);
     if (!this.one('SELECT id FROM settings WHERE id = 1')) {
       this.db.prepare('INSERT INTO settings (id, json, version, updated_at) VALUES (1, ?, 1, ?)').run(JSON.stringify(DEFAULT_SETTINGS), now());
     }

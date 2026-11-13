@@ -25,6 +25,9 @@ export interface Settings {
   imapHost: string;
   imapPort: number;
   imapMailbox: string;
+  gitName: string;
+  gitEmail: string;
+  gitSshKey: string;
   agentLimits: Record<string, { maxTokensPerDay?: number; maxSpendUsd?: number; maxRunMs?: number; readOnly?: boolean }>;
 }
 
@@ -52,6 +55,9 @@ export const DEFAULT_SETTINGS: Settings = {
   imapHost: '',
   imapPort: 993,
   imapMailbox: 'INBOX',
+  gitName: 'local-agent',
+  gitEmail: 'agent@local',
+  gitSshKey: '',
   agentLimits: {},
 };
 

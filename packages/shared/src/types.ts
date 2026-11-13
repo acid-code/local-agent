@@ -66,4 +66,6 @@ export interface RunCursor {
   depth?: number;
   /** Workshop or a change to a shared repo: plan first, then implement. */
   stage?: 'plan' | 'implement';
+  syncNote?: string;
+  branched?: boolean;
 }

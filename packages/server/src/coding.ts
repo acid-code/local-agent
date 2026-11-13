@@ -1,8 +1,9 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { isInside } from '@local-agent/shared';
 import { locatePath, projectPath, type PathHit } from './workshops.js';
+import { addProjectNote, explainPull, git, pushApproval, tryLockRepo } from './repos.js';
 import type { Store } from './db.js';
 import type { Tool, ToolContext } from './tools.js';
 import { nid, now } from './util.js';
@@ -208,34 +209,58 @@ export const CODING_TOOLS: Tool[] = [
   },
   {
     name: 'git',
-    description: 'Git in one workshop project: status, diff, branch, commit, pull, push, revert. Pass project when the workshop has several. Pull and push wait for approval.',
+    description: 'Git in one shared project: status, diff, fetch, branch, commit, pull (fast-forward only), push, force-push, revert. Pass project when several are open. Pull, push, force-push, and revert wait for approval. A push to main or a force-push says so in the approval.',
     parameters: obj({ action: { type: 'string' }, project: { type: 'string' }, name: { type: 'string' }, message: { type: 'string' } }, ['action']),
-    mutates: (args) => !['status', 'diff'].includes(String(args.action)),
-    approval: (args) => {
+    mutates: (args) => !['status', 'diff', 'fetch'].includes(String(args.action)),
+    approval: (args, ctx) => {
       const action = String(args.action || '');
-      if (action === 'push' || action === 'pull' || action === 'revert') return `Git ${action}${args.project ? ` in ${args.project}` : ''}`;
+      if (action === 'revert') return `Git revert${args.project ? ` in ${args.project}` : ''}`;
+      if (action === 'pull') return `Pull ${args.project || 'the project'} (fast-forward only)`;
+      if (action === 'push' || action === 'force-push') {
+        try {
+          const cwd = projectPath(ctx?.roots ?? [], args.project ? String(args.project) : undefined, ctx?.workspace || '.');
+          const branch = execSyncBranch(cwd);
+          return pushApproval(branch, action === 'force-push');
+        } catch {
+          return pushApproval('the current branch', action === 'force-push');
+        }
+      }
       return null;
     },
     async execute(args, ctx) {
       const action = String(args.action || '');
       const roots = ctx.roots ?? [];
       const named = args.project ? String(args.project) : undefined;
+      const identity = ctx.gitIdentity;
       if (action === 'status' && !named && roots.length > 1) {
         const parts: string[] = [];
-        for (const root of roots) parts.push(`# ${root.label}\n${await git(root.path, ['status', '--short', '--branch'])}`);
+        for (const root of roots) parts.push(`# ${root.label}\n${await git(root.path, ['status', '--short', '--branch'], identity)}`);
         return parts.join('\n');
       }
       const cwd = projectPath(roots, named, ctx.workspace);
-      if (action === 'status') return git(cwd, ['status', '--short', '--branch']);
-      if (action === 'diff') return git(cwd, ['diff', '--', '.']);
-      if (action === 'branch') return git(cwd, ['checkout', '-b', String(args.name || '').trim() || 'agent']);
-      if (action === 'commit') {
-        await git(cwd, ['add', '-A']);
-        return git(cwd, ['-c', 'user.email=agent@local', '-c', 'user.name=local-agent', 'commit', '-m', String(args.message || 'agent edit')]);
+      const label = roots.find((root) => root.path === cwd)?.label;
+      if (label && !['status', 'diff', 'fetch'].includes(action)) {
+        const lock = tryLockRepo(ctx.store, label, ctx.runId || 'manual', ctx.agent.id);
+        if (!lock.ok) throw new Error(`${label} is being edited by ${lock.holder}. You can still read it.`);
       }
-      if (action === 'pull') return git(cwd, ['pull', '--ff-only']);
-      if (action === 'revert') return git(cwd, ['revert', '--no-edit', 'HEAD']);
-      if (action === 'push') return git(cwd, ['push']);
+      if (action === 'status') return git(cwd, ['status', '--short', '--branch'], identity);
+      if (action === 'diff') return git(cwd, ['diff', '--', '.'], identity);
+      if (action === 'fetch') return git(cwd, ['fetch'], identity);
+      if (action === 'branch') return git(cwd, ['checkout', '-b', String(args.name || '').trim() || 'agent/task'], identity);
+      if (action === 'commit') {
+        await git(cwd, ['add', '-A'], identity);
+        const message = String(args.message || 'agent edit');
+        const committed = await git(cwd, ['commit', '-m', message], identity);
+        if (label && /^exit 0\n/.test(committed)) {
+          const sha = (await git(cwd, ['rev-parse', '--short', 'HEAD'], identity)).replace(/^exit \d+\n/, '').trim();
+          addProjectNote(ctx.store, { label, agentId: ctx.agent.id, kind: 'change', body: `${ctx.agent.name}: ${message}`, sha });
+        }
+        return committed;
+      }
+      if (action === 'pull') return explainPull(await git(cwd, ['pull', '--ff-only'], identity));
+      if (action === 'revert') return git(cwd, ['revert', '--no-edit', 'HEAD'], identity);
+      if (action === 'push') return git(cwd, ['push'], identity);
+      if (action === 'force-push') return git(cwd, ['push', '--force-with-lease'], identity);
       throw new Error('Unknown git action.');
     },
   },
@@ -317,15 +342,9 @@ async function walkNames(root: string, needle: string, limit: number) {
   return hits.slice(0, limit);
 }
 
-function git(cwd: string, args: string[]) {
-  return new Promise<string>((resolve, reject) => {
-    const child = spawn('git', args, { cwd });
-    let out = '';
-    child.stdout.on('data', (chunk) => { out += String(chunk); });
-    child.stderr.on('data', (chunk) => { out += String(chunk); });
-    child.on('error', reject);
-    child.on('close', (code) => resolve(`exit ${code ?? 1}\n${out.slice(0, 12_000)}`));
-  });
+function execSyncBranch(cwd: string) {
+  const result = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd, encoding: 'utf8' });
+  return (result.stdout || 'HEAD').trim() || 'HEAD';
 }
 
 function onPath(command: string) {
