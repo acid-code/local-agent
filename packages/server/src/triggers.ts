@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import tls from 'node:tls';
@@ -155,18 +155,48 @@ export function listTriggerEvents(store: Store, triggerId: string, limit = 8) {
   }));
 }
 
+export function deliveryKey(event: unknown): string {
+  const record = event && typeof event === 'object' ? event as Record<string, unknown> : {};
+  const explicit = record.delivery ?? record.delivery_id ?? record.deliveryId;
+  if (typeof explicit === 'string' && explicit.trim()) return `id:${explicit.trim()}`;
+  return `hash:${createHash('sha256').update(stableJson(event)).digest('hex')}`;
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((item) => stableJson(item)).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value as Record<string, unknown>).sort().map((key) => `${JSON.stringify(key)}:${stableJson((value as Record<string, unknown>)[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
 export async function fireTrigger(store: Store, engine: Engine, trigger: TriggerRecord, event: unknown, opts?: { test?: boolean; wait?: boolean }) {
   if (!trigger.enabled && !opts?.test) throw new Error('Trigger is off.');
   if (!event || typeof event !== 'object' || Array.isArray(event)) throw new Error('A trigger event must be an object. The run was not started.');
+  const key = opts?.test ? null : deliveryKey(event);
+  if (key) {
+    const existing = store.db.prepare('SELECT run_id FROM trigger_events WHERE trigger_id = ? AND delivery_key = ?').get(trigger.id, key) as { run_id: string | null } | undefined;
+    if (existing) return { runId: existing.run_id, sessionId: null, duplicate: true };
+  }
+  const summary = opts?.test ? 'Test fire' : summarizeEvent(trigger.kind, event);
+  const eventId = nid('tev');
+  try {
+    store.db.prepare('INSERT INTO trigger_events (id, trigger_id, status, summary, payload, run_id, delivery_key, created_at) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)').run(
+      eventId, trigger.id, 'starting', summary, JSON.stringify(event).slice(0, 8000), key, now(),
+    );
+  } catch (error) {
+    if (key && error instanceof Error && /UNIQUE/i.test(error.message)) {
+      const existing = store.db.prepare('SELECT run_id FROM trigger_events WHERE trigger_id = ? AND delivery_key = ?').get(trigger.id, key) as { run_id: string | null } | undefined;
+      return { runId: existing?.run_id ?? null, sessionId: null, duplicate: true };
+    }
+    throw error;
+  }
   const content = renderTriggerPrompt(trigger.prompt, event);
   const session = store.createSession({ agentId: trigger.agentId, title: trigger.name });
   const run = await engine.startTurn({ sessionId: session.id, agentId: trigger.agentId, content, wait: opts?.wait ?? false });
-  const summary = opts?.test ? 'Test fire' : summarizeEvent(trigger.kind, event);
-  store.db.prepare('INSERT INTO trigger_events (id, trigger_id, status, summary, payload, run_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
-    nid('tev'), trigger.id, 'started', summary, JSON.stringify(event).slice(0, 8000), run.id, now(),
-  );
+  store.db.prepare('UPDATE trigger_events SET status = ?, run_id = ? WHERE id = ?').run('started', run.id, eventId);
   updateTrigger(store, trigger.id, { status: 'listening', lastError: null });
-  return { runId: run.id, sessionId: session.id };
+  return { runId: run.id, sessionId: session.id, duplicate: false };
 }
 
 function summarizeEvent(kind: string, event: unknown): string {

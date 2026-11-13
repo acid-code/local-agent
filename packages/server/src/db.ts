@@ -215,13 +215,19 @@ export class Store {
       );
       CREATE TABLE IF NOT EXISTS trigger_events (
         id TEXT PRIMARY KEY, trigger_id TEXT NOT NULL, status TEXT NOT NULL, summary TEXT NOT NULL,
-        payload TEXT NOT NULL, run_id TEXT, created_at TEXT NOT NULL
+        payload TEXT NOT NULL, run_id TEXT, delivery_key TEXT, created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS effect_keys (
+        key TEXT PRIMARY KEY, run_id TEXT NOT NULL, tool_call_id TEXT, action TEXT NOT NULL, result TEXT, created_at TEXT NOT NULL
       );
     `);
     const sessionCols = this.many<Raw>('PRAGMA table_info(chat_sessions)').map((row) => String(row.name));
     if (!sessionCols.includes('mode')) this.db.exec(`ALTER TABLE chat_sessions ADD COLUMN mode TEXT NOT NULL DEFAULT 'chat'`);
     if (!sessionCols.includes('workshop_id')) this.db.exec(`ALTER TABLE chat_sessions ADD COLUMN workshop_id TEXT`);
     if (!sessionCols.includes('model_pin')) this.db.exec(`ALTER TABLE chat_sessions ADD COLUMN model_pin TEXT`);
+    const triggerCols = this.many<Raw>('PRAGMA table_info(trigger_events)').map((row) => String(row.name));
+    if (!triggerCols.includes('delivery_key')) this.db.exec('ALTER TABLE trigger_events ADD COLUMN delivery_key TEXT');
+    this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS trigger_delivery ON trigger_events(trigger_id, delivery_key)');
     const logCols = this.many<Raw>('PRAGMA table_info(logs)').map((row) => String(row.name));
     if (!logCols.includes('component')) this.db.exec(`ALTER TABLE logs ADD COLUMN component TEXT NOT NULL DEFAULT 'engine'`);
     const agentCols = this.many<Raw>('PRAGMA table_info(agents)').map((row) => String(row.name));
@@ -280,7 +286,33 @@ export class Store {
   }
 
   createOwner(username: string, passwordHash: string) {
-    this.db.prepare('INSERT INTO owner (id, username, password_hash, created_at) VALUES (1, ?, ?, ?)').run(username, passwordHash, now());
+    this.transaction(() => {
+      const existing = this.db.prepare('SELECT id FROM owner WHERE id = 1').get();
+      if (existing) {
+        const error = new Error('An owner already exists.') as Error & { statusCode?: number };
+        error.statusCode = 409;
+        throw error;
+      }
+      this.db.prepare('INSERT INTO owner (id, username, password_hash, created_at) VALUES (1, ?, ?, ?)').run(username, passwordHash, now());
+    });
+  }
+
+  claimEffect(key: string, runId: string, toolCallId: string, action: string): { state: 'new' } | { state: 'done'; result: string } | { state: 'started' } {
+    return this.transaction(() => {
+      const existing = this.db.prepare('SELECT result FROM effect_keys WHERE key = ?').get(key) as { result: string | null } | undefined;
+      if (existing) return existing.result != null ? { state: 'done' as const, result: existing.result } : { state: 'started' as const };
+      this.db.prepare('INSERT INTO effect_keys (key, run_id, tool_call_id, action, result, created_at) VALUES (?, ?, ?, ?, NULL, ?)').run(key, runId, toolCallId, action, now());
+      return { state: 'new' as const };
+    });
+  }
+
+  finishEffect(key: string, result: string) {
+    this.db.prepare('UPDATE effect_keys SET result = ? WHERE key = ?').run(result, key);
+  }
+
+  lookupEffect(key: string): { result: string | null } | null {
+    const row = this.db.prepare('SELECT result FROM effect_keys WHERE key = ?').get(key) as { result: string | null } | undefined;
+    return row ? { result: row.result } : null;
   }
 
   createAuthSession(id: string, expiresAt: string) {

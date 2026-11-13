@@ -88,7 +88,12 @@ export async function buildSetupApp(options: {
     }), req.body);
     if (!setupTokenValid(options.dataDir, body.token)) return reply.code(401).send({ error: 'That setup token is not valid.' });
     if (body.password === body.token) return reply.code(400).send({ error: 'Use a password that is not the setup token.' });
-    options.store.createOwner(body.username, await hashPassword(body.password));
+    try {
+      options.store.createOwner(body.username, await hashPassword(body.password));
+    } catch (error) {
+      if (error instanceof Error && /already exists|UNIQUE/i.test(error.message)) return reply.code(409).send({ error: 'An owner already exists.' });
+      throw error;
+    }
     consumeSetupToken(options.dataDir);
     await setSession(reply, options.store);
     return { ok: true, username: body.username };

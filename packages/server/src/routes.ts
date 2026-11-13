@@ -8,7 +8,7 @@ import { FREE_TIER_OBSERVED_AT, FREE_TIER_SNAPSHOT, VERSION, geminiQuotaDay, nex
 import { authenticate, hashPassword, noteFailure, rateLimit, setSession, verifyPassword } from './auth.js';
 import { TEMPLATES } from './catalog.js';
 import { detectCodingClis, listEdits, readPlan, replacePlan, revertBatch, updatePlanItem } from './coding.js';
-import { secretNames, writeSecret } from './config.js';
+import { secretDrift, secretNames, writeSecret } from './config.js';
 import type { DockerCtl } from './docker.js';
 import { checklist, scanMachine, setupPreview } from './discovery.js';
 import type { McpRuntime } from './mcp.js';
@@ -65,13 +65,19 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const cookieOk = Boolean(req.cookies?.la_session);
     let authenticated = false;
     if (header?.startsWith('Bearer ') || cookieOk) authenticated = await authenticate(store, req);
-    return { needsSetup: !owner, authenticated, username: authenticated ? owner?.username : undefined, version: VERSION };
+    return { needsSetup: !owner, authenticated, username: authenticated ? owner?.username : undefined, version: VERSION, restartKeys: authenticated ? secretDrift(config.dataDir) : [] };
   });
 
   app.post('/api/setup', async (req, reply) => {
     if (store.getOwner()) return reply.code(409).send({ error: 'An owner already exists.' });
     const body = parse(z.object({ username: z.string().regex(/^[a-zA-Z0-9._-]{1,32}$/), password: z.string().min(8).max(200) }), req.body);
-    store.createOwner(body.username, await hashPassword(body.password));
+    try {
+      store.createOwner(body.username, await hashPassword(body.password));
+    } catch (error) {
+      const status = typeof error === 'object' && error && 'statusCode' in error ? Number((error as { statusCode?: number }).statusCode) : 0;
+      if (status === 409 || (error instanceof Error && /already exists|UNIQUE/i.test(error.message))) return reply.code(409).send({ error: 'An owner already exists.' });
+      throw error;
+    }
     await setSession(reply, store);
     store.addLog('info', `Owner ${body.username} created.`);
     return { username: body.username };

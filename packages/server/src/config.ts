@@ -17,6 +17,39 @@ export function repoRootFrom(cwd = process.cwd()): string {
   return cwd;
 }
 
+const loadedSecrets = new Map<string, string>();
+
+function readSecretFile(dataDir: string): Map<string, string> {
+  const file = path.join(dataDir, 'secrets.env');
+  const found = new Map<string, string>();
+  if (!fs.existsSync(file)) return found;
+  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq < 1) continue;
+    const key = trimmed.slice(0, eq).trim();
+    if (!/^[A-Z][A-Z0-9_]*$/.test(key)) continue;
+    found.set(key, trimmed.slice(eq + 1));
+  }
+  return found;
+}
+
+export function captureLoadedSecrets(dataDir: string) {
+  loadedSecrets.clear();
+  for (const [key, value] of readSecretFile(dataDir)) loadedSecrets.set(key, value);
+}
+
+export function noteSecretLoaded(key: string, value: string) {
+  loadedSecrets.set(key, value);
+}
+
+export function secretDrift(dataDir: string): string[] {
+  const file = readSecretFile(dataDir);
+  const keys = new Set([...loadedSecrets.keys(), ...file.keys()]);
+  return [...keys].filter((key) => (loadedSecrets.get(key) ?? '') !== (file.get(key) ?? '')).sort();
+}
+
 export function loadSecrets(dataDir: string) {
   const file = path.join(dataDir, 'secrets.env');
   if (!fs.existsSync(file)) return;
@@ -43,6 +76,7 @@ export function writeSecret(dataDir: string, key: string, value: string) {
   const next = `${lines.filter((line, index) => line || index === 0).join('\n').replace(/\n*$/, '\n')}`;
   fs.writeFileSync(file, next.endsWith('\n') ? next : `${next}\n`, { mode: 0o600 });
   process.env[key] = value;
+  noteSecretLoaded(key, value);
 }
 
 export function secretNames(dataDir: string): { key: string; set: boolean }[] {
@@ -64,6 +98,7 @@ export function loadConfig(partial?: { dataDir?: string; port?: number }): AppCo
   fs.mkdirSync(dataDir, { recursive: true });
   fs.mkdirSync(path.join(dataDir, 'workspaces'), { recursive: true });
   loadSecrets(dataDir);
+  captureLoadedSecrets(dataDir);
   const secretFile = path.join(dataDir, 'cookie.secret');
   let cookieSecret = process.env.LA_COOKIE_SECRET || '';
   if (!cookieSecret) {

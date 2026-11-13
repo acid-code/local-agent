@@ -27,7 +27,7 @@ import { countGeminiTokens, ollamaNumCtx, providerFor, type ModelProvider } from
 import type { Settings } from './settings.js';
 import { CODING_TOOLS } from './coding.js';
 import { kbSearchTool, loadSkillTool, toolsFor, type Tool, type ToolContext } from './tools.js';
-import { skillCatalog } from './skills.js';
+import { runSkillScript, skillCatalog } from './skills.js';
 import { getWorkshop, workshopBrief } from './workshops.js';
 import { checkOrRepair, contractForAgent, pickAutoRole, toolArgumentsSchema, toolParameters } from './contracts.js';
 import { addProjectNote, changesSince, ensureTaskBranch, isSmallEdit, listSharedRepos, matchRepos, refreshRepo, releaseRepoLocks, repoSyncTool, sharedRepoBrief, taskBranchName, tryLockRepo, type GitIdentity } from './repos.js';
@@ -381,6 +381,16 @@ export class Engine {
           return;
         }
       }
+      if (isProviderOutage(message) && !current.cursor.providerFallback) {
+        const local = this.candidates(this.store.getSettings()).find((item) => item.local && item.id !== model.id);
+        this.store.updateStep(step.id, { status: 'failed', error: message, endedAt: now(), latencyMs: Date.now() - started });
+        if (local) {
+          const reason = `Switched to ${local.name} — ${model.name} returned ${message.match(/429|5\d\d/)?.[0] || 'an error'}.`;
+          this.store.addLog('warn', reason, undefined, 'providers');
+          this.store.updateRun(run.id, { cursor: { ...current.cursor, modelId: local.id, providerFallback: true, phase: 'model', switched: true, routingReason: reason }, modelId: local.id, switched: true, routingNote: reason });
+          return;
+        }
+      }
       this.store.updateStep(step.id, { status: 'failed', error: message, endedAt: now(), latencyMs: Date.now() - started });
       throw error;
     }
@@ -450,7 +460,21 @@ export class Engine {
         continue;
       }
       if (existing?.status === 'running' && tool?.mutates(args)) {
-        throw new InterruptedToolError(`Tool ${call.name} was interrupted after it started. It was not repeated. Retry that step explicitly if the side effect should happen again.`);
+        const prior = this.store.lookupEffect(`${run.id}:${call.id}:${String(args.action || call.name)}`);
+        if (prior?.result) {
+          this.store.updateStep(existing.id, { status: 'completed', output: prior.result, endedAt: now() });
+          this.persistTool(run, call, prior.result, 'completed', false);
+          completed.add(call.id);
+          this.bumpTools(run.id, completed);
+          continue;
+        }
+        const note = prior
+          ? `${call.name} already started. It was not repeated.`
+          : `Tool ${call.name} was interrupted after it started. It was not repeated. Retry that step explicitly if the side effect should happen again.`;
+        this.persistTool(run, call, note, 'failed');
+        completed.add(call.id);
+        this.bumpTools(run.id, completed);
+        continue;
       }
       if (!tool) {
         this.persistTool(run, call, `Unknown tool ${call.name}.`, 'failed');
@@ -508,7 +532,7 @@ export class Engine {
       });
       const started = Date.now();
       try {
-        const output = this.vault.redact(clampText(await tool.execute(args, this.contextFor(run, signal)), 16_000));
+        const output = this.vault.redact(clampText(await tool.execute(args, { ...this.contextFor(run, signal), toolCallId: call.id }), 200_000));
         this.store.updateStep(step.id, { status: 'completed', output, latencyMs: Date.now() - started, endedAt: now() });
         this.persistTool(run, call, output, 'completed', false);
         this.bus.publish({ type: 'step', runId: run.id, step: this.store.getStep(step.id) });
@@ -787,6 +811,7 @@ export class Engine {
     const names = new Set(agent.toolAllowlist);
     names.add('request_secret');
     names.add('read_output');
+    names.add('run_skill_script');
     names.add('kb_search');
     names.add('load_skill');
     names.add('repo_sync');
@@ -794,7 +819,7 @@ export class Engine {
       for (const name of ['web_search', 'web_fetch', 'read_file', 'list_dir', 'grep', 'glob', 'plan', 'recall', 'consult_agent']) names.add(name);
     }
     if (stage === 'implement' || sessionMode === 'code') for (const tool of CODING_TOOLS) names.add(tool.name);
-    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), ...this.extraTools];
+    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), ...this.extraTools];
     const seen = new Set<string>();
     return catalog.filter((tool) => {
       if (!names.has(tool.name) || seen.has(tool.name)) return false;
@@ -1059,6 +1084,10 @@ function stageFor(store: Store, run: RunRow): 'plan' | 'implement' | undefined {
   return 'plan';
 }
 
+function isProviderOutage(message: string): boolean {
+  return /\(429\)|\(5\d\d\)|status 429|status 5\d\d|rate limit|too many requests/i.test(message);
+}
+
 function strategyFor(agent: Agent, model: ModelRow, autoRole?: string) {
   if (autoRole === 'fast') return 'pinned' as const;
   if (agent.strategy) return agent.strategy;
@@ -1112,6 +1141,23 @@ function turnRoots(store: Store, run: RunRow) {
     }
   }
   return [...roots.values()];
+}
+
+function skillScriptTool(): Tool {
+  return {
+    name: 'run_skill_script',
+    description: 'Run a script from a skill folder. A script that exceeds the time limit is killed, and the turn continues.',
+    parameters: { type: 'object', properties: { path: { type: 'string' }, timeoutMs: { type: 'number' } }, required: ['path'] },
+    mutates: () => true,
+    approval: () => null,
+    async execute(args) {
+      const file = String(args.path || '');
+      const result = await runSkillScript(file, Number(args.timeoutMs || 8000));
+      if (result.timedOut) throw new Error(`Skill script timed out and was killed. ${result.output}`.trim());
+      if (!result.ok) throw new Error(result.output || 'Skill script failed.');
+      return result.output || 'Script finished.';
+    },
+  };
 }
 
 function readOutputTool(): Tool {

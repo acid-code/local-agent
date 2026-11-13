@@ -248,19 +248,29 @@ export const CODING_TOOLS: Tool[] = [
       if (action === 'fetch') return git(cwd, ['fetch'], identity);
       if (action === 'branch') return git(cwd, ['checkout', '-b', String(args.name || '').trim() || 'agent/task'], identity);
       if (action === 'commit') {
-        await git(cwd, ['add', '-A'], identity);
-        const message = String(args.message || 'agent edit');
-        const committed = await git(cwd, ['commit', '-m', message], identity);
-        if (label && /^exit 0\n/.test(committed)) {
-          const sha = (await git(cwd, ['rev-parse', '--short', 'HEAD'], identity)).replace(/^exit \d+\n/, '').trim();
-          addProjectNote(ctx.store, { label, agentId: ctx.agent.id, kind: 'change', body: `${ctx.agent.name}: ${message}`, sha });
-        }
-        return committed;
+        return onceEffect(ctx, action, async () => {
+          await git(cwd, ['add', '-A'], identity);
+          const message = String(args.message || 'agent edit');
+          const committed = await git(cwd, ['commit', '-m', message], identity);
+          if (label && /^exit 0\n/.test(committed)) {
+            const sha = (await git(cwd, ['rev-parse', '--short', 'HEAD'], identity)).replace(/^exit \d+\n/, '').trim();
+            addProjectNote(ctx.store, { label, agentId: ctx.agent.id, kind: 'change', body: `${ctx.agent.name}: ${message}`, sha });
+          }
+          return committed;
+        });
       }
       if (action === 'pull') return explainPull(await git(cwd, ['pull', '--ff-only'], identity));
       if (action === 'revert') return git(cwd, ['revert', '--no-edit', 'HEAD'], identity);
-      if (action === 'push') return git(cwd, ['push'], identity);
-      if (action === 'force-push') return git(cwd, ['push', '--force-with-lease'], identity);
+      if (action === 'push' || action === 'force-push') {
+        return onceEffect(ctx, action, async () => {
+          const args = action === 'force-push' ? ['push', '--force-with-lease'] : ['push'];
+          const pushed = await git(cwd, args, identity);
+          if (/non-fast-forward|rejected|fetch first|failed to push/i.test(pushed)) {
+            return `Push rejected. The remote is ahead of this branch. Pull with fast-forward only, or ask before a force-push.\n${pushed}`;
+          }
+          return pushed;
+        });
+      }
       throw new Error('Unknown git action.');
     },
   },
@@ -294,6 +304,17 @@ export const CODING_TOOLS: Tool[] = [
     },
   },
 ];
+
+async function onceEffect(ctx: ToolContext, action: string, run: () => Promise<string>): Promise<string> {
+  if (!ctx.runId || !ctx.toolCallId || !ctx.store.claimEffect) return run();
+  const key = `${ctx.runId}:${ctx.toolCallId}:${action}`;
+  const claim = ctx.store.claimEffect(key, ctx.runId, ctx.toolCallId, action);
+  if (claim.state === 'done') return claim.result;
+  if (claim.state === 'started') return `${action} already started for this step. It was not repeated.`;
+  const result = await run();
+  ctx.store.finishEffect(key, result);
+  return result;
+}
 
 function editsOf(args: Record<string, unknown>): { path: string; search: string; replace: string }[] {
   if (Array.isArray(args.edits)) {

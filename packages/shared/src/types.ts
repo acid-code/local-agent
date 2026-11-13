@@ -76,6 +76,7 @@ export interface RunCursor {
   autoRole?: string;
   budgetOverride?: number;
   contextEscalated?: boolean;
+  providerFallback?: boolean;
   contextUsed?: number;
   contextBudget?: number;
 }

@@ -28,6 +28,7 @@ export function Shell({ username, onLogout, children }: { username: string; onLo
   const [query, setQuery] = useState('');
   const [pending, setPending] = useState(0);
   const [personas, setPersonas] = useState<Persona[]>([]);
+  const [restartKeys, setRestartKeys] = useState<string[]>([]);
   const navigate = useNavigate();
 
   async function loadPersonas() {
@@ -35,6 +36,9 @@ export function Shell({ username, onLogout, children }: { username: string; onLo
     setPersonas(data.agents.filter((agent) => !agent.hidden));
   }
   useEffect(() => { void loadPersonas().catch(() => undefined); }, []);
+  useEffect(() => {
+    api<{ restartKeys?: string[] }>('/api/auth/me').then((me) => setRestartKeys(me.restartKeys || [])).catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -116,6 +120,7 @@ export function Shell({ username, onLogout, children }: { username: string; onLo
         </div>
       </aside>
       <div className="main">
+        {restartKeys.length > 0 && <p className="badge warn">Restart needed. secrets.env changed for {restartKeys.join(', ')}. This process is still using the values it loaded at startup.</p>}
         <header className="topbar">
           <button className="btn ghost" aria-label="Menu" onClick={() => setOpen((value) => !value)}><Menu size={16} /></button>
           <button className="palette-btn" onClick={() => setPalette(true)}>Search or jump <span className="kbd">Ctrl K</span></button>

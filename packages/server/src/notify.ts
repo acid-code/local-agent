@@ -7,6 +7,14 @@ import type { Store } from './db.js';
 interface PushSub { endpoint: string; keys: { p256dh: string; auth: string } }
 interface QueuedNote { text: string; keyboard?: { text: string; callback_data: string }[][] }
 
+export function applyTelegramUpdate(engine: { decideApproval: (id: string, status: 'approved' | 'denied') => unknown }, update: { callback_query?: { data?: string } }): 'approved' | 'denied' | null {
+  const data = update.callback_query?.data || '';
+  const [action, id] = data.split(':');
+  if (!id || (action !== 'ok' && action !== 'no')) return null;
+  try { engine.decideApproval(id, action === 'ok' ? 'approved' : 'denied'); } catch { /* already resolved */ }
+  return action === 'ok' ? 'approved' : 'denied';
+}
+
 export function telegramQueue(dataDir: string): QueuedNote[] {
   const file = path.join(dataDir, 'telegram-queue.json');
   if (!fs.existsSync(file)) return [];
@@ -112,13 +120,11 @@ export class Notifier {
       const body = await response.json() as { result?: { update_id: number; callback_query?: { id: string; data?: string } }[] };
       for (const update of body.result ?? []) {
         this.offset = update.update_id + 1;
-        const data = update.callback_query?.data || '';
-        const [action, id] = data.split(':');
-        if (update.callback_query && id && (action === 'ok' || action === 'no')) {
-          try { this.engine.decideApproval(id, action === 'ok' ? 'approved' : 'denied'); } catch { /* already resolved */ }
+        const decision = applyTelegramUpdate(this.engine, update);
+        if (update.callback_query && decision) {
           await this.fetchImpl(`https://api.telegram.org/bot${this.token()}/answerCallbackQuery`, {
             method: 'POST', headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ callback_query_id: update.callback_query.id, text: action === 'ok' ? 'Approved' : 'Denied' }),
+            body: JSON.stringify({ callback_query_id: update.callback_query.id, text: decision === 'approved' ? 'Approved' : 'Denied' }),
           }).catch(() => undefined);
         }
       }

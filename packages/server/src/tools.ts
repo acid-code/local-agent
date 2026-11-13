@@ -28,6 +28,7 @@ export interface ToolContext {
   libraryDir?: string;
   roots?: { label: string; path: string; write?: boolean }[];
   gitIdentity?: { name?: string; email?: string; sshKey?: string };
+  toolCallId?: string;
 }
 
 export interface Tool {

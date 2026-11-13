@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Store } from './db.js';
@@ -149,6 +150,29 @@ export function skillCatalog(store: Store, agentId: string, userText: string): s
   const best = ranked[0];
   const hint = best && best.score >= 0.5 ? `\nThe skill ${best.skill.slug} fits this message. Call load_skill before you answer.` : '';
   return `\n\nSkills you can load with load_skill when one fits:\n${lines.join('\n')}${hint}`;
+}
+
+export function runSkillScript(file: string, timeoutMs = 8000): Promise<{ ok: boolean; output: string; timedOut: boolean }> {
+  const limit = Math.min(30_000, Math.max(200, timeoutMs));
+  return new Promise((resolve) => {
+    const child = spawn(file, [], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    let output = '';
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { process.kill(-child.pid!, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
+    }, limit);
+    child.stdout?.on('data', (chunk) => { output += String(chunk); });
+    child.stderr?.on('data', (chunk) => { output += String(chunk); });
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      resolve({ ok: false, output: error.message, timedOut: false });
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ ok: code === 0 && !timedOut, output: output.slice(0, 8000), timedOut });
+    });
+  });
 }
 
 export async function loadSkill(store: Store, dataDir: string, agentId: string, slug: string): Promise<string> {
