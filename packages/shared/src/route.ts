@@ -55,6 +55,9 @@ export interface RouteDecision {
   reason: string;
   unload: string[];
   trace: string;
+  reasoning?: boolean;
+  role?: string;
+  escalated?: boolean;
 }
 
 function byId(models: RouteCandidate[], id?: string | null) {

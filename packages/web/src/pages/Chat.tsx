@@ -3,7 +3,8 @@ import { api, post } from '../lib/api';
 import { Markdown } from '../components/Markdown';
 import { Face, type FaceAgent } from '../components/Face';
 
-interface Session { id: string; title: string; agentId: string | null; mode: 'chat' | 'code'; workshopId?: string | null }
+interface Session { id: string; title: string; agentId: string | null; mode: 'chat' | 'code'; workshopId?: string | null; modelPin?: string | null }
+interface ModelChoice { id: string; name: string; embedding?: boolean; enabled?: boolean }
 interface ProjectDraft { label: string; path: string }
 interface Agent extends FaceAgent { id: string; name: string }
 interface Message { id: string; role: string; content: string; agentId?: string | null; toolName?: string | null; routingNote?: string | null; toolCalls?: { name: string }[] | null }
@@ -34,6 +35,10 @@ export function Chat() {
   const [projects, setProjects] = useState<ProjectDraft[]>([{ label: 'server', path: '' }, { label: 'apk', path: '' }]);
   const [shopName, setShopName] = useState('Server and app');
   const [shopNote, setShopNote] = useState('');
+  const [models, setModels] = useState<ModelChoice[]>([]);
+  const [modelPin, setModelPin] = useState<string | null>(null);
+  const [loadingNote, setLoadingNote] = useState('');
+  const [meter, setMeter] = useState<{ used: number; budget: number } | null>(null);
   const [rail, setRail] = useState(false);
   const [trace, setTrace] = useState(false);
   const box = useRef<HTMLDivElement>(null);
@@ -55,11 +60,13 @@ export function Chat() {
     setPlan(data.plan);
     setEdits(data.edits);
     setMode(data.session.mode);
+    setModelPin(data.session.modelPin || null);
     setStreaming('');
     if (data.session.agentId) await post(`/api/agents/${data.session.agentId}/read`, {}).catch(() => undefined);
   }
 
   useEffect(() => {
+    api<{ models: ModelChoice[] }>('/api/models').then((data) => setModels(data.models)).catch(() => undefined);
     const share = new URLSearchParams(window.location.search).get('share');
     if (share) setDraft(share);
     const persona = new URLSearchParams(window.location.search).get('persona');
@@ -94,9 +101,14 @@ export function Chat() {
         setMessages((value) => [...value, data.message]);
         setStreaming('');
       }
-      if (data.type === 'status') setStatus(data.status);
+      if (data.type === 'context') setMeter({ used: Number(data.used || 0), budget: Number(data.budget || 0) });
+      if (data.type === 'status') {
+        setStatus(data.status);
+        setLoadingNote(data.status === 'loading' ? String(data.detail || 'Loading model') : '');
+      }
       if (data.type === 'secret' && data.request) setSecret(data.request);
       if (data.type === 'done') {
+        setLoadingNote('');
         setStatus(data.run?.status || 'completed');
         if (current) void openSession(current);
         source.close();
@@ -272,6 +284,19 @@ export function Chat() {
             </div>
           ))}
         </div>
+        {meter && <p className="context-meter" aria-label="Context used">{meter.used} / {meter.budget} tokens</p>}
+        <label className="model-pill">
+          <span className="faint">Model</span>
+          <select aria-label="Model" value={modelPin || ''} onChange={async (event) => {
+            const value = event.target.value || null;
+            setModelPin(value);
+            if (current) await api(`/api/sessions/${current}`, { method: 'PATCH', body: JSON.stringify({ modelPin: value }) });
+          }}>
+            <option value="">Auto</option>
+            {models.filter((model) => !model.embedding && model.enabled !== false).map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
+          </select>
+        </label>
+        {loadingNote && <p className="switch loading-model">{loadingNote}</p>}
         <div className="composer">
           <form onSubmit={send}>
             <textarea value={draft} placeholder={mode === 'code' ? 'Ask for a plan, then an edit…' : 'Message'} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send(event); } }} />

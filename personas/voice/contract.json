@@ -9,5 +9,6 @@
   "tools": [],
   "approvals": [],
   "inputs": ["transcript"],
-  "outputs": ["reply"]
+  "outputs": ["reply"],
+  "strategy": "rolling"
 }

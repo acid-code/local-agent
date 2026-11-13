@@ -1,6 +1,6 @@
 export type TokenizerId = 'gemma4' | 'qwen3' | 'gemini' | 'approx';
 
-export type StrategyName = 'rolling' | 'hierarchical' | 'pinned' | 'retrieval';
+export type StrategyName = 'rolling' | 'hierarchical' | 'hierarchical+retrieval' | 'pinned' | 'retrieval';
 
 export type RequestKind =
   | 'code'
@@ -68,4 +68,14 @@ export interface RunCursor {
   stage?: 'plan' | 'implement';
   syncNote?: string;
   branched?: boolean;
+  /** Set when /model or /auto is the whole message, so the run answers without calling a model. */
+  commandAck?: string;
+  /** The named model in /model was not installed. */
+  pinMiss?: string;
+  reasoning?: boolean;
+  autoRole?: string;
+  budgetOverride?: number;
+  contextEscalated?: boolean;
+  contextUsed?: number;
+  contextBudget?: number;
 }

@@ -32,6 +32,13 @@ export function setupTokenValid(dataDir: string, token: string): boolean {
   return timingSafeEqual(expected, actual);
 }
 
+export function beginOwnerReset(dataDir: string) {
+  fs.rmSync(path.join(dataDir, USED), { force: true });
+  fs.rmSync(path.join(dataDir, HASH), { force: true });
+  fs.rmSync(path.join(dataDir, PLAIN), { force: true });
+  return ensureSetupToken(dataDir);
+}
+
 export function consumeSetupToken(dataDir: string) {
   fs.writeFileSync(path.join(dataDir, USED), new Date().toISOString(), { mode: 0o600 });
   fs.rmSync(path.join(dataDir, HASH), { force: true });

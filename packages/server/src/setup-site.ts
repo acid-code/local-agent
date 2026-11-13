@@ -10,6 +10,7 @@ import { isLanAddress } from './lan.js';
 import type { Store } from './db.js';
 import { consumeSetupToken, setupTokenValid } from './setup-token.js';
 import { contractWarnings } from './contracts.js';
+import { toolCapabilityWarnings } from './ollama.js';
 import type { Settings } from './settings.js';
 import type { Vault } from './vault.js';
 
@@ -57,7 +58,24 @@ export async function buildSetupApp(options: {
     const authed = owner ? await authenticate(options.store, req) : false;
     if (!owner) return { needsOwner: true, authenticated: false };
     if (!authed) return reply.code(401).send({ needsOwner: false, authenticated: false });
-    const warnings = contractWarnings(options.store.listModels().filter((model) => model.local && model.embedding).map((model) => model.name));
+    const models = options.store.listModels();
+    const capability = await toolCapabilityWarnings(fetchImpl, models);
+    const warnings = [
+      ...contractWarnings(models.filter((model) => model.local && model.embedding).map((model) => model.name)),
+      ...capability,
+    ];
+    const support = { ...options.store.getSettings().toolSupport };
+    let changed = false;
+    for (const model of models) {
+      if (!capability.some((line) => line.startsWith(`${model.name} does not support`))) continue;
+      if (support[model.apiName] === false) continue;
+      support[model.apiName] = false;
+      changed = true;
+    }
+    if (changed) {
+      const current = options.store.getSettings();
+      options.store.saveSettings({ ...current, toolSupport: support }, 'Recorded models without tool calls', { toolSupport: support });
+    }
     return { needsOwner: false, authenticated: true, warnings, ...publicState(options.store, options.vault) };
   });
 
@@ -147,12 +165,30 @@ export async function buildSetupApp(options: {
       gitName: z.string().max(80).optional(),
       gitEmail: z.string().max(120).optional(),
       gitSshKey: z.string().max(300).optional(),
+      autoFast: z.string().max(120).optional(),
+      autoMain: z.string().max(120).optional(),
+      autoCoder: z.string().max(120).optional(),
+      autoThinking: z.string().max(120).optional(),
+      autoCloud: z.string().max(120).optional(),
+      autoEmbed: z.string().max(120).optional(),
       dailyTokenLimit: z.number().int().nullable().optional(),
       dailySpendLimitUsd: z.number().nullable().optional(),
     }), req.body);
     const problem = validateDefaults(options.store, body);
     if (problem) return reply.code(400).send({ error: problem });
-    const next = { ...options.store.getSettings(), ...body };
+    const { autoFast, autoMain, autoCoder, autoThinking, autoCloud, autoEmbed, ...rest } = body;
+    const next = { ...options.store.getSettings(), ...rest };
+    if ([autoFast, autoMain, autoCoder, autoThinking, autoCloud, autoEmbed].some((value) => value !== undefined)) {
+      const current = next.autoModels;
+      next.autoModels = {
+        fast: autoFast ?? current.fast,
+        main: autoMain ?? current.main,
+        coder: autoCoder ?? current.coder,
+        thinking: autoThinking ?? current.thinking,
+        cloud: autoCloud ?? current.cloud,
+        embed: autoEmbed ?? current.embed,
+      };
+    }
     const saved = options.store.saveSettings(next, 'LAN setup defaults', { settings: next });
     return { settings: publicSettings(saved) };
   });
@@ -193,6 +229,7 @@ function publicSettings(settings: Settings) {
     gitName: settings.gitName,
     gitEmail: settings.gitEmail,
     gitSshKey: settings.gitSshKey,
+    autoModels: settings.autoModels,
     dailyTokenLimit: settings.dailyTokenLimit,
     dailySpendLimitUsd: settings.dailySpendLimitUsd,
   };
@@ -210,6 +247,12 @@ function validateDefaults(store: Store, body: {
   gitName?: string;
   gitEmail?: string;
   gitSshKey?: string;
+  autoFast?: string;
+  autoMain?: string;
+  autoCoder?: string;
+  autoThinking?: string;
+  autoCloud?: string;
+  autoEmbed?: string;
   dailyTokenLimit?: number | null;
   dailySpendLimitUsd?: number | null;
 }): string | null {
@@ -236,6 +279,9 @@ function validateDefaults(store: Store, body: {
   if (body.imapHost && !/^[a-zA-Z0-9.-]+$/.test(body.imapHost)) return 'IMAP host should be a hostname.';
   if (body.imapPort != null && (body.imapPort < 1 || body.imapPort > 65535)) return 'IMAP port is out of range.';
   if (body.imapMailbox && !/^[A-Za-z0-9._-]+$/.test(body.imapMailbox)) return 'Mailbox names use letters, numbers, dots, and dashes.';
+  for (const name of [body.autoFast, body.autoMain, body.autoCoder, body.autoThinking, body.autoCloud, body.autoEmbed]) {
+    if (name && /[\r\n]/.test(name)) return 'A model name cannot contain a line break.';
+  }
   if (body.gitEmail && !/^[^\s@]+@[^\s@]+$/.test(body.gitEmail)) return 'Git email should look like a mailbox.';
   if (body.gitSshKey && (!body.gitSshKey.startsWith('/') || /[\r\n]/.test(body.gitSshKey))) return 'The SSH key has to be an absolute path on this machine.';
   if (body.dailyTokenLimit != null && body.dailyTokenLimit < 1) return 'Daily token limit must be empty or at least 1.';
@@ -483,6 +529,13 @@ const PAGE = `<!doctype html>
         + field('Git name', 'gitName', 'text', s.gitName || 'local-agent')
         + field('Git email', 'gitEmail', 'text', s.gitEmail || 'agent@local')
         + field('SSH key path', 'gitSshKey', 'text', s.gitSshKey || '')
+        + '<h3>Auto</h3><p class="muted">Empty main uses Gemma 4 26B-A4B if it is installed, otherwise Qwen3.6 35B-A3B. Empty thinking uses main with reasoning on. Empty cloud uses Gemini when the free quota is open, and falls back to main.</p>'
+        + field('Fast', 'autoFast', 'text', (s.autoModels && s.autoModels.fast) || 'qwen3:4b')
+        + field('Main', 'autoMain', 'text', (s.autoModels && s.autoModels.main) || '')
+        + field('Coder', 'autoCoder', 'text', (s.autoModels && s.autoModels.coder) || 'qwen3-coder:30b')
+        + field('Thinking', 'autoThinking', 'text', (s.autoModels && s.autoModels.thinking) || '')
+        + field('Smart / cloud', 'autoCloud', 'text', (s.autoModels && s.autoModels.cloud) || '')
+        + field('Embed', 'autoEmbed', 'text', (s.autoModels && s.autoModels.embed) || 'nomic-embed-text')
         + '<button>Save defaults</button><p id="msg"></p></form>'
         + '<form class="card" id="pw"><h2>Owner password</h2>' + field('Current', 'current', 'password') + field('New', 'next', 'password') + '<button>Change password</button><p id="pwmsg"></p></form>'
         + '<p><button class="ghost" id="wiz" type="button">Run the wizard again</button></p>');

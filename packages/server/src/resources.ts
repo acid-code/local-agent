@@ -16,6 +16,7 @@ export interface ResourceSnapshot {
   agents: { id: string; name: string; messages: number; messageBytes: number; summaries: number; summaryBytes: number; notes: number; noteBytes: number; chunks: number; embeddingBytes: number; workspaceBytes: number }[];
   knowledge: ReturnType<typeof kbUsage>;
   flags: { level: 'ok' | 'warn'; text: string }[];
+  loadedModels?: { name: string; contextLength: number | null; sizeBytes: number | null }[];
 }
 
 export function snapshotResources(store: Store, dataDir: string): ResourceSnapshot {

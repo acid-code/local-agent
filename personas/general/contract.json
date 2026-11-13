@@ -9,5 +9,6 @@
   "tools": ["list_dir", "read_file", "write_file", "shell", "remember", "recall", "docker_ps", "docker_inspect"],
   "approvals": ["write_file", "shell", "docker_run", "docker_rm"],
   "inputs": ["chat", "handoff", "trigger"],
-  "outputs": ["reply", "handoff", "activity", "notification"]
+  "outputs": ["reply", "handoff", "activity", "notification"],
+  "strategy": "rolling"
 }

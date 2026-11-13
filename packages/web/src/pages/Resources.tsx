@@ -9,6 +9,7 @@ interface Snapshot {
   agents: { id: string; name: string; messageBytes: number; summaryBytes: number; embeddingBytes: number; workspaceBytes: number; notes: number }[];
   knowledge?: { bytes: number; embeddingBytes: number; documents: number; chunks: number; collections: { id: string; name: string; bytes: number; chunks: number }[] };
   flags: { level: string; text: string }[];
+  loadedModels?: { name: string; contextLength: number | null; sizeBytes: number | null }[];
 }
 
 function gb(bytes: number) { return `${(bytes / 1024 ** 3).toFixed(1)} GB`; }
@@ -34,6 +35,12 @@ export function Resources() {
         <article className="card"><h3>Memory</h3><p>{snap.memory.availableGiB.toFixed(1)} GiB free of {snap.memory.totalGiB.toFixed(1)}</p><div className="meter"><span style={{ width: `${100 - (snap.memory.availableGiB / Math.max(snap.memory.totalGiB, 1)) * 100}%` }} /></div></article>
         <article className="card"><h3>Disk</h3><p>{gb(snap.disk.freeBytes)} free of {gb(snap.disk.totalBytes)}</p><p className="faint">Data directory {gb(snap.dataBytes)}</p></article>
         <article className="card"><h3>GPU / GTT</h3><p>{snap.gpu ? snap.gpu.name : 'Not visible'}</p><p className="muted">{snap.gpu?.note}</p></article>
+        <article className="card"><h3>Loaded models</h3>
+          {(snap.loadedModels ?? []).length === 0 && <p className="muted">No model is loaded in Ollama.</p>}
+          {(snap.loadedModels ?? []).map((model) => (
+            <p key={model.name} className="mono">{model.name} · context {model.contextLength ?? 'not reported'}{model.sizeBytes ? ` · ${(model.sizeBytes / 1024 ** 3).toFixed(1)} GB` : ''}</p>
+          ))}
+        </article>
       </div>
       {snap.knowledge && (
         <article className="card">

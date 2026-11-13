@@ -3,6 +3,7 @@ export * from './tokens.js';
 export * from './models.js';
 export * from './classify.js';
 export * from './route.js';
+export * from './auto.js';
 export * from './context.js';
 export * from './embed.js';
 export * from './cron.js';

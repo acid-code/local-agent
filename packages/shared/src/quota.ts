@@ -114,6 +114,11 @@ export function quotaAvailability(
   return { open: true, rpmRemaining, tpmRemaining, rpdRemaining };
 }
 
+/** Gemini's free-tier day rolls at 00:00 UTC. The clock on the mini PC is Asia/Jerusalem. */
+export function geminiQuotaDay(date = new Date()): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'UTC' }).format(date);
+}
+
 export function freeTierByApiName(apiName: string): FreeTierRow | undefined {
   return FREE_TIER_SNAPSHOT.find((row) => row.apiName === apiName || row.id === apiName);
 }

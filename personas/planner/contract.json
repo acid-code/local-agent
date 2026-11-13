@@ -9,5 +9,6 @@
   "tools": ["web_search", "web_fetch", "kb_search", "read_file", "list_dir", "grep", "plan", "recall", "consult_agent", "repo_sync"],
   "approvals": ["repo_sync"],
   "inputs": ["chat", "trigger"],
-  "outputs": ["plan", "reply", "handoff"]
+  "outputs": ["plan", "reply", "handoff"],
+  "strategy": "hierarchical+retrieval"
 }

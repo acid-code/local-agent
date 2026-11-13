@@ -8,6 +8,7 @@ interface Agent extends FaceAgent {
   description: string;
   systemPrompt: string;
   modelId: string | null;
+  strategy?: string | null;
   toolAllowlist: string[];
   emoji: string;
   accent: string;
@@ -57,7 +58,7 @@ export function Agents() {
     event.preventDefault();
     const body = {
       name: draft.name, title: draft.title, description: draft.description, systemPrompt: draft.systemPrompt,
-      modelId: draft.modelId, toolAllowlist: draft.toolAllowlist, emoji: draft.emoji, accent: draft.accent,
+      modelId: draft.modelId, strategy: draft.strategy || null, toolAllowlist: draft.toolAllowlist, emoji: draft.emoji, accent: draft.accent,
       avatarKind: draft.avatarKind, avatarRef: draft.avatarRef, pinned: draft.pinned, hidden: draft.hidden,
       workshopIds: draft.workshopIds,
     };
@@ -125,6 +126,16 @@ export function Agents() {
         </div>
         <label className="field"><span>Upload a face (PNG, JPEG, WebP, or GIF, up to 512 KB)</span>
           <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); }} />
+        </label>
+        <label className="field"><span>Context strategy</span>
+          <select value={draft.strategy || ''} onChange={(event) => setDraft({ ...draft, strategy: event.target.value || null })}>
+            <option value="">Contract default</option>
+            <option value="rolling">Rolling</option>
+            <option value="hierarchical">Hierarchical</option>
+            <option value="hierarchical+retrieval">Hierarchical plus retrieval</option>
+            <option value="retrieval">Retrieval</option>
+            <option value="pinned">Pinned</option>
+          </select>
         </label>
         <label className="field"><span>Default model</span>
           <select value={draft.modelId || ''} onChange={(event) => setDraft({ ...draft, modelId: event.target.value || null })}>

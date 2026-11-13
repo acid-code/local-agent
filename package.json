@@ -16,7 +16,9 @@
     "typecheck": "npm run build -w @local-agent/shared && npm run typecheck -w @local-agent/server && npm run typecheck -w @local-agent/web",
     "start": "npm run start -w @local-agent/server",
     "icons": "python3 scripts/make-icons.py",
-    "eval:local": "node scripts/eval-local.mjs"
+    "eval:local": "node scripts/eval-local.mjs",
+    "doctor": "tsx packages/server/src/doctor-cli.ts",
+    "reset-owner": "tsx packages/server/src/doctor-cli.ts --reset-owner"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"

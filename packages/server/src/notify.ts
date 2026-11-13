@@ -5,6 +5,34 @@ import type { Engine } from './engine.js';
 import type { Store } from './db.js';
 
 interface PushSub { endpoint: string; keys: { p256dh: string; auth: string } }
+interface QueuedNote { text: string; keyboard?: { text: string; callback_data: string }[][] }
+
+export function telegramQueue(dataDir: string): QueuedNote[] {
+  const file = path.join(dataDir, 'telegram-queue.json');
+  if (!fs.existsSync(file)) return [];
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')) as QueuedNote[]; } catch { return []; }
+}
+
+function enqueueTelegram(dataDir: string, note: QueuedNote) {
+  const next = [...telegramQueue(dataDir), note].slice(-40);
+  fs.writeFileSync(path.join(dataDir, 'telegram-queue.json'), JSON.stringify(next), { mode: 0o600 });
+}
+
+async function flushTelegram(dataDir: string, fetchImpl: typeof fetch, token: string, chat: string) {
+  const queued = telegramQueue(dataDir);
+  if (!queued.length) return;
+  const left: QueuedNote[] = [];
+  for (const note of queued) {
+    try {
+      const response = await fetchImpl(`https://api.telegram.org/bot${token}/sendMessage`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ chat_id: chat, text: note.text, reply_markup: note.keyboard ? { inline_keyboard: note.keyboard } : undefined }),
+      });
+      if (!response.ok) left.push(note);
+    } catch { left.push(note); }
+  }
+  fs.writeFileSync(path.join(dataDir, 'telegram-queue.json'), JSON.stringify(left), { mode: 0o600 });
+}
 
 export class Notifier {
   private offset = 0;
@@ -55,15 +83,25 @@ export class Notifier {
 
   private async telegram(text: string, keyboard?: { text: string; callback_data: string }[][]) {
     if (!this.token() || !this.chat()) return;
-    await this.fetchImpl(`https://api.telegram.org/bot${this.token()}/sendMessage`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: this.chat(),
-        text: text.slice(0, 3500),
-        reply_markup: keyboard ? { inline_keyboard: keyboard } : undefined,
-      }),
-    }).catch(() => undefined);
+    const payload = { text: text.slice(0, 3500), keyboard };
+    try {
+      const response = await this.fetchImpl(`https://api.telegram.org/bot${this.token()}/sendMessage`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: this.chat(),
+          text: payload.text,
+          reply_markup: keyboard ? { inline_keyboard: keyboard } : undefined,
+        }),
+      });
+      if (!response.ok) {
+        enqueueTelegram(this.dataDir, payload);
+        return;
+      }
+      await flushTelegram(this.dataDir, this.fetchImpl, this.token(), this.chat());
+    } catch {
+      enqueueTelegram(this.dataDir, payload);
+    }
   }
 
   private async pollTelegram() {

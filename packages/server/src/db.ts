@@ -3,6 +3,7 @@ import path from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import type { RunCursor, StrategyName } from '@local-agent/shared';
 import { DEFAULT_SETTINGS, normalizeSettings, type Settings } from './settings.js';
+import { writeLog } from './debug.js';
 import { nid, now, parseJson, slugify } from './util.js';
 
 export interface Owner { username: string; createdAt: string }
@@ -26,7 +27,7 @@ export interface Agent {
 export interface Room { id: string; name: string; createdAt: string; agentIds: string[] }
 export interface Session {
   id: string; agentId: string | null; roomId: string | null; title: string; summary: string;
-  activeModelId: string | null; archived: boolean; mode: 'chat' | 'code'; workshopId: string | null; createdAt: string; updatedAt: string;
+  activeModelId: string | null; modelPin: string | null; archived: boolean; mode: 'chat' | 'code'; workshopId: string | null; createdAt: string; updatedAt: string;
 }
 export interface Message {
   id: string; sessionId: string; seq: number; role: string; content: string; toolCallId: string | null;
@@ -139,7 +140,7 @@ export class Store {
         id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, session_id TEXT, name TEXT NOT NULL, cron TEXT NOT NULL, prompt TEXT NOT NULL,
         enabled INTEGER NOT NULL DEFAULT 1, last_run_at TEXT, next_run_at TEXT, last_status TEXT, created_at TEXT NOT NULL
       );
-      CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, level TEXT NOT NULL, message TEXT NOT NULL, meta TEXT, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, level TEXT NOT NULL, message TEXT NOT NULL, meta TEXT, component TEXT NOT NULL DEFAULT 'engine', created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, command TEXT NOT NULL, status TEXT NOT NULL, output TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, ended_at TEXT);
       CREATE TABLE IF NOT EXISTS summaries (
         id TEXT PRIMARY KEY, session_id TEXT NOT NULL, level INTEGER NOT NULL, version INTEGER NOT NULL, content TEXT NOT NULL,
@@ -220,6 +221,9 @@ export class Store {
     const sessionCols = this.many<Raw>('PRAGMA table_info(chat_sessions)').map((row) => String(row.name));
     if (!sessionCols.includes('mode')) this.db.exec(`ALTER TABLE chat_sessions ADD COLUMN mode TEXT NOT NULL DEFAULT 'chat'`);
     if (!sessionCols.includes('workshop_id')) this.db.exec(`ALTER TABLE chat_sessions ADD COLUMN workshop_id TEXT`);
+    if (!sessionCols.includes('model_pin')) this.db.exec(`ALTER TABLE chat_sessions ADD COLUMN model_pin TEXT`);
+    const logCols = this.many<Raw>('PRAGMA table_info(logs)').map((row) => String(row.name));
+    if (!logCols.includes('component')) this.db.exec(`ALTER TABLE logs ADD COLUMN component TEXT NOT NULL DEFAULT 'engine'`);
     const agentCols = this.many<Raw>('PRAGMA table_info(agents)').map((row) => String(row.name));
     const addAgentCol = (name: string, ddl: string) => { if (!agentCols.includes(name)) this.db.exec(`ALTER TABLE agents ADD COLUMN ${ddl}`); };
     addAgentCol('title', `title TEXT NOT NULL DEFAULT ''`);
@@ -527,12 +531,12 @@ export class Store {
     return row ? mapSession(row) : null;
   }
 
-  updateSession(id: string, patch: Partial<Pick<Session, 'title' | 'summary' | 'activeModelId' | 'archived' | 'mode' | 'workshopId'>>) {
+  updateSession(id: string, patch: Partial<Pick<Session, 'title' | 'summary' | 'activeModelId' | 'modelPin' | 'archived' | 'mode' | 'workshopId'>>) {
     const current = this.getSession(id);
     if (!current) return null;
     const next = { ...current, ...patch, updatedAt: now() };
-    this.db.prepare('UPDATE chat_sessions SET title=?, summary=?, active_model_id=?, archived=?, mode=?, workshop_id=?, updated_at=? WHERE id=?').run(
-      next.title, next.summary, next.activeModelId, next.archived ? 1 : 0, next.mode, next.workshopId, next.updatedAt, id,
+    this.db.prepare('UPDATE chat_sessions SET title=?, summary=?, active_model_id=?, model_pin=?, archived=?, mode=?, workshop_id=?, updated_at=? WHERE id=?').run(
+      next.title, next.summary, next.activeModelId, next.modelPin, next.archived ? 1 : 0, next.mode, next.workshopId, next.updatedAt, id,
     );
     return this.getSession(id);
   }
@@ -790,13 +794,13 @@ export class Store {
     return this.many<Raw>('SELECT * FROM schedules WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?', iso).map(mapSchedule);
   }
 
-  addLog(level: string, message: string, meta?: unknown) {
-    this.db.prepare('INSERT INTO logs (level, message, meta, created_at) VALUES (?, ?, ?, ?)').run(level, message, meta ? JSON.stringify(meta) : null, now());
+  addLog(level: string, message: string, meta?: unknown, component = 'engine') {
+    writeLog(this, level, message, meta, component as 'engine');
   }
 
   listLogs(limit = 200) {
     return this.many<Raw>('SELECT * FROM logs ORDER BY id DESC LIMIT ?', limit).map((row) => ({
-      id: Number(row.id), level: String(row.level), message: String(row.message), meta: parseJson(row.meta ? String(row.meta) : '', null), createdAt: String(row.created_at),
+      id: Number(row.id), level: String(row.level), component: String(row.component || 'engine'), message: String(row.message), meta: parseJson(row.meta ? String(row.meta) : '', null), createdAt: String(row.created_at),
     }));
   }
 
@@ -962,6 +966,7 @@ function mapSession(row: Raw): Session {
   return {
     id: String(row.id), agentId: row.agent_id ? String(row.agent_id) : null, roomId: row.room_id ? String(row.room_id) : null,
     title: String(row.title), summary: String(row.summary ?? ''), activeModelId: row.active_model_id ? String(row.active_model_id) : null,
+    modelPin: row.model_pin ? String(row.model_pin) : null,
     archived: Boolean(row.archived), mode: row.mode === 'code' ? 'code' : 'chat', workshopId: row.workshop_id ? String(row.workshop_id) : null, createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   };
 }

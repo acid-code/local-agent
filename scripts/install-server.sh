@@ -153,12 +153,36 @@ LA_HOST=0.0.0.0
 LA_PORT=$PORT
 DATA_DIR=$INSTALL_ROOT/data
 LA_COOKIE_SECRET=$SECRET
+OLLAMA_CONTEXT_LENGTH=32768
 EOF
     chown "$APP_USER:$APP_USER" "$ENV_FILE"
     chmod 600 "$ENV_FILE"
   fi
 else
   echo "Keeping existing $ENV_FILE"
+  if ! grep -q '^OLLAMA_CONTEXT_LENGTH=' "$ENV_FILE"; then
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      echo "+ append OLLAMA_CONTEXT_LENGTH=32768 to $ENV_FILE"
+    else
+      echo 'OLLAMA_CONTEXT_LENGTH=32768' >> "$ENV_FILE"
+    fi
+  fi
+fi
+
+# Fallback when a request does not pass num_ctx. The app still sends num_ctx per call.
+if command -v ollama >/dev/null 2>&1 || [[ "$WITH_OLLAMA" -eq 1 ]]; then
+  DROP_IN=/etc/systemd/system/ollama.service.d/context.conf
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "+ write $DROP_IN with OLLAMA_CONTEXT_LENGTH=32768 and restart ollama"
+  else
+    mkdir -p /etc/systemd/system/ollama.service.d
+    cat > "$DROP_IN" <<'EOF'
+[Service]
+Environment=OLLAMA_CONTEXT_LENGTH=32768
+EOF
+    systemctl daemon-reload || true
+    systemctl try-restart ollama || true
+  fi
 fi
 
 UNIT_SRC="$INSTALL_ROOT/deploy/local-agent.service"

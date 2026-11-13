@@ -9,5 +9,6 @@
   "tools": [],
   "approvals": [],
   "inputs": ["trigger"],
-  "outputs": ["reply", "activity", "notification"]
+  "outputs": ["reply", "activity", "notification"],
+  "strategy": "pinned"
 }

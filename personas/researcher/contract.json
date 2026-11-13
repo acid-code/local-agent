@@ -9,5 +9,6 @@
   "tools": ["web_search", "web_fetch", "list_dir", "read_file", "remember", "recall", "consult_agent"],
   "approvals": [],
   "inputs": ["chat", "handoff"],
-  "outputs": ["reply", "notification"]
+  "outputs": ["reply", "notification"],
+  "strategy": "retrieval"
 }

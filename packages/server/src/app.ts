@@ -141,7 +141,7 @@ export async function buildApp(options: {
       void backupIfDue(config.dataDir, store.getSettings()).catch((error: Error) => store.addLog('error', error.message));
     }, 60_000),
     setInterval(() => {
-      void reindexRoots(store, ollamaEmbedder(options.fetchImpl ?? fetch)).catch((error: Error) => store.addLog('error', error.message));
+      void reindexRoots(store, ollamaEmbedder(options.fetchImpl ?? fetch, store.getSettings().autoModels.embed || 'nomic-embed-text')).catch((error: Error) => store.addLog('error', error.message));
     }, 60_000),
   ];
   app.addHook('onClose', async () => {

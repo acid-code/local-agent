@@ -17,7 +17,17 @@ export interface ModelProvider {
     tools?: ToolDefinition[];
     signal?: AbortSignal;
     paceMs?: number;
+    /** Ollama context window. practicalBudget already includes the output reserve. */
+    numCtx?: number;
+    keepAlive?: string | number;
+    think?: boolean;
   }): AsyncIterable<ProviderEvent>;
+}
+
+/** The full practical budget, which already includes the output reserve, capped by the model's window. */
+export function ollamaNumCtx(practicalBudget: number, outputReserve: number, contextWindow: number): number {
+  const withReserve = practicalBudget >= outputReserve ? practicalBudget : practicalBudget + outputReserve;
+  return Math.max(2048, Math.min(contextWindow, withReserve));
 }
 
 export class ScriptedProvider implements ModelProvider {
@@ -49,7 +59,33 @@ export function providerFor(model: ModelRow, provider: ProviderRow, fetchImpl: t
   }
   const base = (provider.baseUrl || 'http://127.0.0.1:11434/v1').replace(/\/$/, '');
   const key = provider.apiKeyEnv ? process.env[provider.apiKeyEnv] : '';
+  if (provider.kind !== 'openrouter' && (provider.id === 'prov_ollama' || provider.name === 'Ollama' || /:11434(\/|$)/.test(base))) {
+    return new OllamaProvider(base.replace(/\/v1$/, ''), fetchImpl);
+  }
   return new OpenAIProvider(base, key || '', fetchImpl, provider.kind === 'openrouter');
+}
+
+class OllamaProvider implements ModelProvider {
+  constructor(private readonly root: string, private readonly fetchImpl: typeof fetch) {}
+
+  async *complete(req: { model: string; messages: ChatMessage[]; tools?: ToolDefinition[]; signal?: AbortSignal; numCtx?: number; keepAlive?: string | number; think?: boolean }): AsyncIterable<ProviderEvent> {
+    const response = await this.fetchImpl(`${this.root}/api/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      signal: req.signal,
+      body: JSON.stringify({
+        model: req.model,
+        stream: true,
+        messages: req.messages.map(toOllama),
+        tools: req.tools?.length ? req.tools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.parameters } })) : undefined,
+        think: req.think || undefined,
+        keep_alive: req.keepAlive ?? '30m',
+        options: { num_ctx: req.numCtx ?? 32768 },
+      }),
+    });
+    if (!response.ok) throw new Error(`Ollama failed (${response.status}): ${(await response.text()).slice(0, 500)}`);
+    yield* readOllama(response);
+  }
 }
 
 class OpenAIProvider implements ModelProvider {
@@ -209,6 +245,73 @@ async function* paceText(text: string, paceMs: number): AsyncIterable<ProviderEv
     if (paceMs) await new Promise((resolve) => setTimeout(resolve, paceMs));
     yield { type: 'token', text: part };
   }
+}
+
+function toOllama(message: ChatMessage) {
+  if (message.role === 'tool') return { role: 'tool', content: message.content };
+  if (message.role === 'assistant' && message.toolCalls?.length) {
+    return {
+      role: 'assistant',
+      content: message.content || '',
+      tool_calls: message.toolCalls.map((tool) => ({ type: 'function', function: { name: tool.name, arguments: safeJson(tool.arguments) } })),
+    };
+  }
+  if (message.role === 'user' && message.imageUrl) {
+    return { role: 'user', content: message.content, images: [message.imageUrl.replace(/^data:image\/[a-z0-9.+-]+;base64,/i, '')] };
+  }
+  return { role: message.role, content: message.content };
+}
+
+interface OllamaChunk {
+  error?: string;
+  done?: boolean;
+  prompt_eval_count?: number;
+  eval_count?: number;
+  message?: { content?: string; tool_calls?: { function?: { name?: string; arguments?: unknown } }[] };
+}
+
+async function* readOllama(response: Response): AsyncIterable<ProviderEvent> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('Ollama returned an empty body.');
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let usage: Usage | undefined;
+  const toolCalls: ToolCall[] = [];
+  const take = (json: OllamaChunk) => {
+    if (json.error) throw new Error(json.error);
+    if (json.message?.content) return json.message.content;
+    return '';
+  };
+  while (true) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    buffer += decoder.decode(chunk.value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    for (const line of lines) {
+      const data = line.trim();
+      if (!data.startsWith('{')) continue;
+      const json = JSON.parse(data) as OllamaChunk;
+      const text = take(json);
+      if (text) yield { type: 'token', text };
+      if (json.done) {
+        for (const tool of json.message?.tool_calls ?? []) {
+          const name = tool.function?.name || '';
+          if (!name) continue;
+          const args = tool.function?.arguments;
+          toolCalls.push({ id: `ollama_${name}_${toolCalls.length}`, name, arguments: typeof args === 'string' ? args : JSON.stringify(args ?? {}) });
+        }
+        usage = { inputTokens: json.prompt_eval_count ?? 0, outputTokens: json.eval_count ?? 0 };
+      }
+    }
+  }
+  if (buffer.trim().startsWith('{')) {
+    const json = JSON.parse(buffer) as OllamaChunk;
+    const text = take(json);
+    if (text) yield { type: 'token', text };
+    if (json.done) usage = { inputTokens: json.prompt_eval_count ?? usage?.inputTokens ?? 0, outputTokens: json.eval_count ?? usage?.outputTokens ?? 0 };
+  }
+  yield { type: 'done', finishReason: toolCalls.length ? 'tool_calls' : 'stop', toolCalls, usage };
 }
 
 function toOpenAI(message: ChatMessage) {

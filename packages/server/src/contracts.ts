@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { estimateTokens } from '@local-agent/shared';
+import { estimateTokens, type StrategyName } from '@local-agent/shared';
 import { z } from 'zod';
 
 export type AutoRole = 'fast' | 'main' | 'coder' | 'thinking' | 'cloud';
@@ -18,6 +18,7 @@ export interface PersonaContract {
   approvals: string[];
   inputs: string[];
   outputs: string[];
+  strategy: StrategyName;
 }
 
 const SLUGS = ['general', 'coder', 'planner', 'researcher', 'voice', 'router', 'trigger'] as const;
@@ -91,7 +92,7 @@ export function contractForAgent(name: string): PersonaContract | null {
 
 export function personaTemplate(slug: string) {
   const contract = loadContract(slug);
-  return { id: slug, name: contract.name, description: contract.purpose, systemPrompt: contract.guidelines, tools: contract.tools };
+  return { id: slug, name: contract.name, description: contract.purpose, systemPrompt: contract.guidelines, tools: contract.tools, strategy: contract.strategy };
 }
 
 export function toolArgumentsSchema(name: string): z.ZodTypeAny {

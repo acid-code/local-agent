@@ -1,9 +1,10 @@
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { FREE_TIER_OBSERVED_AT, FREE_TIER_SNAPSHOT, VERSION, nextCron, quotaAvailability } from '@local-agent/shared';
+import { FREE_TIER_OBSERVED_AT, FREE_TIER_SNAPSHOT, VERSION, geminiQuotaDay, nextCron, quotaAvailability } from '@local-agent/shared';
 import { authenticate, hashPassword, noteFailure, rateLimit, setSession, verifyPassword } from './auth.js';
 import { TEMPLATES } from './catalog.js';
 import { detectCodingClis, listEdits, readPlan, replacePlan, revertBatch, updatePlanItem } from './coding.js';
@@ -15,6 +16,9 @@ import { importConfigs, searchRegistry, vetSpec } from './mcp.js';
 import { localReputationSummarizer } from './reputation.js';
 import type { Notifier } from './notify.js';
 import { createBackup, listBackups, shipBackup, stageRestore } from './ops.js';
+import { telegramQueue } from './notify.js';
+import { ollamaLoaded } from './ollama.js';
+import { doctorChecks, redactValue, searchLogs, zipStore, LOG_COMPONENTS, type LogComponent } from './debug.js';
 import { previewPrune, runPrune, snapshotResources } from './resources.js';
 import { speak, transcribe, voiceStatus, KOKORO_COMMAND, WHISPER_COMMAND } from './voice.js';
 import { listWorkspace, readWorkspaceFile } from './tools.js';
@@ -143,6 +147,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       readOnly: z.boolean().optional(),
       dailyTokenLimit: z.number().nullable().optional(),
       dailySpendLimitUsd: z.number().nullable().optional(),
+      debugLevel: z.enum(['info', 'debug']).optional(),
       quotaLimits: z.record(z.object({ rpm: z.number().optional(), rpd: z.number().optional() })).optional(),
       backupCron: z.string().optional(),
       backupTransport: z.enum(['none', 'rsync', 'rclone', 's3']).optional(),
@@ -215,7 +220,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       systemPrompt: z.string().min(1),
       modelId: z.string().nullable().optional(),
       routing: z.enum(['auto', 'pinned']).optional(),
-      strategy: z.enum(['rolling', 'hierarchical', 'pinned', 'retrieval']).nullable().optional(),
+      strategy: z.enum(['rolling', 'hierarchical', 'hierarchical+retrieval', 'pinned', 'retrieval']).nullable().optional(),
       toolAllowlist: z.array(z.string()),
       memoryEnabled: z.boolean().optional(),
       template: z.string().optional(),
@@ -236,7 +241,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const body = parse(z.object({
       name: z.string().optional(), description: z.string().optional(), systemPrompt: z.string().optional(),
       modelId: z.string().nullable().optional(), routing: z.enum(['auto', 'pinned']).optional(),
-      strategy: z.enum(['rolling', 'hierarchical', 'pinned', 'retrieval']).nullable().optional(),
+      strategy: z.enum(['rolling', 'hierarchical', 'hierarchical+retrieval', 'pinned', 'retrieval']).nullable().optional(),
       toolAllowlist: z.array(z.string()).optional(), memoryEnabled: z.boolean().optional(),
       title: z.string().max(80).optional(),
       avatarKind: z.enum(['initials', 'builtin', 'upload']).optional(),
@@ -339,7 +344,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     return { session, messages: store.listMessages(id), summaries: store.listSummaries(id), plan: readPlan(store, id), edits: listEdits(store, id), archived: store.listArchived(id), workshop };
   });
   app.patch('/api/sessions/:id', async (req) => {
-    const body = parse(z.object({ title: z.string().optional(), mode: z.enum(['chat', 'code']).optional() }), req.body);
+    const body = parse(z.object({ title: z.string().optional(), mode: z.enum(['chat', 'code']).optional(), modelPin: z.string().nullable().optional() }), req.body);
     return { session: store.updateSession((req.params as { id: string }).id, body) };
   });
   app.post('/api/sessions/:id/messages', async (req) => {
@@ -408,7 +413,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
 
   app.get('/api/models', async () => {
     const minute = new Date().toISOString().slice(0, 16);
-    const day = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }).format(new Date());
+    const day = geminiQuotaDay();
     const quota = FREE_TIER_SNAPSHOT.map((row) => {
       const used = store.quotaUse(row.apiName, day);
       return { ...row, availability: quotaAvailability(row, { rpm: used.rpmWindow === minute ? used.rpm : 0, tpm: used.tpmWindow === minute ? used.tpm : 0, rpd: used.rpd }) };
@@ -547,7 +552,18 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     return { job };
   });
 
-  app.get('/api/resources', async () => ({ current: snapshotResources(store, config.dataDir) }));
+  app.get('/api/resources', async () => {
+    const current = snapshotResources(store, config.dataDir);
+    const loadedModels = await ollamaLoaded(fetchImpl);
+    const flags = [...current.flags];
+    for (const loaded of loadedModels) {
+      const known = store.listModels().find((model) => model.apiName === loaded.name || model.name === loaded.name);
+      if (loaded.contextLength && known && loaded.contextLength + 256 < known.practicalBudget) {
+        flags.push({ level: 'warn' as const, text: `${loaded.name} is loaded with ${loaded.contextLength} tokens of context. This app budgets ${known.practicalBudget}.` });
+      }
+    }
+    return { current: { ...current, loadedModels, flags } };
+  });
   app.get('/api/resources/trends', async (req) => {
     const hours = Number((req.query as { hours?: string }).hours || 24);
     const since = new Date(Date.now() - hours * 3600_000).toISOString();
@@ -605,7 +621,54 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     notifier.addSubscription(body);
     return { ok: true };
   });
-  app.get('/api/logs', async () => ({ logs: store.listLogs() }));
+  app.get('/api/logs', async (req) => {
+    const query = req.query as { component?: string; level?: string; q?: string };
+    return { logs: searchLogs(store, query), components: LOG_COMPONENTS, debugLevel: store.getSettings().debugLevel };
+  });
+  app.get('/api/debug/runs/:id', async (req) => {
+    const id = (req.params as { id: string }).id;
+    const run = store.getRun(id);
+    if (!run) throw http(404, 'Run not found.');
+    const approvals = store.listApprovals().filter((item) => item.runId === id);
+    return redactValue({
+      run, steps: store.listSteps(id), approvals,
+      messages: store.listMessages(run.sessionId).filter((message) => message.runId === id || message.role === 'user'),
+    });
+  });
+  app.post('/api/debug/runs/:id/replay', async (req) => {
+    const run = store.getRun((req.params as { id: string }).id);
+    if (!run) throw http(404, 'Run not found.');
+    const first = store.listMessages(run.sessionId).find((message) => message.role === 'user' && message.runId === run.id)
+      ?? store.listMessages(run.sessionId).find((message) => message.role === 'user');
+    const rehearsal = store.getModel('model_rehearsal');
+    const replay = await engine.startTurn({
+      sessionId: run.sessionId, agentId: run.agentId,
+      content: `Replay the earlier request and answer from the rehearsal model.\n\n${first?.content || ''}`,
+      modelId: rehearsal?.id,
+    });
+    return { run: replay };
+  });
+  app.get('/api/debug/health', async () => ({ checks: await healthChecks(store, docker, fetchImpl, config.dataDir) }));
+  app.post('/api/debug/health/:id', async (req) => {
+    const checks = await healthChecks(store, docker, fetchImpl, config.dataDir);
+    const check = checks.find((item) => item.id === (req.params as { id: string }).id);
+    if (!check) throw http(404, 'No check with that name.');
+    return { check };
+  });
+  app.get('/api/debug/bundle', async (_req, reply) => {
+    const checks = await healthChecks(store, docker, fetchImpl, config.dataDir);
+    const runs = store.listRuns(8).map((run) => redactValue({ run, steps: store.listSteps(run.id) }));
+    const body = zipStore([
+      { name: 'logs.json', data: Buffer.from(JSON.stringify(searchLogs(store, { limit: 400 }), null, 2)) },
+      { name: 'config.json', data: Buffer.from(JSON.stringify(redactValue(store.getSettings()), null, 2)) },
+      { name: 'health.json', data: Buffer.from(JSON.stringify(checks, null, 2)) },
+      { name: 'runs.json', data: Buffer.from(JSON.stringify(runs, null, 2)) },
+      { name: 'versions.json', data: Buffer.from(JSON.stringify({ version: VERSION, node: process.version }, null, 2)) },
+    ]);
+    reply.header('content-type', 'application/zip');
+    reply.header('content-disposition', 'attachment; filename="local-agent-debug.zip"');
+    return reply.send(body);
+  });
   app.get('/api/memory', async (req) => ({ notes: store.listNotes(String((req.query as { agentId?: string }).agentId || '')) }));
   app.post('/api/memory', async (req) => {
     const body = parse(z.object({ agentId: z.string(), content: z.string().min(1), pinned: z.boolean().optional() }), req.body);
@@ -638,6 +701,37 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   return result.data;
 }
 
+async function healthChecks(store: Store, docker: DockerCtl, fetchImpl: typeof fetch, dataDir: string) {
+  const loaded = await ollamaLoaded(fetchImpl);
+  let ollamaOk = false;
+  try {
+    const response = await fetchImpl(`${(process.env.OLLAMA_HOST || 'http://127.0.0.1:11434').replace(/\/$/, '')}/api/ps`, { signal: AbortSignal.timeout(1500) });
+    ollamaOk = response.ok;
+  } catch { ollamaOk = false; }
+  const snap = snapshotResources(store, dataDir);
+  const backups = listBackups(dataDir);
+  const mcp = store.listMcp();
+  const settings = store.getSettings();
+  let searx = false;
+  if (settings.searxngUrl) {
+    try { searx = (await fetchImpl(`${settings.searxngUrl.replace(/\/$/, '')}/search?q=ping&format=json`, { signal: AbortSignal.timeout(1500) })).ok; } catch { searx = false; }
+  }
+  const dbFile = path.join(dataDir, 'local-agent.db');
+  const dbBytes = fs.existsSync(dbFile) ? fs.statSync(dbFile).size : 0;
+  return doctorChecks({
+    ollamaOk, loaded, dockerOk: docker.available(), mcpCount: mcp.length, mcpErrors: mcp.filter((item) => item.lastError).length,
+    searxngOk: searx, telegramQueued: telegramQueue(dataDir).length, dbBytes,
+    diskFreeBytes: snap.disk.freeBytes, memAvailableGiB: snap.memory.availableGiB,
+    geminiOpen: settings.geminiTier === 'paid' ? true : null, lastBackupAt: backups[0]?.createdAt ?? null, tailscaleOk: await tailscaleUp(),
+  });
+}
+
+function tailscaleUp(): Promise<boolean> {
+  return new Promise((resolve) => {
+    execFile('tailscale', ['ip', '-4'], { timeout: 800 }, (error, stdout) => resolve(!error && /\d+\.\d+/.test(String(stdout))));
+  });
+}
+
 function http(statusCode: number, message: string) {
   const error = new Error(message) as Error & { statusCode: number };
   error.statusCode = statusCode;
@@ -646,7 +740,7 @@ function http(statusCode: number, message: string) {
 
 function registerLibrary(app: FastifyInstance, ctx: Ctx) {
   const { store, engine, vault, config, fetchImpl } = ctx;
-  const embed = () => ollamaEmbedder(fetchImpl);
+  const embed = () => ollamaEmbedder(fetchImpl, store.getSettings().autoModels.embed || 'nomic-embed-text');
 
   app.get('/api/kb/collections', async () => ({ collections: listCollections(store), usage: kbUsage(store) }));
   app.post('/api/kb/collections', async (req) => {

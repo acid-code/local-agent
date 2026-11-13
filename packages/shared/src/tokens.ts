@@ -19,9 +19,10 @@ const CHARS_PER_TOKEN: Record<TokenizerId, number> = {
 export function estimateTokens(text: string, tokenizer: TokenizerId = 'approx'): number {
   if (!text) return 0;
   const cjk = text.match(/[\u3040-\u30ff\u3400-\u9fff]/g)?.length ?? 0;
-  const rest = Math.max(0, text.length - cjk);
+  const rtl = text.match(/[\u0590-\u08ff]/g)?.length ?? 0;
+  const rest = Math.max(0, [...text].length - cjk - rtl);
   const ratio = CHARS_PER_TOKEN[tokenizer] ?? 4;
-  return Math.max(1, Math.ceil(rest / ratio + cjk / 1.35));
+  return Math.max(1, Math.ceil(rest / ratio + cjk / 1.35 + rtl));
 }
 
 export function estimateMessageTokens(

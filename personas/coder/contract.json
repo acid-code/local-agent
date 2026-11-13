@@ -9,5 +9,6 @@
   "tools": ["list_dir", "read_file", "grep", "glob", "apply_patch", "shell", "plan", "git", "request_folder", "handoff_cli", "request_secret", "remember", "recall"],
   "approvals": ["git:push", "git:pull", "git:revert", "git:force-push", "request_folder", "handoff_cli", "write_file"],
   "inputs": ["chat", "plan", "handoff"],
-  "outputs": ["reply", "patch", "activity"]
+  "outputs": ["reply", "patch", "activity"],
+  "strategy": "hierarchical+retrieval"
 }

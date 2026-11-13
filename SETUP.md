@@ -181,7 +181,9 @@ cat ~/.ssh/id_ed25519.pub
 
 Clones and pushes then work as `asaf` on the box. The phone never holds that key. A push still asks for approval in the UI or in Telegram.
 
-What each shipped persona is allowed to read, write, and approve is in [docs/personas.md](docs/personas.md). The LAN setup page warns when a configured local model is an embedding model, because those cannot take tool calls.
+Settings has a Debug section: live logs, a run inspector with a rehearsal replay, health checks, and a redacted zip. `npm run doctor` prints the same checks over SSH. `npm run reset-owner` deletes the owner account and prints a new setup token once. Use that from the mini PC if the password is forgotten. Nothing in Debug is uploaded.
+
+What each shipped persona is allowed to read, write, and approve is in [docs/personas.md](docs/personas.md). The scenario list, and which checks run in CI, is in [docs/e2e-scenarios.md](docs/e2e-scenarios.md). The LAN setup page maps Auto's fast, main, coder, thinking, smart/cloud, and embed roles to model names, and it warns when Ollama reports that a local chat model cannot take tool calls. Each Ollama request sets `num_ctx` to that model's practical budget. The installer also sets `OLLAMA_CONTEXT_LENGTH=32768` on the Ollama service as a fallback. The Resources page shows the context Ollama actually loaded, from `/api/ps`.
 
 A workshop is how you work on more than one project in the same chat, the way a Cursor window can hold the server and the Android app together. In the chat list, open Workshop, give each folder a short label (`server`, `apk`) and its absolute path on the mini PC, and start the chat. The coder sees both trees in the prompt. File, shell, and git commands name the project (`server/src/index.ts`, git pull in `apk`). Pull and push wait for your approval. The turn is routed to a model that can code, and stays on a local one unless the usual rules escalate it. The folders have to already be on the box.
 

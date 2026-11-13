@@ -1,3 +1,5 @@
+import { DEFAULT_AUTO_MAP, type AutoMap } from '@local-agent/shared';
+
 export type SandboxMode = 'docker-or-host' | 'docker-only' | 'host';
 
 export interface Settings {
@@ -28,6 +30,11 @@ export interface Settings {
   gitName: string;
   gitEmail: string;
   gitSshKey: string;
+  autoModels: AutoMap;
+  /** info hides debug lines. debug shows them. Read on every write, so it changes without a restart. */
+  debugLevel: 'info' | 'debug';
+  /** api name -> whether Ollama reported tool support. Absent means unknown. */
+  toolSupport: Record<string, boolean>;
   agentLimits: Record<string, { maxTokensPerDay?: number; maxSpendUsd?: number; maxRunMs?: number; readOnly?: boolean }>;
 }
 
@@ -58,9 +65,18 @@ export const DEFAULT_SETTINGS: Settings = {
   gitName: 'local-agent',
   gitEmail: 'agent@local',
   gitSshKey: '',
+  autoModels: { ...DEFAULT_AUTO_MAP },
+  debugLevel: 'info',
+  toolSupport: {},
   agentLimits: {},
 };
 
 export function normalizeSettings(value: Partial<Settings> | null | undefined): Settings {
-  return { ...DEFAULT_SETTINGS, ...(value ?? {}), version: value?.version || DEFAULT_SETTINGS.version };
+  return {
+    ...DEFAULT_SETTINGS,
+    ...(value ?? {}),
+    autoModels: { ...DEFAULT_AUTO_MAP, ...(value?.autoModels ?? {}) },
+    toolSupport: { ...(value?.toolSupport ?? {}) },
+    version: value?.version || DEFAULT_SETTINGS.version,
+  };
 }

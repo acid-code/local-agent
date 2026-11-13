@@ -28,6 +28,8 @@ export interface PlanInput {
   outputReserve: number;
   budgetOverride?: number | null;
   system: string;
+  /** Dropped from the end when the instructions alone are tight. Skills last, so they go first. */
+  optional?: { label: string; text: string }[];
   pinned: string[];
   summaries: SummaryNode[];
   retrieved: RetrievedChunk[];
@@ -47,10 +49,43 @@ export interface ContextPlan {
   overflow: boolean;
   truncated: boolean;
   notes: string[];
+  trimmed: string[];
+  excerpted: { id: string; omitted: string }[];
 }
 
 function tokens(text: string, tokenizer: TokenizerId) {
   return estimateTokens(text, tokenizer);
+}
+
+export function shrinkBudget(budget: number): number {
+  return Math.max(256, Math.floor(budget * 0.75));
+}
+
+export function isContextOverflowError(message: string): boolean {
+  return /context length|maximum context|num_ctx|too many tokens|context window|overflow/i.test(message);
+}
+
+export function rootCapTokens(practicalBudget: number): number {
+  return Math.min(1200, Math.max(200, Math.floor(practicalBudget * 0.2)));
+}
+
+export function codePoints(text: string): string[] {
+  return [...text];
+}
+
+export function headTailExcerpt(content: string, maxChars: number): { excerpt: string; omitted: string } {
+  const chars = codePoints(content);
+  if (chars.length <= maxChars) return { excerpt: content, omitted: '' };
+  const head = Math.max(20, Math.floor(maxChars * 0.45));
+  const tail = Math.max(20, Math.floor(maxChars * 0.45));
+  const omitted = chars.slice(head, Math.max(head, chars.length - tail)).join('');
+  const excerpt = `${chars.slice(0, head).join('')}\n…[${omitted.length} characters indexed for retrieval]…\n${chars.slice(-tail).join('')}`;
+  return { excerpt, omitted };
+}
+
+export function hardCapText(content: string, tokenizer: TokenizerId, capTokens: number): string {
+  if (estimateTokens(content, tokenizer) <= capTokens) return content;
+  return headTailExcerpt(content, capTokens * 3).excerpt;
 }
 
 export function planContext(input: PlanInput): ContextPlan {
@@ -61,6 +96,17 @@ export function planContext(input: PlanInput): ContextPlan {
   );
   const budgetTokens = Math.max(256, cap - input.outputReserve);
   const notes: string[] = [];
+  const trimmed: string[] = [];
+  const optional = [...(input.optional ?? [])];
+  let system = input.system;
+  const optionalCost = () => tokens([system, ...optional.map((part) => part.text)].join('\n\n'), input.tokenizer);
+  while (optional.length && optionalCost() > budgetTokens * 0.6) {
+    const dropped = optional.pop();
+    if (dropped) trimmed.push(dropped.label);
+  }
+  if (optional.length) system = [system, ...optional.map((part) => part.text)].filter(Boolean).join('\n\n');
+  if (trimmed.length) notes.push(`Trimmed optional context: ${trimmed.join(', ')}.`);
+  if (tokens(input.system, input.tokenizer) > budgetTokens) notes.push('The instructions alone are larger than this model budget.');
   const pinnedBlock = input.pinned.length ? `Pinned facts:\n${input.pinned.map((fact) => `- ${fact}`).join('\n')}` : '';
 
   let summaryNodes: SummaryNode[] = [];
@@ -73,6 +119,13 @@ export function planContext(input: PlanInput): ContextPlan {
     const chunks = input.summaries.filter((node) => node.level === 1 && !node.foldedInto).slice(-3);
     summaryNodes = [...(root ? [root] : []), ...chunks];
     notes.push('Hierarchical plan keeps the root summary plus the newest open chunk summaries.');
+  } else if (input.strategy === 'hierarchical+retrieval') {
+    const root = [...input.summaries].reverse().find((node) => node.level === 2);
+    const chunks = input.summaries.filter((node) => node.level === 1 && !node.foldedInto).slice(-3);
+    summaryNodes = [...(root ? [root] : []), ...chunks];
+    const retrievalBudget = Math.max(80, Math.floor(budgetTokens * 0.25));
+    extra = headTailExcerpt(input.retrieved.map((chunk) => chunk.text).join('\n---\n'), retrievalBudget * 3).excerpt;
+    notes.push('Hierarchical plus retrieval keeps the root, the open chunk summaries, and retrieved passages in separate shares of the budget.');
   } else if (input.strategy === 'retrieval') {
     extra = input.retrieved.map((chunk) => chunk.text).join('\n---\n');
     notes.push(input.retrieved.length ? `Retrieved ${input.retrieved.length} older chunks.` : 'No retrieved chunks.');
@@ -83,7 +136,7 @@ export function planContext(input: PlanInput): ContextPlan {
   let summaryText = summaryNodes.map((node) => node.content).filter(Boolean).join('\n\n');
   if (extra) summaryText = [summaryText, extra].filter(Boolean).join('\n\n');
 
-  const systemTokens = tokens(input.system, input.tokenizer) + tokens(pinnedBlock, input.tokenizer) + 24;
+  const systemTokens = tokens(system, input.tokenizer) + tokens(pinnedBlock, input.tokenizer) + 24;
   let summaryTokens = tokens(summaryText, input.tokenizer);
   let room = budgetTokens - systemTokens - summaryTokens - 32;
   if (room < 160 && summaryText.length > 400) {
@@ -94,18 +147,21 @@ export function planContext(input: PlanInput): ContextPlan {
   }
 
   const pool = input.strategy === 'pinned' ? input.messages.slice(-4) : input.messages;
+  const prepared = pool.map((message) => prepareMessage(message, input.tokenizer));
+  const excerpted = prepared.flatMap((item) => item.omitted ? [{ id: item.message.id, omitted: item.omitted }] : []);
   const recent: ContextSourceMessage[] = [];
-  let truncated = false;
-  for (let index = pool.length - 1; index >= 0; index -= 1) {
-    const message = pool[index]!;
+  let truncated = excerpted.length > 0;
+  for (let index = prepared.length - 1; index >= 0; index -= 1) {
+    const message = prepared[index]!.message;
     const cost = tokens(message.content, input.tokenizer) + 4;
     if (cost <= room || recent.length === 0) {
       if (cost > room) {
-        const keep = Math.max(80, room * 3);
-        recent.unshift({ ...message, content: message.content.slice(-keep) });
+        const fit = headTailExcerpt(message.content, Math.max(80, room * 3));
+        recent.unshift({ ...message, content: fit.excerpt });
+        if (fit.omitted) excerpted.push({ id: message.id, omitted: fit.omitted });
         truncated = true;
         room = 0;
-        notes.push('The newest message was truncated to fit the budget.');
+        notes.push('The newest message was excerpted, head and tail, to fit the budget.');
         break;
       }
       recent.unshift(message);
@@ -114,10 +170,17 @@ export function planContext(input: PlanInput): ContextPlan {
     }
     break;
   }
+  const newestUser = [...input.messages].reverse().find((message) => message.role === 'user');
+  if (newestUser && !recent.some((message) => message.id === newestUser.id)) {
+    const fit = headTailExcerpt(newestUser.content, Math.max(120, Math.floor(budgetTokens * 0.25) * 3));
+    recent.unshift({ ...newestUser, content: fit.excerpt });
+    if (fit.omitted) excerpted.push({ id: newestUser.id, omitted: fit.omitted });
+    notes.push('Kept the newest user turn.');
+  }
 
   const recentIds = new Set(recent.map((message) => message.id));
   const droppedIds = input.messages.filter((message) => !recentIds.has(message.id)).map((message) => message.id);
-  const preamble = [input.system, pinnedBlock, summaryText ? `Earlier in this conversation:\n${summaryText}` : '']
+  const preamble = [system, pinnedBlock, summaryText ? `Earlier in this conversation:\n${summaryText}` : '']
     .filter(Boolean)
     .join('\n\n');
   const estimatedTokens = tokens(preamble, input.tokenizer) + recent.reduce((sum, message) => sum + tokens(message.content, input.tokenizer) + 4, 0);
@@ -135,10 +198,26 @@ export function planContext(input: PlanInput): ContextPlan {
     overflow,
     truncated,
     notes,
+    trimmed,
+    excerpted,
   };
 }
 
+function prepareMessage(message: ContextSourceMessage, tokenizer: TokenizerId): { message: ContextSourceMessage; omitted: string } {
+  const cap = message.role === 'tool' ? 4000 : 12000;
+  if (codePoints(message.content).length <= cap) return { message, omitted: '' };
+  const fit = headTailExcerpt(message.content, cap);
+  const reference = message.role === 'tool' ? `\nRead more with read_output message=${message.id} offset=0.` : '';
+  return { message: { ...message, content: `${fit.excerpt}${reference}` }, omitted: fit.omitted };
+}
+
 /** Messages that should be folded into the next summary version. */
+/** Small models keep the 1800-token trigger. Large models wait until about half their practical budget. */
+export function summaryTriggerFor(model: { sizeClass: 'small' | 'large'; practicalBudget: number }, smallDefault = 1800): number {
+  if (model.sizeClass !== 'large') return smallDefault;
+  return Math.max(smallDefault, Math.floor(model.practicalBudget * 0.5));
+}
+
 export function foldCandidates(
   messages: ContextSourceMessage[],
   coveredIds: Set<string>,
