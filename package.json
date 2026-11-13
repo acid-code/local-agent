@@ -1,0 +1,23 @@
+{
+  "name": "local-agent",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "dev": "npm run build -w @local-agent/shared && concurrently -n server,web -c blue,magenta \"npm run dev -w @local-agent/server\" \"npm run dev -w @local-agent/web\"",
+    "build": "npm run build -w @local-agent/shared && npm run build -w @local-agent/server && npm run build -w @local-agent/web",
+    "test": "npm run build -w @local-agent/shared && npm test -w @local-agent/server",
+    "typecheck": "npm run build -w @local-agent/shared && npm run typecheck -w @local-agent/server && npm run typecheck -w @local-agent/web",
+    "start": "npm run start -w @local-agent/server",
+    "icons": "python3 scripts/make-icons.py"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
