@@ -19,6 +19,10 @@ jobs:
           distribution: temurin
           java-version: 21
       - uses: android-actions/setup-android@v3
+        with:
+          # The action's default list still asks for the removed "tools" package.
+          # AGP 8.7.2 with compileSdk 35 needs platform 35 and build-tools 35.0.0.
+          packages: platform-tools platforms;android-35 build-tools;35.0.0
       - name: Sync the Capacitor shell
         working-directory: apps/mobile
         run: |
