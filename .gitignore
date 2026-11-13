@@ -11,4 +11,6 @@ data
 .DS_Store
 coverage
 *.log
+*.keystore
+*.jks
 .vite

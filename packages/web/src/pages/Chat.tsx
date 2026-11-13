@@ -53,7 +53,11 @@ export function Chat() {
     setStreaming('');
   }
 
-  useEffect(() => { refreshLists().then((rows) => { if (rows[0]) void openSession(rows[0].id); }).catch(() => undefined); }, []);
+  useEffect(() => {
+    const share = new URLSearchParams(window.location.search).get('share');
+    if (share) setDraft(share);
+    refreshLists().then((rows) => { if (rows[0]) void openSession(rows[0].id); }).catch(() => undefined);
+  }, []);
   useEffect(() => { box.current?.scrollTo({ top: box.current.scrollHeight }); }, [messages, streaming]);
 
   useEffect(() => {

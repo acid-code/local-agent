@@ -35,7 +35,7 @@ npm run dev
 
 The API is `http://127.0.0.1:8787`. The UI is `http://127.0.0.1:5173`.
 
-On the mini PC itself, systemd is the better install because the process can see real RAM, the iGPU, and Ollama on localhost. See `deploy/local-agent.service`. Run the Node process as a user in the `docker` group if agents should manage containers.
+On the mini PC, `sudo bash scripts/install-server.sh --dry-run` prints every command, and the same script without `--dry-run` installs Docker, Compose, Mesa Vulkan for the Radeon 780M, the systemd unit, and the app. `--with-ollama` and `--with-tailscale` are optional. `scripts/uninstall-server.sh` removes the unit and keeps the data unless you pass `--purge`. The Windows laptop script is `scripts/setup-client.ps1`. The phone app is the Capacitor shell in `apps/mobile`. Details, including the Android signing secrets, are in [SETUP.md](SETUP.md).
 
 ```bash
 sudo cp deploy/local-agent.service /etc/systemd/system/

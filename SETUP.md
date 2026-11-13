@@ -8,6 +8,29 @@ Replace `asaf` below if that is not the Linux account on the box. The app login 
 
 The box is headless: Ryzen 7 8745HS, 48 GB, Radeon 780M. You administer it over SSH. The app binds to port 8787 on all interfaces, but you do not forward that port on the router. At home the laptop uses the LAN address. Everywhere else, Tailscale.
 
+### Install script
+
+Ubuntu or Debian. Clone the repo, look at the plan, then run it. The script is idempotent: a second run skips anything already installed and does not replace an existing `/opt/local-agent/.env`.
+
+```bash
+git clone https://github.com/acid-code/local-agent.git
+cd local-agent
+bash scripts/install-server.sh --dry-run --user asaf --with-ollama --with-tailscale
+sudo bash scripts/install-server.sh --user asaf --with-ollama --with-tailscale
+```
+
+`--dry-run` prints every command and changes nothing. `--native` installs Node 22 and runs the process directly. Without that flag the systemd unit runs `docker compose up`. `--user` is the Linux account that owns the files. It is created if it does not exist, and it is added to the `docker` group. Vulkan/Mesa (`mesa-vulkan-drivers`, `libvulkan1`) is installed for the Radeon 780M. A cookie secret is generated into `.env` only when that file is missing.
+
+The script prints the LAN URL and, once Tailscale is up, the Tailscale URL. Then finish `tailscale up` if you asked for Tailscale, and continue at “Create the owner account” below. The manual steps under that are the same work the script does, if you want to see each piece.
+
+To remove the service and keep the data and keys:
+
+```bash
+sudo bash scripts/uninstall-server.sh
+```
+
+`--purge` also deletes `/opt/local-agent` and the `localagent` user when that was the account.
+
 ### 1. Install the pieces
 
 On a Debian or Ubuntu box:
@@ -146,6 +169,15 @@ MCP servers are added in Tools. Import finds Cursor, Claude, VS Code, and `~/.co
 
 At home, bookmark `http://<lan-ip>:8787`. On university Wi-Fi, install Tailscale, sign in with the same tailnet, and bookmark `http://100.x.y.z:8787`. Same owner password. The session cookie is for that origin, so the LAN bookmark and the Tailscale bookmark are two logins. That is fine.
 
+From PowerShell, `scripts/setup-client.ps1` does that setup and explains each step before it runs. `-WhatIf` prints the plan and changes nothing.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup-client.ps1 -WhatIf -ServerUrl "http://100.x.y.z:8787" -SshHost "asaf@100.x.y.z" -SshKey -TerminalProfile
+powershell -ExecutionPolicy Bypass -File .\scripts\setup-client.ps1 -ServerUrl "http://100.x.y.z:8787" -SshHost "asaf@100.x.y.z" -SshKey -TerminalProfile
+```
+
+It checks Tailscale and installs it with winget when the command is missing, writes a desktop shortcut to the console, and, with `-SshKey`, creates an ed25519 key if you do not have one and prints the public half for `authorized_keys` on the mini PC. `-TerminalProfile` adds a Windows Terminal profile that runs `ssh` to `-SshHost`. At the end it tells you how to install the PWA from Edge or Chrome. The script does not copy API keys onto the laptop.
+
 Use the laptop for:
 
 - The setup checklist (scan, pull a model, start SearXNG).
@@ -184,6 +216,31 @@ Or use Setup in the UI. The exact command is shown before it runs.
 Telegram is the better approval path on a phone. After `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are in `secrets.env` and the service has been restarted, approval requests arrive with Approve and Deny. Failures, low RAM, and an empty Gemini day-cap arrive as messages. You still open the PWA to read the trace.
 
 Do not keep a copy of API keys in a phone note. If a run needs a new key, wait until you are at the laptop or SSH, and store it on the box.
+
+### Android app
+
+The PWA above is enough. `apps/mobile` is a thin Capacitor shell for when you want a real APK: a home-screen icon, a share target, the microphone permission for push-to-talk, and a notification when an approval is waiting.
+
+Capacitor is the shell, not a Trusted Web Activity. A TWA locks the app to one origin through Digital Asset Links. This box is reached at a LAN address and a Tailscale address, and either can change. The APK opens a one-page setup, you type the URL you want today, and the WebView then loads that origin. The chat, the trace, and the login stay the web console. A shared text (`ACTION_SEND` of `text/plain`) lands in the composer as `?share=`.
+
+Notifications do not use Firebase. A WebView cannot be relied on for Web Push without Play services, and this box is not on the public internet. The shell asks for notification permission and, about every 15 minutes, polls `GET /api/approvals` with an API token. Create that token while logged in (`POST /api/tokens` with `{"name":"phone"}`) and paste the `la_…` value into the app’s optional token field. It is stored in the app’s preferences. It is not a Gemini key and it cannot reveal the vault.
+
+Every push to `main` builds the APK and publishes a GitHub release tagged `main-<shortsha>`, marked latest. To sign it with a key you keep, add these Actions secrets on the repository (Settings, Secrets and variables, Actions). Do not commit the keystore.
+
+| Secret | Value |
+| --- | --- |
+| `ANDROID_KEYSTORE_BASE64` | The keystore file, base64-encoded (`base64 -w0 local-agent.keystore`). |
+| `ANDROID_KEYSTORE_PASSWORD` | The store password. |
+| `ANDROID_KEY_ALIAS` | The key alias inside the store. |
+| `ANDROID_KEY_PASSWORD` | The key password. |
+
+Create the keystore once, on a machine you control, and keep the file with your backups:
+
+```bash
+keytool -genkeypair -v -keystore local-agent.keystore -alias local-agent -keyalg RSA -keysize 2048 -validity 10000
+```
+
+If any of the four secrets is missing, the workflow still publishes an APK signed with a throwaway debug keystore. That build installs, and a later release-signed APK will not update over it. The release notes say which kind of signature was used. The workflow does not run on pull requests, only after the commit is on `main`.
 
 ## What stays where
 

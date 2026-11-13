@@ -15,3 +15,13 @@ jobs:
       - run: npm test
       - run: npm run typecheck
       - run: npm run build
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Installer dry-run
+        run: |
+          bash -n scripts/install-server.sh
+          bash -n scripts/uninstall-server.sh
+          bash scripts/install-server.sh --dry-run --with-ollama --with-tailscale
+          bash scripts/uninstall-server.sh --dry-run --purge
