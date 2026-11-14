@@ -107,6 +107,15 @@ export function geminiStateOf(provider: { enabled: boolean; apiKeyEnv: string | 
   return env[provider.apiKeyEnv || 'GEMINI_API_KEY'] ? 'open' : 'off';
 }
 
+/** Auto roles that point at a local model Ollama does not have. Cloud names (gemini…) are skipped. */
+export function missingRoleModels(map: Record<string, string>, installed: string[]): string[] {
+  const names = new Set(installed.flatMap((name) => [name, name.replace(/:latest$/, '')]));
+  return Object.entries(map)
+    .filter(([, value]) => value && !/^(gemini|models\/gemini)/i.test(value))
+    .filter(([, value]) => !names.has(value) && !installed.some((name) => name.startsWith(`${value}:`)))
+    .map(([role, value]) => `${role} → ${value}`);
+}
+
 export function zipStore(files: { name: string; data: Buffer }[]): Buffer {
   const locals: Buffer[] = [];
   const centrals: Buffer[] = [];

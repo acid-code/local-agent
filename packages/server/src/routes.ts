@@ -18,7 +18,7 @@ import type { Notifier } from './notify.js';
 import { createBackup, listBackups, shipBackup, stageRestore } from './ops.js';
 import { telegramQueue } from './notify.js';
 import { ollamaLoaded } from './ollama.js';
-import { doctorChecks, geminiStateOf, redactValue, searchLogs, zipStore, LOG_COMPONENTS, type LogComponent } from './debug.js';
+import { doctorChecks, geminiStateOf, missingRoleModels, redactValue, searchLogs, zipStore, LOG_COMPONENTS, type LogComponent } from './debug.js';
 import { previewPrune, runPrune, snapshotResources } from './resources.js';
 import { speak, transcribe, voiceStatus, KOKORO_COMMAND, WHISPER_COMMAND } from './voice.js';
 import { formatSearch, listWorkspace, readWorkspaceFile, searxngHealth, searxngQuery } from './tools.js';
@@ -757,12 +757,21 @@ async function healthChecks(store: Store, docker: DockerCtl, fetchImpl: typeof f
   const dbFile = path.join(dataDir, 'local-agent.db');
   const dbBytes = fs.existsSync(dbFile) ? fs.statSync(dbFile).size : 0;
   const embedWarning = ollamaOk ? await embedRoleWarning(store, fetchImpl) : null;
+  let installed: string[] | null = null;
+  if (ollamaOk) {
+    try {
+      const tags = await fetchImpl(`${(process.env.OLLAMA_HOST || 'http://127.0.0.1:11434').replace(/\/$/, '')}/api/tags`, { signal: AbortSignal.timeout(1500) });
+      if (tags.ok) installed = ((await tags.json()) as { models?: { name: string }[] }).models?.map((model) => model.name) ?? [];
+    } catch { installed = null; }
+  }
+  const missingRoles = installed ? missingRoleModels(settings.autoModels as unknown as Record<string, string>, installed) : [];
   return [...doctorChecks({
     ollamaOk, loaded, dockerOk: await docker.ping(), mcpCount: mcp.length, mcpErrors: mcp.filter((item) => item.lastError).length,
     searxngOk: searx.ok, searxngDetail: searx.detail, telegramQueued: telegramQueue(dataDir).length, dbBytes,
     diskFreeBytes: snap.disk.freeBytes, memAvailableGiB: snap.memory.availableGiB,
     geminiOpen: settings.geminiTier === 'paid' ? true : null, geminiState: geminiStateOf(store.getProvider('prov_gemini')) === 'off' ? 'off' : undefined, lastBackupAt: backups[0]?.createdAt ?? null, tailscaleOk: await tailscaleUp(),
-  }), { id: 'embed', ok: !embedWarning, detail: embedWarning || (ollamaOk ? 'The embed role is an embedding model.' : 'Ollama is down, so the embed role was not checked.') }];
+  }), { id: 'embed', ok: !embedWarning, detail: embedWarning || (ollamaOk ? 'The embed role is an embedding model.' : 'Ollama is down, so the embed role was not checked.') },
+  { id: 'roles', ok: missingRoles.length === 0, detail: installed === null ? 'Ollama is down, so the Auto roles were not checked.' : missingRoles.length ? `Auto roles point at models Ollama does not have: ${missingRoles.join(', ')}. Pull them or change Defaults in Setup.` : 'Every Auto role points at an installed model.' }];
 }
 
 function tailscaleUp(): Promise<boolean> {

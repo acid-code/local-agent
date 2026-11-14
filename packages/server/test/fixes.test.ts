@@ -12,7 +12,7 @@ import { searxngConfig } from '../src/routes.js';
 import { formatSearch, searxngHealth, searxngQuery } from '../src/tools.js';
 import { createCollection, embedRoleWarning, hashEmbedder, ingestBuffer } from '../src/kb.js';
 import { decideAuto, foldCandidates, likelyNeedsTools, nextAutoTier, DEFAULT_AUTO_MAP } from '@local-agent/shared';
-import { doctorChecks, geminiStateOf } from '../src/debug.js';
+import { doctorChecks, geminiStateOf, missingRoleModels } from '../src/debug.js';
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
@@ -158,6 +158,12 @@ describe('models without tool calls', () => {
 });
 
 describe('models removed from Ollama', () => {
+  it('flags Auto roles mapped to models Ollama does not have', () => {
+    const map = { fast: 'smollm2:135m', main: 'qwen3', coder: '', thinking: '', cloud: 'gemini-3.6-flash', embed: 'nomic-embed-text' };
+    expect(missingRoleModels(map, ['smollm2:135m', 'qwen3:0.6b'])).toEqual(['embed → nomic-embed-text']);
+    expect(missingRoleModels(map, ['smollm2:135m', 'qwen3:0.6b', 'nomic-embed-text:latest'])).toEqual([]);
+  });
+
   it('marks the model missing and falls back to the next tier with a note', async () => {
     const dir = tmp();
     const provider: ModelProvider = {
