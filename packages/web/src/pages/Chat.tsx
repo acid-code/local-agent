@@ -110,6 +110,8 @@ export function Chat() {
   }
   // Latest click wins: every open aborts the one before it, and stale replies are dropped.
   const openGate = useRef(latestOnly());
+  // The open chat's own record, so the header is right even when it is not on the loaded page of the list.
+  const [openedMeta, setOpenedMeta] = useState<Session | null>(null);
   const currentRef = useRef<string | null>(null);
   async function openSession(id: string, gate = openGate.current.begin()) {
     // Restore this chat's unsent draft in the same render as the switch, so the save effect never wipes it.
@@ -122,6 +124,7 @@ export function Chat() {
         api<typeof chatWs>(`/api/sessions/${id}/workspaces`, { signal: gate.signal }).catch((error) => { if (isAbort(error)) throw error; return { items: [], roots: [], sets: [] }; }),
       ]);
       if (!gate.current()) return;
+      setOpenedMeta(data.session);
       setChatWs(wsData);
       setMessages(data.messages);
       setPlan(data.plan);
@@ -239,7 +242,7 @@ export function Chat() {
   }, [runId]);
 
   async function createChat(nextMode: 'chat' | 'code'): Promise<string | undefined> {
-    const persona = sessions.find((session) => session.id === current)?.agentId || agents[0]?.id;
+    const persona = (sessions.find((session) => session.id === current) || (openedMeta?.id === current ? openedMeta : undefined))?.agentId || agents[0]?.id;
     if (!persona) return undefined;
     const created = await post<{ session: Session }>('/api/sessions', { agentId: persona, mode: nextMode, title: nextMode === 'code' ? 'Coding session' : 'New chat' });
     await refreshLists();
@@ -389,7 +392,7 @@ export function Chat() {
     } catch (error) { toast(errorText(error), 'error'); }
   }
 
-  const currentSession = sessions.find((session) => session.id === current);
+  const currentSession = sessions.find((session) => session.id === current) || (openedMeta?.id === current ? openedMeta : undefined);
   const pinnedName = modelPin ? models.find((model) => model.id === modelPin)?.name || modelPin : '';
   const lastAssistant = [...messages].reverse().find((message) => message.role === 'assistant')?.id;
   const setupLeft = checklist.filter((item) => !item.optional && !item.ok);
