@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>local-agent</title>
+    <style>
+      :root { color-scheme: dark; }
+      body { margin: 0; font-family: "Segoe UI", sans-serif; background: #090a0c; color: #f4f0e6; }
+      main { max-width: 32rem; margin: 0 auto; padding: 2rem 1.2rem; }
+      h1 { font-weight: 560; letter-spacing: -0.03em; }
+      p { color: #b7b1a6; line-height: 1.5; }
+      label { display: block; margin: 1rem 0 0.4rem; color: #b7b1a6; }
+      input { width: 100%; box-sizing: border-box; background: #111318; color: inherit; border: 1px solid rgba(243,236,223,.16); border-radius: 12px; padding: 0.8rem; }
+      button { margin-top: 1.2rem; background: #e4b56a; color: #1a140c; border: 0; border-radius: 999px; padding: 0.8rem 1.2rem; font-weight: 600; }
+      .warn { color: #f3d7a6; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>local-agent</h1>
+      <p>Point this window at the server. At home that is the LAN address. On this PC, with the server in WSL, it is <span class="warn">http://127.0.0.1:8787</span>. The login cookie stays in this app.</p>
+      <form id="setup">
+        <label for="url">Server URL</label>
+        <input id="url" name="url" inputmode="url" autocomplete="url" placeholder="http://192.168.1.20:8787" required />
+        <button type="submit">Open the console</button>
+      </form>
+      <p class="warn" id="note"></p>
+    </main>
+    <script>
+      const input = document.querySelector('#url');
+      const note = document.querySelector('#note');
+      const params = new URLSearchParams(location.search);
+      if (params.get('error')) note.textContent = params.get('error');
+      window.localAgent.getUrl().then((url) => {
+        if (url) input.value = url;
+      });
+      document.querySelector('#setup').addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const result = await window.localAgent.setUrl(input.value);
+        if (!result.ok) note.textContent = result.error || 'That URL was not saved.';
+      });
+    </script>
+  </body>
+</html>

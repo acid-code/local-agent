@@ -268,6 +268,16 @@ keytool -genkeypair -v -keystore local-agent.keystore -alias local-agent -keyalg
 
 If any of the four secrets is missing, the workflow still publishes an APK signed with a throwaway debug keystore. That build installs, and a later release-signed APK will not update over it. The release notes say which kind of signature was used. The workflow does not run on pull requests, only after the commit is on `main`.
 
+### Windows app
+
+`apps/desktop` is the same idea as the APK: a window that asks for the server URL on first launch, remembers it, and loads that origin. Change the URL later from the Server menu. The console login is the normal `la_session` cookie, kept in the app's user data. The app does not store API keys.
+
+Every pull request, and every push to `main`, builds two unsigned files with `electron-builder`: `local-agent-portable.exe` and `local-agent-setup.exe` (NSIS, one click). The workflow uploads both as the `local-agent-windows` artifact. On `main` it also adds them to the GitHub release tagged `main-<shortsha>`, the same tag as the APK. The published names are `local-agent-<shortsha>-portable.exe` and `local-agent-<shortsha>-setup.exe`.
+
+Windows SmartScreen will warn because the exe is unsigned. Choose **More info**, then **Run anyway**.
+
+Running the server itself on a Windows laptop, inside WSL2, is [docs/wsl-quickstart.md](docs/wsl-quickstart.md).
+
 ## What stays where
 
 | | Mini PC | Laptop | Phone |
