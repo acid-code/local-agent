@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Menu as DropMenu } from '../components/ui';
 import { ModelPicker, useUsableModels } from '../lib/models';
 import { browserDictationSupported, startDictation } from '../lib/dictation';
-import { AtSign, Info, Layers, Brain, Check, ChevronDown, Code2, Copy, Download, Eye, FileText, Folder, FolderGit2, GitBranch, ListTree, Menu, MessageSquarePlus, Pin, PinOff, Plus, Search, Mic, PanelRight, Paperclip, Pencil, Quote, RotateCcw, Send, Square, Trash2, Wrench, X } from 'lucide-react';
+import { AtSign, Info, Layers, Brain, Check, ChevronDown, Code2, Copy, Download, Eye, FileText, Folder, FolderGit2, GitBranch, ListTree, Menu, MessageSquarePlus, Pin, PinOff, Plus, Search, Mic, PanelRight, Paperclip, Pencil, Quote, RotateCcw, Send, Share, Square, Trash2, Volume2, Wrench, X } from 'lucide-react';
 import { CiteContext, type CiteHandlers } from '../components/Markdown';
 import { FileViewer, type QuotePick, type ViewerSource } from '../components/FileViewer';
 import { MentionPicker, type MentionPick } from '../components/MentionPicker';
@@ -17,6 +17,7 @@ import { PersonaChip, greetingFor, startersFor } from '../components/ChatChips';
 import { ContextPanel } from '../components/ContextPanel';
 import { parseSources, toolSummary } from '@local-agent/shared';
 import { toast, errorText } from '../lib/toast';
+import { speak } from '../lib/speak';
 import { api, post } from '../lib/api';
 import { isAbort, latestOnly } from '../lib/latest';
 import { Markdown } from '../components/Markdown';
@@ -82,9 +83,9 @@ export function Chat() {
   const [panel, setPanel] = useState<null | 'persona' | 'settings' | 'workspace' | 'files' | 'context' | 'state'>(null);
   // The persona status panel sits on the right on wide screens unless closed; on narrow ones it opens on demand.
   const [stateOpen, setStateOpen] = useState(() => localStorage.getItem('la-state-pane') !== 'closed');
-  const [wide, setWide] = useState(() => window.matchMedia('(min-width: 1100px)').matches);
+  const [wide, setWide] = useState(() => window.matchMedia('(min-width: 981px)').matches);
   useEffect(() => {
-    const query = window.matchMedia('(min-width: 1100px)');
+    const query = window.matchMedia('(min-width: 981px)');
     const onChange = () => setWide(query.matches);
     query.addEventListener('change', onChange);
     return () => query.removeEventListener('change', onChange);
@@ -609,6 +610,23 @@ export function Chat() {
     </div>
   );
 
+  function exportChat() {
+    const lines = [`# ${currentSession?.title || 'Chat'}`, ''];
+    for (const message of messages) {
+      if (message.role !== 'user' && message.role !== 'assistant') continue;
+      const [visible] = message.content.split(CONTEXT_MARK);
+      if (!visible?.trim()) continue;
+      const who = message.role === 'user' ? 'You' : agents.find((agent) => agent.id === message.agentId)?.name || persona?.name || 'Agent';
+      lines.push(`**${who}**${message.createdAt ? ` · ${new Date(message.createdAt).toLocaleString()}` : ''}`, '', visible.trim(), '');
+    }
+    const url = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/markdown' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${(currentSession?.title || 'chat').replace(/[^\p{L}\p{N} _-]+/gu, '').trim().slice(0, 60) || 'chat'}.md`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+
   return (
     <CiteContext.Provider value={citeHandlers}>
     <div className={`chat v2${trace ? ' with-trace' : ''}${panel || showState ? ' with-panel' : ''}`} style={persona?.accent ? { ['--persona' as string]: persona.accent } : undefined}>
@@ -644,24 +662,30 @@ export function Chat() {
       </aside>
       <section className="thread">
         <div className="thread-head">
-          <button className="btn ghost chats-btn" aria-label="Show chats" onClick={() => setRail(true)}><Menu size={16} /> <span>Chats</span></button>
-          {persona && <button className="persona-name" title={`${persona.name} · info (Ctrl+Shift+I)`} aria-label={`${persona.name}, open persona info`} aria-expanded={panel === 'persona' || panel === 'settings'} onClick={() => setPanel(panel === 'persona' || panel === 'settings' ? null : 'persona')}><Face agent={persona} size={22} /><span className="persona-label">{persona.name}</span></button>}
-          <strong className="thread-title" dir="auto" title={currentSession?.title}>{currentSession?.title || 'No chat open'}</strong>
-          {status && status !== 'completed' && <span className={`badge ${status === 'failed' ? 'bad' : active ? 'warn' : ''}`}>{status}</span>}
-          {mode === 'code' && <span className="badge warn">{currentSession?.workshopId ? 'workshop' : 'coding'}</span>}
-          <button className={trace ? 'btn ghost on' : 'btn ghost'} aria-pressed={trace} title="Show what the agent did: model, tools, timings" onClick={() => setTrace((value) => !value)}><ListTree size={16} aria-hidden /> <span>Trace</span></button>
-          {currentSession && <button className={panel === 'context' ? 'btn ghost on' : 'btn ghost'} aria-pressed={panel === 'context'} title="Helpers, timers, files and edits from this chat" onClick={() => setPanel(panel === 'context' ? null : 'context')}><Layers size={16} aria-hidden /> <span>This chat</span></button>}
-          {persona && <button className={showState ? 'btn ghost on' : 'btn ghost'} aria-pressed={showState} title={`${persona.name}: coding, upcoming, computer, voice`} onClick={toggleState}><PanelRight size={16} aria-hidden /> <span>Status</span></button>}
-          {currentSession && <DropMenu label="Chat options" items={[
-            { label: 'Rename chat', icon: Pencil, onSelect: () => { setRail(true); setRenaming(currentSession.id); setTitleDraft(currentSession.title); } },
-            { label: trace ? 'Hide trace' : 'Show trace', icon: ListTree, onSelect: () => setTrace((value) => !value) },
-            { label: 'Helpers, timers and files', icon: Layers, onSelect: () => setPanel('context') },
-            { label: 'Persona info', icon: Info, hint: 'Ctrl+Shift+I', onSelect: () => setPanel('persona') },
-            { label: 'Persona settings', icon: Pencil, onSelect: () => setPanel('settings') },
-            { label: 'Add or create workspaces', icon: FolderGit2, onSelect: () => setPanel('workspace') },
-            { label: 'New chat', icon: MessageSquarePlus, onSelect: () => void createChat('chat') },
-            { label: 'Delete chat', icon: Trash2, danger: true, separator: true, onSelect: () => void removeChat(currentSession.id) },
-          ]} />}
+          <button className="icon-btn round chats-btn" aria-label="Show chats" title="Chats" onClick={() => setRail(true)}><Menu size={17} /></button>
+          <span className="head-spacer" />
+          {persona && <button className="persona-name head-pill" title={`${currentSession?.title || 'New chat'} · persona info (Ctrl+Shift+I)`} aria-label={`${persona.name}, open persona info`} aria-expanded={panel === 'persona' || panel === 'settings'} onClick={() => setPanel(panel === 'persona' || panel === 'settings' ? null : 'persona')}>
+            <Face agent={persona} size={22} /><span className="persona-label ellipsis" dir="auto">{persona.name}{(persona as { title?: string }).title ? ` · ${(persona as { title?: string }).title}` : ''}</span>
+            {active && <span className="head-live" aria-label="working" />}
+          </button>}
+          <strong className="thread-title sr-only" dir="auto">{currentSession?.title || 'No chat open'}</strong>
+          <span className="head-spacer" />
+          <div className="head-actions">
+            {status && status !== 'completed' && !active && <span className={`badge ${status === 'failed' ? 'bad' : ''}`}>{status}</span>}
+            {mode === 'code' && <span className="badge warn">{currentSession?.workshopId ? 'workshop' : 'coding'}</span>}
+            {currentSession && <button className="icon-btn round" aria-label="Export chat" title="Export this chat as Markdown" onClick={exportChat}><Share size={17} /></button>}
+            {persona && <button className={showState ? 'icon-btn round on' : 'icon-btn round'} aria-pressed={showState} aria-label="Status" title={`${persona.name}: coding, upcoming, computer, voice`} onClick={toggleState}><PanelRight size={17} /></button>}
+            {currentSession && <DropMenu label="Chat options" items={[
+              { label: 'Helpers, timers and files', icon: Layers, onSelect: () => setPanel(panel === 'context' ? null : 'context') },
+              { label: trace ? 'Hide trace' : 'Show trace', icon: ListTree, onSelect: () => setTrace((value) => !value) },
+              { label: 'Rename chat', icon: Pencil, onSelect: () => { setRail(true); setRenaming(currentSession.id); setTitleDraft(currentSession.title); } },
+              { label: 'Persona info', icon: Info, hint: 'Ctrl+Shift+I', onSelect: () => setPanel('persona') },
+              { label: 'Persona settings', icon: Pencil, onSelect: () => setPanel('settings') },
+              { label: 'Add or create workspaces', icon: FolderGit2, onSelect: () => setPanel('workspace') },
+              { label: 'New chat', icon: MessageSquarePlus, onSelect: () => void createChat('chat') },
+              { label: 'Delete chat', icon: Trash2, danger: true, separator: true, onSelect: () => void removeChat(currentSession.id) },
+            ]} />}
+          </div>
         </div>
         {(current || chatWs.roots.length > 0) && (
           <div className="ws-strip" aria-label="Workspaces in this chat">
@@ -759,6 +783,7 @@ export function Chat() {
                 <div className="msg-actions">
                   <button className="icon-btn" aria-label="Quote message" title="Quote in your reply" onClick={() => addQuote({ ref: `msg:${message.id}`, text: (visible || '').slice(0, 1200), label: message.role === 'user' ? 'your message' : 'reply' })}><Quote size={15} /></button>
                   <button className="icon-btn" aria-label="Copy message" title="Copy" onClick={() => void copy(message.id, visible || '')}>{copied === message.id ? <Check size={15} /> : <Copy size={15} />}</button>
+                  {message.role !== 'user' && <button className="icon-btn" aria-label="Read aloud" title="Read aloud (press again to stop)" onClick={() => { if (!speak(visible || '')) toast('This browser cannot read aloud.', 'error'); }}><Volume2 size={15} /></button>}
                   {message.role === 'user' && <button className="icon-btn" aria-label="Edit as new message" title="Edit into the box" onClick={() => { setDraft(visible || ''); input.current?.focus(); }}><Pencil size={15} /></button>}
                   {message.id === lastAssistant && !active && <button className="icon-btn" aria-label="Regenerate reply" title="Ask again" onClick={retry}><RotateCcw size={15} /></button>}
                 </div>

@@ -34,45 +34,29 @@ export function Face({ agent, size = 32 }: { agent: FaceAgent; size?: number }) 
   return <Blob agent={agent} accent={accent} size={size} />;
 }
 
+/** Simple flat shapes with two pill eyes (no mouth), like the reference: rounded hexagon, wide blob, rounded triangle, round, pentagon, squircle. */
 const BLOB_PATHS = [
-  // round blob
-  'M32 6c13 0 25 9 25 25 0 15-10 27-25 27S7 46 7 31C7 15 19 6 32 6z',
-  // ghost with a wavy hem
-  'M32 6c12 0 22 9 22 22v26c0 3-3 4-5 2l-4-3-4 3c-2 2-5 2-7 0l-2-2-2 2c-2 2-5 2-7 0l-4-3-4 3c-2 2-5 1-5-2V28C10 15 20 6 32 6z',
-  // bean
-  'M30 7c14-2 27 8 27 23 0 16-12 27-26 27C17 57 7 48 7 35 7 22 16 9 30 7z',
-  // cat ears
-  'M14 8l9 8c3-1 6-1 9-1s6 0 9 1l9-8c2-1 3 0 3 2v18c3 4 4 8 4 12 0 11-11 18-25 18S7 51 7 40c0-4 1-8 4-12V10c0-2 1-3 3-2z',
-  // drop
-  'M32 5c6 8 23 20 23 33 0 11-10 20-23 20S9 49 9 38C9 25 26 13 32 5z',
-  // cloud
-  'M20 20c1-7 7-12 14-12 6 0 11 4 13 9 6 0 11 5 11 12 0 3-1 5-2 7 1 2 2 4 2 6 0 7-6 13-14 13H22C13 55 6 49 6 41c0-4 2-8 5-10-1-1-1-3-1-4 0-5 4-8 10-7z',
+  'M46.7 52.5L41.5 55.5Q32.0 61.0 22.5 55.5L17.3 52.5Q7.8 47.0 7.8 36.0L7.8 30.0Q7.8 19.0 17.3 13.5L22.5 10.5Q32.0 5.0 41.5 10.5L46.7 13.5Q56.2 19.0 56.2 30.0L56.2 36.0Q56.2 47.0 46.7 52.5Z',
+  'M5 37C5 23 17 13 33 13s26 8 26 21-11 21-28 21S5 50 5 37z',
+  'M36.0 15.6L53.6 39.2Q61.4 49.6 48.5 51.1L19.3 54.6Q6.4 56.2 11.5 44.2L23.1 17.2Q28.2 5.2 36.0 15.6Z',
+  'M32 7c14.4 0 25 10.6 25 25S46.4 57 32 57 7 46.4 7 32 17.6 7 32 7z',
+  'M40.9 12.5L49.7 18.9Q58.6 25.3 55.2 35.8L51.9 46.2Q48.5 56.7 37.5 56.7L26.5 56.7Q15.5 56.7 12.1 46.2L8.8 35.8Q5.4 25.3 14.3 18.9L23.1 12.5Q32.0 6.0 40.9 12.5Z',
+  'M38.8 55.2L21.6 53.9Q7.6 52.7 8.8 38.8L10.1 21.6Q11.3 7.6 25.2 8.8L42.4 10.1Q56.4 11.3 55.2 25.2L53.9 42.4Q52.7 56.4 38.8 55.2Z',
 ];
+/** Eye centres per shape: a little up and to the right, so every face looks the same way. */
+const EYES: [number, number, number][] = [[35, 45, 27], [37, 48, 27], [31, 41, 36], [35, 45, 27], [35, 45, 29], [35, 45, 27]];
 const hash = (text: string) => { let h = 0; for (const ch of text) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return h; };
 
 function Blob({ agent, accent, size }: { agent: FaceAgent; accent: string; size: number }) {
   const ref = /^blob-(\d)$/.exec(agent.avatarRef || '');
   const shape = ref ? Number(ref[1]) % BLOB_PATHS.length : hash(agent.id || agent.name) % BLOB_PATHS.length;
-  const ink = '#2a2118';
-  const eyeY = shape === 1 ? 29 : shape === 4 ? 36 : 32;
+  const [left, right, y] = EYES[shape]!;
+  const ink = '#16181b';
   return (
     <svg className="face blob" width={size} height={size} viewBox="0 0 64 64" aria-hidden>
       <path d={BLOB_PATHS[shape]} fill={accent} />
-      <path d={BLOB_PATHS[shape]} fill="url(#blob-shade)" />
-      <defs>
-        <radialGradient id="blob-shade" cx="35%" cy="25%" r="80%">
-          <stop offset="0" stopColor="#fff" stopOpacity=".38" />
-          <stop offset=".55" stopColor="#fff" stopOpacity="0" />
-          <stop offset="1" stopColor="#000" stopOpacity=".12" />
-        </radialGradient>
-      </defs>
-      <ellipse cx="24" cy={eyeY} rx="3.6" ry="4.6" fill={ink} />
-      <ellipse cx="40" cy={eyeY} rx="3.6" ry="4.6" fill={ink} />
-      <circle cx="25.3" cy={eyeY - 1.8} r="1.4" fill="#fff" />
-      <circle cx="41.3" cy={eyeY - 1.8} r="1.4" fill="#fff" />
-      <ellipse cx="17.5" cy={eyeY + 7} rx="3.4" ry="2" fill="#ff7a8a" opacity=".45" />
-      <ellipse cx="46.5" cy={eyeY + 7} rx="3.4" ry="2" fill="#ff7a8a" opacity=".45" />
-      <path d={`M28.5 ${eyeY + 7}c1.6 2 5.4 2 7 0`} fill="none" stroke={ink} strokeWidth="2" strokeLinecap="round" />
+      <rect x={left - 2.9} y={y - 6.5} width="5.8" height="13" rx="2.9" fill={ink} />
+      <rect x={right - 2.9} y={y - 6.5} width="5.8" height="13" rx="2.9" fill={ink} />
     </svg>
   );
 }
