@@ -124,7 +124,7 @@ export function connectorTools(ids: string[], member: boolean): string[] {
 export function recommendedConnected(store: Store, id: string): boolean {
   const item = RECOMMENDED_CONNECTORS.find((row) => row.id === id);
   if (!item) return false;
-  return store.listMcp().some((server) => server.enabled && (server.args.includes(item.package) || server.name === item.id || server.name.endsWith(`/${item.id}`)));
+  return store.listMcp().some((server) => server.enabled && (server.source === `recommended:${item.id}` || server.args.includes(item.package) || server.name === item.id || server.name.endsWith(`/${item.id}`)));
 }
 
 export async function connectorReport(env: HealthEnv, member: boolean) {
@@ -133,7 +133,8 @@ export async function connectorReport(env: HealthEnv, member: boolean) {
     const health = enabled ? await row.health(env).catch(() => ({ status: 'degraded' as const, detail: 'Health check failed.' })) : { status: 'off' as const, detail: 'Switched off.' };
     return { id: row.id, name: row.name, description: row.description, tools: row.tools, ownerOnly: Boolean(row.ownerOnly), mcpEquivalent: row.mcpEquivalent, builtIn: true, enabled, ...health };
   }));
-  const recommended = RECOMMENDED_CONNECTORS.map((row) => ({ ...row, builtIn: false, connected: recommendedConnected(env.store, row.id) }));
+  const servers = env.store.listMcp();
+  const recommended = RECOMMENDED_CONNECTORS.map((row) => ({ ...row, builtIn: false, connected: recommendedConnected(env.store, row.id), serverId: servers.find((server) => server.source === `recommended:${row.id}`)?.id ?? null, pinned: row.image ?? row.npm ?? row.package }));
   return { builtIn, recommended };
 }
 

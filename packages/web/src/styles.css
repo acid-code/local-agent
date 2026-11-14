@@ -1343,3 +1343,14 @@ table.limits tbody th { color: var(--text); font-weight: 500; }
 .chat.v2 .thread-head .thread-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nav-more[open] .nav { max-height: 34dvh; }
 .sidebar:has(.nav-more[open]) .persona-list { min-height: 180px; }
+
+/* Tools: trust badges, health, secret form, catalog tabs */
+.trust-badge { display: inline-flex; align-items: center; gap: 4px; vertical-align: 2px; margin-left: 4px; }
+.trust-badge svg { flex: none; }
+.seg button[aria-selected="true"] { background: var(--bg-2); color: var(--text); box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12); }
+.secret-form { display: grid; gap: 8px; margin-top: 10px; padding: 12px; border: 1px solid var(--line); border-radius: calc(12px * var(--round)); background: var(--bg-3); max-width: 520px; }
+.secret-form .field span { display: flex; align-items: center; gap: 6px; }
+.warn-text { color: var(--brass-2); }
+.community-ack { margin: 8px 0 12px; padding: 10px 12px; border: 1px solid rgba(var(--coral-rgb), 0.45); border-radius: calc(10px * var(--round)); align-items: flex-start; }
+.cache-summary { margin: -4px 0 8px; }
+.mcp-row .grow { min-width: 0; }
