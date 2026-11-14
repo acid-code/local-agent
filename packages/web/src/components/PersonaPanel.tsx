@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Check, FolderGit2, FolderOpen, GitBranch, X } from 'lucide-react';
+import { CalendarClock, Check, ChevronLeft, FolderGit2, FolderOpen, GitBranch, Settings2, X, Zap } from 'lucide-react';
 import { api, post } from '../lib/api';
 import { errorText, toast } from '../lib/toast';
 import { ModelOptions, useUsableModels } from '../lib/models';
-import { Face, type FaceAgent } from './Face';
+import { Face, FACE_IDS, type FaceAgent } from './Face';
 
-export interface PanelAgent extends FaceAgent { id: string; name: string; title?: string; description?: string; systemPrompt?: string; modelId?: string | null; toolAllowlist?: string[]; workshopIds?: string[]; strategy?: string | null }
+export interface PanelAgent extends FaceAgent { id: string; name: string; title?: string; description?: string; systemPrompt?: string; modelId?: string | null; toolAllowlist?: string[]; workshopIds?: string[]; strategy?: string | null; notify?: 'all' | 'mute' }
 interface Skill { slug: string; name: string; enabled?: boolean }
 export interface WorkspaceRow { id: string; label: string; path: string; kind: 'folder' | 'repo'; source: 'agent' | 'project'; remote: string | null; branch: string | null; dirty: number; sets: string[] }
 export interface WorkspaceSet { id: string; name: string; projects: string[] }
@@ -27,18 +27,27 @@ export function useWorkspaces() {
   return { workspaces, sets, reload };
 }
 
+export type PersonaTab = 'persona' | 'settings' | 'workspace';
+const ACCENTS = ['#e4b56a', '#e39486', '#9dccb4', '#9ec0e0', '#d7b4e8', '#e88aa8', '#b89cf0', '#7cc59a', '#ffb08a', '#a3a3a3'];
+interface Routine { id: string; name: string; cron: string; agentId: string; nextRunAt?: string | null; lastStatus?: string | null }
+interface Channel { id: string; name: string; kind: string; agentId: string; enabled?: boolean }
+
 /**
- * Right panel opened from the persona chip. Edits apply to the next message and save as you go.
- * Tabs: the persona (name, model, tools, skills, workspaces, instructions) and workspaces (add a folder, a repo, or clone).
+ * Right pane for one persona, opened by clicking its name in the chat header (Ctrl/Cmd+Shift+I).
+ * Overview first (status, routines, channels, workspaces); the gear opens a short settings page
+ * (face, name, title, description, notifications) with model, instructions and tools tucked below.
  */
 export function PersonaPanel({ agent, tab, onTab, onClose, onSaved, ws, canManage, onAttach }: {
-  agent: PanelAgent | null; tab: 'persona' | 'workspace'; onTab: (tab: 'persona' | 'workspace') => void; onClose: () => void;
+  agent: PanelAgent | null; tab: PersonaTab; onTab: (tab: PersonaTab) => void; onClose: () => void;
   onSaved: (agent: PanelAgent, what: string) => void; ws: ReturnType<typeof useWorkspaces>; canManage: boolean; onAttach?: (rootId: string, label: string) => void;
 }) {
   const [draft, setDraft] = useState<PanelAgent | null>(agent);
   const [skills, setSkills] = useState<Skill[]>([]);
+  const [routines, setRoutines] = useState<Routine[] | null>(null);
+  const [channels, setChannels] = useState<Channel[] | null>(null);
   const [saved, setSaved] = useState<'idle' | 'saving' | 'saved'>('idle');
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pending = useRef<Partial<PanelAgent>>({});
   const models = useUsableModels();
   useEffect(() => { setDraft(agent); setSaved('idle'); }, [agent?.id]);
   useEffect(() => {
@@ -46,56 +55,121 @@ export function PersonaPanel({ agent, tab, onTab, onClose, onSaved, ws, canManag
     api<{ skills: Skill[] }>(`/api/skills?agentId=${encodeURIComponent(agent.id)}`).then((data) => setSkills(data.skills)).catch(() => setSkills([]));
   }, [agent?.id, canManage]);
   useEffect(() => {
+    if (!agent?.id) return;
+    setRoutines(null); setChannels(null);
+    api<{ schedules: Routine[] }>('/api/schedules').then((data) => setRoutines(data.schedules.filter((row) => row.agentId === agent.id))).catch(() => setRoutines([]));
+    api<{ triggers: Channel[] }>('/api/triggers').then((data) => setChannels(data.triggers.filter((row) => row.agentId === agent.id))).catch(() => setChannels([]));
+  }, [agent?.id]);
+  useEffect(() => {
     const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape' && !(event.target as HTMLElement)?.closest?.('.menu-panel')) onClose(); };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
+  // Autosave: edits batch for a moment, then one PATCH. Changes apply from the next message.
   const save = (patch: Partial<PanelAgent>, what: string, delay = 500) => {
     if (!draft) return;
     const next = { ...draft, ...patch };
     setDraft(next);
     setSaved('saving');
+    pending.current = { ...pending.current, ...patch };
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(async () => {
+      const body = pending.current; pending.current = {};
       try {
-        const result = await api<{ agent: PanelAgent }>(`/api/agents/${next.id}`, { method: 'PATCH', body: JSON.stringify(patch) });
+        const result = await api<{ agent: PanelAgent }>(`/api/agents/${next.id}`, { method: 'PATCH', body: JSON.stringify(body) });
         setSaved('saved');
         onSaved(result.agent, what);
       } catch (error) { setSaved('idle'); toast(errorText(error), 'error'); }
     }, delay);
   };
 
+  const tick = <span className="saved-tick" aria-live="polite">{saved === 'saving' ? 'Saving…' : saved === 'saved' ? <><Check size={14} aria-hidden /> Saved</> : ''}</span>;
+  const close = <button className="icon-btn" aria-label="Close panel" title="Close (Esc)" onClick={onClose}><X size={18} /></button>;
+  const back = (label: string) => <button className="icon-btn" aria-label={`Back to ${label}`} title="Back" onClick={() => onTab('persona')}><ChevronLeft size={18} /></button>;
+  const modelName = draft?.modelId ? (models.models.local.concat(models.models.cloud, models.models.dev).find((model) => model.id === draft.modelId)?.name || draft.modelId) : 'Auto';
+  const defaults = ws.sets.filter((set) => (draft?.workshopIds || []).includes(set.id));
+
   return (
-    <aside className="side-panel open" aria-label="Persona and workspace settings">
-      <div className="panel-head">
-        <div className="panel-tabs" role="tablist">
-          <button role="tab" aria-selected={tab === 'persona'} onClick={() => onTab('persona')}>Persona</button>
-          <button role="tab" aria-selected={tab === 'workspace'} onClick={() => onTab('workspace')}>Workspaces</button>
+    <aside className="side-panel open persona-pane" aria-label={tab === 'settings' ? 'Persona settings' : tab === 'workspace' ? 'Workspaces' : 'Persona info'}>
+      {tab === 'persona' && (
+        <div className="panel-head pane-head">
+          {draft ? <><Face agent={draft} size={28} /><div className="grow pane-title"><strong dir="auto">{draft.emoji ? `${draft.emoji} ` : ''}{draft.name}</strong>{draft.title && <small className="faint">{draft.title}</small>}</div></> : <span className="grow" />}
+          {canManage && draft && <button className="icon-btn" aria-label="Persona settings" title="Persona settings" onClick={() => onTab('settings')}><Settings2 size={17} /></button>}
+          {close}
         </div>
-        <span className="saved-tick" aria-live="polite">{saved === 'saving' ? 'Saving…' : saved === 'saved' ? <><Check size={14} aria-hidden /> Saved</> : ''}</span>
-        <button className="icon-btn" aria-label="Close panel" onClick={onClose}><X size={18} /></button>
-      </div>
+      )}
+      {tab === 'settings' && <div className="panel-head pane-head">{back('overview')}<strong className="grow">Persona settings</strong>{tick}{close}</div>}
+      {tab === 'workspace' && <div className="panel-head pane-head">{back('overview')}<strong className="grow">Workspaces</strong>{close}</div>}
+
       {tab === 'persona' && (!draft ? <p className="faint panel-body">Pick a persona first.</p> : (
-        <div className="panel-body">
-          <div className="panel-id">
-            <Face agent={draft} size={44} />
+        <div className="panel-body pane-overview">
+          <p className={draft.description ? 'pane-desc' : 'pane-desc faint'} dir="auto">{draft.description || 'No description yet.'}</p>
+          <section className="pane-section">
+            <h4>Status</h4>
+            <dl className="pane-facts">
+              <dt>Model</dt><dd>{modelName}</dd>
+              <dt>Tools</dt><dd>{(draft.toolAllowlist || []).length} on</dd>
+              <dt>Unread dot</dt><dd>{draft.notify === 'mute' ? 'Muted' : 'On'}</dd>
+            </dl>
+          </section>
+          <section className="pane-section">
+            <h4>Routines <Link className="pane-more" to="/schedules">Manage</Link></h4>
+            {routines === null ? <div className="skeleton-lines"><span /></div> : routines.length === 0 ? <p className="faint">No routines. <Link to="/schedules">Schedule one</Link></p> : (
+              <ul className="pane-list">{routines.map((row) => <li key={row.id}><CalendarClock size={14} aria-hidden /><span className="grow ellipsis">{row.name}</span><span className="faint mono">{row.cron}</span></li>)}</ul>
+            )}
+          </section>
+          <section className="pane-section">
+            <h4>Channels <Link className="pane-more" to="/triggers">Manage</Link></h4>
+            {channels === null ? <div className="skeleton-lines"><span /></div> : channels.length === 0 ? <p className="faint">Chat only. <Link to="/triggers">Add a webhook, folder or inbox</Link></p> : (
+              <ul className="pane-list">{channels.map((row) => <li key={row.id}><Zap size={14} aria-hidden /><span className="grow ellipsis">{row.name}</span><span className="faint">{row.kind}</span></li>)}</ul>
+            )}
+          </section>
+          <section className="pane-section">
+            <h4>Default workspaces {canManage && <button className="pane-more link-btn" onClick={() => onTab('workspace')}>Manage</button>}</h4>
+            {defaults.length === 0 ? <p className="faint">None. New chats start without a workspace.</p> : <div className="chip-row">{defaults.map((set) => <span key={set.id} className="chip"><FolderGit2 size={13} aria-hidden /> {set.name}</span>)}</div>}
+          </section>
+        </div>
+      ))}
+
+      {tab === 'settings' && draft && (
+        <div className="panel-body pane-settings">
+          <div className="pane-avatar">
+            <Face agent={draft} size={56} />
             <div className="grow">
-              <input className="bare-input title" aria-label="Name" value={draft.name} onChange={(event) => save({ name: event.target.value }, 'name', 800)} />
-              <input className="bare-input" aria-label="Title" placeholder="Add a title" value={draft.title || ''} onChange={(event) => save({ title: event.target.value }, 'title', 800)} />
+              <div className="face-row" role="group" aria-label="Face">
+                <button type="button" className="face-pick" aria-label="Initials" aria-pressed={draft.avatarKind !== 'builtin' && draft.avatarKind !== 'upload'} onClick={() => save({ avatarKind: 'initials', avatarRef: '' }, 'face', 0)}><Face agent={{ ...draft, avatarKind: 'initials', avatarRef: '' }} size={28} /></button>
+                {FACE_IDS.map((id) => <button type="button" key={id} className="face-pick" aria-label={`Face ${id}`} aria-pressed={draft.avatarKind === 'builtin' && draft.avatarRef === id} onClick={() => save({ avatarKind: 'builtin', avatarRef: id }, 'face', 0)}><Face agent={{ ...draft, avatarKind: 'builtin', avatarRef: id }} size={28} /></button>)}
+              </div>
+              <div className="swatch-row" role="group" aria-label="Colour">
+                {ACCENTS.map((color) => <button type="button" key={color} className="swatch-dot" aria-label={`Colour ${color}`} aria-pressed={(draft.accent || '').toLowerCase() === color} style={{ background: color }} onClick={() => save({ accent: color }, 'colour', 0)} />)}
+              </div>
             </div>
           </div>
-          <p className="faint panel-note">Changes apply from the next message.</p>
-          <label className="field"><span>Model</span>
-            <select value={draft.modelId || ''} onChange={(event) => save({ modelId: event.target.value || null }, 'model', 0)}>
-              <option value="">{models.models.empty ? 'No model yet — set one up' : 'Auto (recommended)'}</option>
-              <ModelOptions models={models.models} />
-            </select>
+          <label className="field"><span>Name</span><input value={draft.name} maxLength={80} onChange={(event) => save({ name: event.target.value }, 'name', 800)} /></label>
+          <label className="field"><span>Title</span><input value={draft.title || ''} maxLength={80} placeholder="e.g. Research assistant" onChange={(event) => save({ title: event.target.value }, 'title', 800)} /></label>
+          <label className="field"><span>Description</span><textarea rows={2} value={draft.description || ''} placeholder="One line on what this persona is for" onChange={(event) => save({ description: event.target.value }, 'description', 800)} /></label>
+          <label className="field"><span>Emoji</span><input value={draft.emoji || ''} maxLength={4} placeholder="Optional" onChange={(event) => save({ emoji: event.target.value }, 'emoji', 600)} /></label>
+          <label className="field toggle-field"><span>Unread dot for new replies</span>
+            <input type="checkbox" role="switch" checked={draft.notify !== 'mute'} onChange={(event) => save({ notify: event.target.checked ? 'all' : 'mute' }, 'notifications', 0)} />
           </label>
-          <label className="field"><span>Instructions</span>
-            <textarea rows={6} value={draft.systemPrompt || ''} onChange={(event) => save({ systemPrompt: event.target.value }, 'instructions', 900)} />
-          </label>
-          <div className="field"><span>Tools</span>
+          <p className="faint panel-note">Changes save as you type and apply from the next message.</p>
+
+          <details className="pane-more-section">
+            <summary>Model</summary>
+            <label className="field"><span className="sr-only">Model</span>
+              <select value={draft.modelId || ''} onChange={(event) => save({ modelId: event.target.value || null }, 'model', 0)}>
+                <option value="">{models.models.empty ? 'No model yet — set one up' : 'Auto (recommended)'}</option>
+                <ModelOptions models={models.models} />
+              </select>
+            </label>
+          </details>
+          <details className="pane-more-section">
+            <summary>Instructions</summary>
+            <textarea rows={6} aria-label="Instructions" value={draft.systemPrompt || ''} onChange={(event) => save({ systemPrompt: event.target.value }, 'instructions', 900)} />
+          </details>
+          <details className="pane-more-section">
+            <summary>Tools and skills</summary>
             {TOOL_GROUPS.map((group) => (
               <div key={group.title} className="tool-group">
                 <small className="faint">{group.title}</small>
@@ -107,22 +181,23 @@ export function PersonaPanel({ agent, tab, onTab, onClose, onSaved, ws, canManag
                 </div>
               </div>
             ))}
-          </div>
-          {skills.length > 0 && (
-            <div className="field"><span>Skills</span>
-              <div className="chip-row">
-                {skills.map((skill) => {
-                  const on = skill.enabled !== false;
-                  return <button key={skill.slug} type="button" className={on ? 'chip on' : 'chip'} aria-pressed={on} onClick={async () => {
-                    try { await post(`/api/skills/${skill.slug}/enable`, { agentId: draft.id, enabled: !on }); setSkills((rows) => rows.map((row) => row.slug === skill.slug ? { ...row, enabled: !on } : row)); setSaved('saved'); onSaved(draft, 'skills'); }
-                    catch (error) { toast(errorText(error), 'error'); }
-                  }}>{skill.name}</button>;
-                })}
+            {skills.length > 0 && (
+              <div className="tool-group"><small className="faint">Skills</small>
+                <div className="chip-row">
+                  {skills.map((skill) => {
+                    const on = skill.enabled !== false;
+                    return <button key={skill.slug} type="button" className={on ? 'chip on' : 'chip'} aria-pressed={on} onClick={async () => {
+                      try { await post(`/api/skills/${skill.slug}/enable`, { agentId: draft.id, enabled: !on }); setSkills((rows) => rows.map((row) => row.slug === skill.slug ? { ...row, enabled: !on } : row)); setSaved('saved'); onSaved(draft, 'skills'); }
+                      catch (error) { toast(errorText(error), 'error'); }
+                    }}>{skill.name}</button>;
+                  })}
+                </div>
               </div>
-            </div>
-          )}
+            )}
+          </details>
           {canManage && (
-            <div className="field"><span>Default workspaces for new chats</span>
+            <details className="pane-more-section">
+              <summary>Default workspaces for new chats</summary>
               {ws.sets.length === 0 && <p className="faint">None yet. <button className="link-btn" onClick={() => onTab('workspace')}>Add a workspace</button></p>}
               <div className="chip-row">
                 {ws.sets.map((set) => {
@@ -130,11 +205,11 @@ export function PersonaPanel({ agent, tab, onTab, onClose, onSaved, ws, canManag
                   return <button key={set.id} type="button" className={on ? 'chip on' : 'chip'} aria-pressed={on} title={set.projects.join(' + ')} onClick={() => save({ workshopIds: on ? (draft.workshopIds || []).filter((id) => id !== set.id) : [...(draft.workshopIds || []), set.id] }, 'workspaces', 0)}><FolderGit2 size={13} aria-hidden /> {set.name}</button>;
                 })}
               </div>
-            </div>
+            </details>
           )}
-          <p className="faint"><Link to={`/agents?edit=${draft.id}`}>Open full persona settings</Link> for face, color, memory and more.</p>
+          <p className="faint"><Link to={`/agents?edit=${draft.id}`}>All persona options</Link> (photo upload, memory, context strategy).</p>
         </div>
-      ))}
+      )}
       {tab === 'workspace' && <WorkspaceTab ws={ws} canManage={canManage} onAttach={onAttach} />}
     </aside>
   );

@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Menu as DropMenu } from '../components/ui';
 import { ModelPicker, useUsableModels } from '../lib/models';
 import { browserDictationSupported, startDictation } from '../lib/dictation';
-import { AtSign, Brain, Check, ChevronDown, Code2, Copy, Download, Eye, FileText, Folder, FolderGit2, GitBranch, ListTree, Menu, MessageSquarePlus, Pin, PinOff, Plus, Search, Mic, Paperclip, Pencil, Quote, RotateCcw, Send, Square, Trash2, Wrench, X } from 'lucide-react';
+import { AtSign, Info, Brain, Check, ChevronDown, Code2, Copy, Download, Eye, FileText, Folder, FolderGit2, GitBranch, ListTree, Menu, MessageSquarePlus, Pin, PinOff, Plus, Search, Mic, Paperclip, Pencil, Quote, RotateCcw, Send, Square, Trash2, Wrench, X } from 'lucide-react';
 import { CiteContext, type CiteHandlers } from '../components/Markdown';
 import { FileViewer, type QuotePick, type ViewerSource } from '../components/FileViewer';
 import { MentionPicker, type MentionPick } from '../components/MentionPicker';
@@ -77,7 +77,7 @@ export function Chat() {
   const [selQuote, setSelQuote] = useState<{ x: number; y: number; text: string; id: string } | null>(null);
   const [dragging, setDragging] = useState(false);
   const pendingJump = useRef<string | null>(null);
-  const [panel, setPanel] = useState<null | 'persona' | 'workspace' | 'files'>(null);
+  const [panel, setPanel] = useState<null | 'persona' | 'settings' | 'workspace' | 'files'>(null);
   const [chatWs, setChatWs] = useState<{ items: { kind: 'root' | 'set'; id: string }[]; roots: ChatRoot[]; sets: { id: string; name: string; roots: string[] }[] }>({ items: [], roots: [], sets: [] });
   const [wsRoot, setWsRoot] = useState<string | null>(null);
   const [chatQuery, setChatQuery] = useState('');
@@ -151,6 +151,18 @@ export function Chat() {
     const gate = openGate.current.begin();
     void (async () => {
       try {
+        const pane = params.get('pane');
+        if (pane === 'info') setPanel('persona');
+        else if (pane === 'settings') setPanel('settings');
+        // One-shot params: drop them so a reload does not make another chat. Native replaceState, so the router does not re-run this effect.
+        if (params.get('new') || pane) { const keep = new URLSearchParams(params); keep.delete('new'); keep.delete('pane'); window.history.replaceState(window.history.state, '', `${location.pathname}${keep.size ? `?${keep}` : ''}`); }
+        if (persona && params.get('new')) {
+          const created = await post<{ session: Session }>('/api/sessions', { agentId: persona, title: 'New chat' }, { signal: gate.signal });
+          if (!gate.current()) return;
+          await openSession(created.session.id, gate);
+          if (gate.current()) void refreshLists().catch(() => undefined);
+          return;
+        }
         if (persona) {
           // One server call finds or creates the persona's chat atomically: no duplicates, however fast the clicks.
           const opened = await post<{ session: Session; created: boolean }>(`/api/agents/${persona}/open-chat`, {}, { signal: gate.signal });
@@ -186,6 +198,8 @@ export function Chat() {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === '/' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); (document.querySelector('.persona-chip') as HTMLButtonElement | null)?.click(); return; }
+      // Ctrl/Cmd+Shift+I: this persona's info pane.
+      if ((event.key === 'I' || event.key === 'i') && event.shiftKey && (event.metaKey || event.ctrlKey)) { event.preventDefault(); setPanel((value) => value === 'persona' || value === 'settings' ? null : 'persona'); return; }
       if (event.key !== 'Escape') return;
       if (rail) { setRail(false); return; }
       if (active && runId) { event.preventDefault(); void control('stop'); }
@@ -450,6 +464,10 @@ export function Chat() {
   }
 
   const persona = agents.find((agent) => agent.id === currentSession?.agentId) || agents[0];
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent('la:active-persona', { detail: persona?.id ?? null }));
+  }, [persona?.id]);
+  useEffect(() => () => { window.dispatchEvent(new CustomEvent('la:active-persona', { detail: null })); }, []);
   const canManage = usable.canManage !== false;
   function note(text: string) {
     setMessages((rows) => [...rows, { id: `div-${Date.now()}`, role: 'divider', content: text }]);
@@ -475,7 +493,7 @@ export function Chat() {
       if (current) await api(`/api/sessions/${current}`, { method: 'PATCH', body: JSON.stringify({ agentId: created.agent.id }) });
       else await post('/api/sessions', { agentId: created.agent.id, title: 'New chat' }).then((res) => setCurrent((res as { session: Session }).session.id));
       await refreshLists();
-      setPanel('persona');
+      setPanel('settings');
       toast('Persona created. Name it and pick its tools here.', 'ok');
     } catch (error) { toast(errorText(error), 'error'); }
   }
@@ -573,7 +591,7 @@ export function Chat() {
       <section className="thread">
         <div className="thread-head">
           <button className="btn ghost chats-btn" aria-label="Show chats" onClick={() => setRail(true)}><Menu size={16} /> <span>Chats</span></button>
-          {persona && <button className="persona-name" title={`${persona.name} · persona settings`} aria-label={`${persona.name}, open persona settings`} aria-expanded={panel === 'persona'} onClick={() => setPanel(panel === 'persona' ? null : 'persona')}><Face agent={persona} size={22} /><span className="persona-label">{persona.name}</span></button>}
+          {persona && <button className="persona-name" title={`${persona.name} · info (Ctrl+Shift+I)`} aria-label={`${persona.name}, open persona info`} aria-expanded={panel === 'persona' || panel === 'settings'} onClick={() => setPanel(panel === 'persona' || panel === 'settings' ? null : 'persona')}><Face agent={persona} size={22} /><span className="persona-label">{persona.name}</span></button>}
           <strong className="thread-title" dir="auto" title={currentSession?.title}>{currentSession?.title || 'No chat open'}</strong>
           {status && status !== 'completed' && <span className={`badge ${status === 'failed' ? 'bad' : active ? 'warn' : ''}`}>{status}</span>}
           {mode === 'code' && <span className="badge warn">{currentSession?.workshopId ? 'workshop' : 'coding'}</span>}
@@ -581,7 +599,8 @@ export function Chat() {
           {currentSession && <DropMenu label="Chat options" items={[
             { label: 'Rename chat', icon: Pencil, onSelect: () => { setRail(true); setRenaming(currentSession.id); setTitleDraft(currentSession.title); } },
             { label: trace ? 'Hide trace' : 'Show trace', icon: ListTree, onSelect: () => setTrace((value) => !value) },
-            { label: 'Persona settings', icon: Pencil, onSelect: () => setPanel('persona') },
+            { label: 'Persona info', icon: Info, hint: 'Ctrl+Shift+I', onSelect: () => setPanel('persona') },
+            { label: 'Persona settings', icon: Pencil, onSelect: () => setPanel('settings') },
             { label: 'Add or create workspaces', icon: FolderGit2, onSelect: () => setPanel('workspace') },
             { label: 'New chat', icon: MessageSquarePlus, onSelect: () => void createChat('chat') },
             { label: 'Delete chat', icon: Trash2, danger: true, separator: true, onSelect: () => void removeChat(currentSession.id) },
@@ -753,7 +772,7 @@ export function Chat() {
               if (at) setPicker({ query: at[2] || '' }); else if (picker && !upto.includes('@')) setPicker(null);
             }} onPaste={(event) => { if (event.clipboardData.files.length) { event.preventDefault(); void dropFiles(event.clipboardData.files); } }} onKeyDown={(event) => { if (picker && event.key === 'Escape') { event.preventDefault(); setPicker(null); return; } if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(event); } }} />
             <div className="composer-bar">
-              <PersonaChip agents={agents} active={persona} onSwitch={(id) => void switchPersona(id)} onEdit={() => setPanel('persona')} onNew={() => void newPersona()} />
+              <PersonaChip agents={agents} active={persona} onSwitch={(id) => void switchPersona(id)} onEdit={() => setPanel('settings')} onNew={() => void newPersona()} />
               <span title={modelPin ? `Pinned to ${pinnedName}` : lastModel ? `Auto picks per message. Last reply: ${lastModel}` : 'Auto picks a model per message'}>
                 <ModelPicker state={modelState} value={modelPin} autoLabel={lastModel && !modelPin ? `Auto · ${lastModel}` : 'Auto'} onChange={async (value) => {
                   const previous = modelPin;
@@ -780,7 +799,7 @@ export function Chat() {
         <WorkspaceBrowser root={chatWs.roots.find((root) => root.id === wsRoot)!} live={active} onClose={() => setPanel(null)} onChanged={() => void loadChatWs(current)}
           onMention={(path) => addMention({ kind: 'path', root: wsRoot, path, dir: false, label: path })} />
       )}
-      {(panel === 'persona' || panel === 'workspace') && <PersonaPanel agent={persona || null} tab={panel} onTab={setPanel} onClose={() => setPanel(null)} ws={ws} canManage={canManage}
+      {(panel === 'persona' || panel === 'settings' || panel === 'workspace') && <PersonaPanel agent={persona || null} tab={panel} onTab={setPanel} onClose={() => setPanel(null)} ws={ws} canManage={canManage}
         onAttach={(rootId, label) => addWorkspace({ kind: 'root', id: rootId }, label)}
         onSaved={(agent, what) => {
           setAgents((rows) => rows.map((row) => (row.id === agent.id ? { ...row, ...agent } : row)));

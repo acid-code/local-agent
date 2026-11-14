@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
-import { Activity, ArrowDown, ArrowUp, EyeOff, GitBranch, BookOpen, Box, CalendarClock, ChevronsUpDown, Cpu, Gauge, ListChecks, LogOut, Menu as MenuIcon, MessageSquare, MoreHorizontal, Palette, PanelLeftClose, PanelLeftOpen, Pin, PinOff, Radio, Settings, Sparkles, Users, Wrench, X, type LucideIcon } from 'lucide-react';
+import { Activity, Bell, BellOff, Info, MessageSquarePlus, Settings2, ArrowDown, ArrowUp, EyeOff, GitBranch, BookOpen, Box, CalendarClock, ChevronsUpDown, Cpu, Gauge, ListChecks, LogOut, Menu as MenuIcon, MessageSquare, MoreHorizontal, Palette, PanelLeftClose, PanelLeftOpen, Pin, PinOff, Radio, Settings, Sparkles, Users, Wrench, X, type LucideIcon } from 'lucide-react';
 import { Menu } from './ui';
 import { Toaster } from './Toaster';
 import { api, post } from '../lib/api';
@@ -34,7 +34,7 @@ const GROUPS: { title: string; items: NavItem[] }[] = [
   ] },
 ];
 
-interface Persona extends FaceAgent { id: string; title?: string; pinned?: boolean; hidden?: boolean; unread?: number }
+interface Persona extends FaceAgent { id: string; title?: string; pinned?: boolean; hidden?: boolean; unread?: number; notify?: 'all' | 'mute' }
 
 export function Shell({ username, role = 'owner', onLogout, children }: { username: string; role?: 'owner' | 'member'; onLogout: () => void; children: ReactNode }) {
   const groups = GROUPS.map((group) => ({ ...group, items: role === 'owner' ? group.items : group.items.filter((item) => MEMBER_PAGES.has(item.to)) })).filter((group) => group.items.length);
@@ -51,6 +51,13 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
   const isWide = () => window.matchMedia('(min-width: 981px)').matches;
   const toggleSidebar = () => { if (isWide()) setCollapsed((value) => !value); else setOpen((value) => !value); };
   const navigate = useNavigate();
+  // The chat page reports whose chat is open, so that persona's row reads as selected.
+  const [activePersona, setActivePersona] = useState<string | null>(null);
+  useEffect(() => {
+    const onActive = (event: Event) => setActivePersona((event as CustomEvent<string | null>).detail ?? null);
+    window.addEventListener('la:active-persona', onActive);
+    return () => window.removeEventListener('la:active-persona', onActive);
+  }, []);
 
   async function loadPersonas() {
     const data = await api<{ agents: Persona[] }>('/api/agents');
@@ -134,26 +141,28 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
         </nav>
         {personas.length > 0 && (
           <div className="persona-head">
-            <span className="nav-heading">Quick chat</span>
+            <span className="nav-heading">Personas</span>
           </div>
         )}
         <div className="persona-list">
           {personas.map((persona, index) => (
-            <div key={persona.id} className="persona-row" style={{ ['--accent' as string]: persona.accent || 'var(--brass)' }}>
-              <button className="persona-open" title={persona.name} onClick={() => { navigate(`/?persona=${persona.id}`); setOpen(false); }}>
-                <Face agent={persona} size={28} />
-                <span className="label">
-                  <strong dir="auto">{persona.emoji ? `${persona.emoji} ` : ''}{persona.name}</strong>
-                  {persona.title && <small>{persona.title}</small>}
-                </span>
-                {persona.unread ? <em className="badge" style={{ borderColor: persona.accent }}>{persona.unread}</em> : null}
+            <div key={persona.id} className={activePersona === persona.id ? 'persona-row on' : 'persona-row'} style={{ ['--accent' as string]: persona.accent || 'var(--brass)' }}
+              onContextMenu={(event) => { event.preventDefault(); (event.currentTarget.querySelector('.menu-trigger') as HTMLButtonElement | null)?.click(); }}>
+              <button className="persona-open" aria-current={activePersona === persona.id ? 'true' : undefined} title={persona.title ? `${persona.name} · ${persona.title}` : persona.name} onClick={() => { navigate(`/?persona=${persona.id}`); setOpen(false); }}>
+                <Face agent={persona} size={24} />
+                <span className="label"><span className="ellipsis" dir="auto">{persona.emoji ? `${persona.emoji} ` : ''}{persona.name}</span></span>
+                {persona.unread && persona.notify !== 'mute' ? <span className="unread-dot" role="status" aria-label={`${persona.unread} unread`} /> : null}
               </button>
               <Menu label={`Options for ${persona.name}`} items={[
-                { label: persona.pinned ? 'Unpin' : 'Pin to top', icon: persona.pinned ? PinOff : Pin, onSelect: () => void api(`/api/agents/${persona.id}`, { method: 'PATCH', body: JSON.stringify({ pinned: !persona.pinned }) }).then(loadPersonas) },
+                { label: 'Open chat', icon: MessageSquare, onSelect: () => { navigate(`/?persona=${persona.id}`); setOpen(false); } },
+                { label: 'New chat', icon: MessageSquarePlus, onSelect: () => { navigate(`/?persona=${persona.id}&new=1`); setOpen(false); } },
+                { label: 'Info', icon: Info, onSelect: () => { navigate(`/?persona=${persona.id}&pane=info`); setOpen(false); } },
+                { label: 'Settings', icon: Settings2, onSelect: () => { navigate(`/?persona=${persona.id}&pane=settings`); setOpen(false); } },
+                { label: persona.notify === 'mute' ? 'Show unread dot' : 'Mute unread dot', icon: persona.notify === 'mute' ? Bell : BellOff, onSelect: () => void api(`/api/agents/${persona.id}`, { method: 'PATCH', body: JSON.stringify({ notify: persona.notify === 'mute' ? 'all' : 'mute' }) }).then(loadPersonas) },
+                { label: persona.pinned ? 'Unpin' : 'Pin to top', separator: true, icon: persona.pinned ? PinOff : Pin, onSelect: () => void api(`/api/agents/${persona.id}`, { method: 'PATCH', body: JSON.stringify({ pinned: !persona.pinned }) }).then(loadPersonas) },
                 { label: 'Move up', icon: ArrowUp, disabled: index === 0, onSelect: () => void move(index, -1) },
                 { label: 'Move down', icon: ArrowDown, disabled: index === personas.length - 1, onSelect: () => void move(index, 1) },
-                { label: 'Edit agent', icon: Users, separator: true, onSelect: () => { navigate(`/agents?edit=${persona.id}`); setOpen(false); } },
-                { label: 'Hide from sidebar', icon: EyeOff, onSelect: () => void api(`/api/agents/${persona.id}`, { method: 'PATCH', body: JSON.stringify({ hidden: true }) }).then(loadPersonas) },
+                                { label: 'Hide from sidebar', icon: EyeOff, onSelect: () => void api(`/api/agents/${persona.id}`, { method: 'PATCH', body: JSON.stringify({ hidden: true }) }).then(loadPersonas) },
               ]} />
             </div>
           ))}

@@ -40,6 +40,18 @@ describe('rapid persona switching', () => {
     await app.close();
   });
 
+  it('notification preference saves per persona and defaults to on', async () => {
+    const { app, cookies } = await owner();
+    const a = (await app.inject({ method: 'POST', url: '/api/agents', cookies, payload: { name: 'Ada', systemPrompt: 'x', toolAllowlist: [] } })).json().agent;
+    expect(a.notify).toBe('all');
+    const muted = await app.inject({ method: 'PATCH', url: `/api/agents/${a.id}`, cookies, payload: { notify: 'mute', title: 'Researcher', description: 'Finds papers' } });
+    expect(muted.json().agent).toMatchObject({ notify: 'mute', title: 'Researcher', description: 'Finds papers' });
+    expect((await app.inject({ method: 'PATCH', url: `/api/agents/${a.id}`, cookies, payload: { notify: 'loud' } })).statusCode).toBe(400);
+    const listed = (await app.inject({ method: 'GET', url: '/api/agents', cookies })).json().agents.find((row: { id: string }) => row.id === a.id);
+    expect(listed.notify).toBe('mute');
+    await app.close();
+  });
+
   it('latest click wins: stale responses are dropped and their requests aborted', async () => {
     const gate = latestOnly();
     const applied: string[] = [];

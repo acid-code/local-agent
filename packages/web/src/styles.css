@@ -1102,3 +1102,75 @@ table.limits tbody th { color: var(--text); font-weight: 500; }
 }
 .ws-pill-label { max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ws-pill-open .mono { max-width: 14ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── Personas, Grok Bot style: a quiet list of avatar + name, subtle unread dot, right-click for actions. */
+.persona-list { gap: 1px; padding: 4px 8px 12px; }
+.persona-row { border: 0; border-left: 0; background: transparent; border-radius: calc(8px * var(--round)); }
+.persona-row:hover { background: rgba(var(--text-rgb), 0.05); }
+.persona-row.on { background: rgba(var(--text-rgb), 0.08); }
+.persona-open { padding: 6px 8px; gap: 10px; min-height: 36px; color: var(--text); }
+.persona-open .label { flex: 1; min-width: 0; font-size: calc(13.5px * var(--fs)); font-weight: 450; }
+.persona-open .ellipsis { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.persona-row.on .persona-open .label { font-weight: 560; }
+.unread-dot { width: 7px; height: 7px; border-radius: 999px; background: var(--brass); flex: none; margin-right: 2px; }
+.persona-row .menu-trigger { width: 26px; height: 26px; }
+:root[data-flat="off"] .persona-row { background: color-mix(in srgb, var(--accent, var(--brass)) 10%, transparent); border-left: 3px solid var(--accent, var(--brass)); }
+
+/* Persona info pane and its settings page. */
+.persona-pane .pane-head { gap: 10px; }
+.pane-title { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.pane-title strong { font-size: calc(15px * var(--fs)); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-title small { font-size: calc(12px * var(--fs)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-head > strong { font-size: calc(14px * var(--fs)); font-weight: 600; }
+.pane-desc { margin: 0 0 14px; font-size: calc(13.5px * var(--fs)); line-height: 1.5; }
+.pane-section { border-top: 1px solid var(--line); padding: 14px 0; }
+.pane-section h4 { display: flex; justify-content: space-between; align-items: center; margin: 0 0 8px; font-size: calc(12px * var(--fs)); font-weight: 600; color: var(--muted); letter-spacing: 0; }
+.pane-section p { margin: 0; font-size: calc(13px * var(--fs)); }
+.pane-more { font-weight: 450; font-size: calc(12px * var(--fs)); }
+.pane-facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; margin: 0; font-size: calc(13px * var(--fs)); }
+.pane-facts dt { color: var(--faint); }
+.pane-facts dd { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: calc(13px * var(--fs)); }
+.pane-list li { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pane-list li svg { color: var(--faint); flex: none; }
+.pane-avatar { display: flex; gap: 14px; align-items: flex-start; margin-bottom: 18px; }
+.face-row, .swatch-row { display: flex; flex-wrap: wrap; gap: 4px; }
+.swatch-row { margin-top: 10px; gap: 6px; }
+.pane-avatar .face-pick { padding: 2px; border-radius: 999px; border: 1px solid transparent; background: transparent; line-height: 0; }
+.pane-avatar .face-pick[aria-pressed=true] { border-color: var(--text); }
+.swatch-dot { width: 20px; height: 20px; border-radius: 999px; border: 2px solid var(--bg-2); box-shadow: 0 0 0 1px var(--line-strong); padding: 0; }
+.swatch-dot[aria-pressed=true] { box-shadow: 0 0 0 2px var(--text); }
+.pane-settings .field { margin-bottom: 12px; }
+.toggle-field { display: flex; flex-direction: row !important; align-items: center; justify-content: space-between; gap: 12px; }
+.toggle-field input { width: auto; }
+.pane-more-section { border-top: 1px solid var(--line); padding: 10px 0; }
+.pane-more-section summary { cursor: pointer; font-weight: 550; font-size: calc(13px * var(--fs)); color: var(--muted); list-style: none; display: flex; justify-content: space-between; align-items: center; min-height: 28px; }
+.pane-more-section summary::-webkit-details-marker { display: none; }
+.pane-more-section summary::after { content: '+'; color: var(--faint); font-weight: 400; }
+.pane-more-section[open] summary::after { content: '−'; }
+.pane-more-section[open] summary { margin-bottom: 10px; color: var(--text); }
+.pane-more-section textarea, .pane-more-section select { width: 100%; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* ── Calm chrome (every non-cute theme): neutral surfaces, thin borders, no glows, one accent, small type scale. */
+:root:not([data-flat="off"]) .nav a.active, :root:not([data-flat="off"]) .session-item.active, :root:not([data-flat="off"]) .run-item.active, :root:not([data-flat="off"]) .ws-root.active { box-shadow: none; background: rgba(var(--text-rgb), 0.07); color: var(--text); }
+:root:not([data-flat="off"]) .nav a:hover { background: rgba(var(--text-rgb), 0.05); }
+:root:not([data-flat="off"]) .nav a { padding: 6px 10px; font-size: calc(13.5px * var(--fs)); }
+:root:not([data-flat="off"]) .sidebar { gap: 14px; padding: 14px 10px 12px; }
+:root:not([data-flat="off"]) .btn.primary, :root:not([data-flat="off"]) .dot.live, :root:not([data-flat="off"]) .theme-card[aria-pressed="true"], :root:not([data-flat="off"]) .wall-card[aria-pressed="true"], :root:not([data-flat="off"]) .seg button[aria-pressed="true"] { box-shadow: none; }
+:root:not([data-flat="off"]) .word { font-family: var(--sans); font-size: calc(15px * var(--fs)); font-weight: 600; letter-spacing: -0.01em; }
+:root:not([data-flat="off"]) .word i { color: var(--text); font-style: normal; font-weight: 600; }
+:root:not([data-flat="off"]) .word span { letter-spacing: 0; text-transform: none; font-size: inherit; color: var(--faint); font-weight: 450; margin-left: 4px; }
+:root:not([data-flat="off"]) .mark { width: 22px; height: 22px; }
+:root:not([data-flat="off"]) .page h1 { font-family: var(--sans); font-size: calc(22px * var(--fs)); font-weight: 600; letter-spacing: -0.01em; }
+:root:not([data-flat="off"]) .topbar { padding: 6px 16px; gap: 10px; }
+:root:not([data-flat="off"]) .palette-btn { background: transparent; min-height: 32px; padding: 4px 12px; font-size: calc(13px * var(--fs)); }
+:root:not([data-flat="off"]) .nav-heading { font-size: calc(11px * var(--fs)); letter-spacing: 0.02em; text-transform: none; color: var(--faint); }
+
+/* ── Desktop app (Electron): the header is the title bar. Window controls sit over its right end (Windows/Linux). */
+:root[data-desktop] .topbar { -webkit-app-region: drag; min-height: 40px; padding-top: 4px; padding-bottom: 4px; user-select: none; }
+:root[data-desktop] .topbar button, :root[data-desktop] .topbar a, :root[data-desktop] .topbar input, :root[data-desktop] .topbar select { -webkit-app-region: no-drag; }
+:root[data-desktop="win"] .topbar, :root[data-desktop="linux"] .topbar { padding-right: 148px; }
+:root[data-desktop] .brand { -webkit-app-region: drag; min-height: 28px; }
+:root[data-desktop] .brand button { -webkit-app-region: no-drag; }
+:root[data-desktop="mac"] .sidebar { padding-top: 44px; }

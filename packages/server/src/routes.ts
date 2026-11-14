@@ -315,6 +315,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       hidden: z.boolean().optional(),
       sortOrder: z.number().int().optional(),
       workshopIds: z.array(z.string()).optional(),
+      notify: z.enum(['all', 'mute']).optional(),
     }), req.body);
     mustOwn(store, req, 'agent', (req.params as { id: string }).id, 'Persona not found.');
     if (body.toolAllowlist) body.toolAllowlist = memberTools(req, body.toolAllowlist);
