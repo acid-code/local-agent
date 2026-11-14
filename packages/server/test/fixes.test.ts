@@ -9,6 +9,7 @@ import type { Store } from '../src/db.js';
 import { spawnSync } from 'node:child_process';
 import { DockerCtl, dockerTarget, tarFile } from '../src/docker.js';
 import { searxngConfig } from '../src/routes.js';
+import { formatSearch, searxngHealth, searxngQuery } from '../src/tools.js';
 import { createCollection, embedRoleWarning, hashEmbedder, ingestBuffer } from '../src/kb.js';
 import { decideAuto, foldCandidates, likelyNeedsTools, nextAutoTier, DEFAULT_AUTO_MAP } from '@local-agent/shared';
 import { doctorChecks, geminiStateOf } from '../src/debug.js';
@@ -367,6 +368,47 @@ describe('Docker and SearXNG setup', () => {
     expect(spec.files[0]!.content).toMatch(/- json/);
     expect(store.getSettings().searxngUrl).toBe('http://127.0.0.1:8088');
     expect(JSON.stringify(store.getJob(run.json().job.id))).not.toContain(first.secret);
+    await app.close();
+  });
+});
+
+describe('web_search', () => {
+  const json = (body: object, status = 200) => async () => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  it('flags partial results, caps hits, and explains failures', async () => {
+    const results = Array.from({ length: 9 }, (_, i) => ({ title: `T${i}`, url: `https://e/${i}`, content: 'c' }));
+    const partial = await searxngQuery('http://s:8088/', 'ollama', json({ results, unresponsive_engines: [['google', 'CAPTCHA'], ['brave', 'timeout']] }) as typeof fetch, undefined, 3);
+    expect(partial.hits).toHaveLength(3);
+    expect(partial.partial).toBe(true);
+    expect(formatSearch('ollama', partial)).toMatch(/^Partial results: 2 engines did not answer: google \(CAPTCHA\), brave \(timeout\)/);
+    const none = await searxngQuery('http://s:8088', 'zzzz', json({ results: [] }) as typeof fetch);
+    expect(formatSearch('zzzz', none)).toMatch(/No results for "zzzz"/);
+    await expect(searxngQuery('http://s:8088', '   ', json({}) as typeof fetch)).rejects.toThrow(/non-empty query/);
+    await expect(searxngQuery('http://s:8088', 'x', json({}, 403) as typeof fetch)).rejects.toThrow(/refused JSON \(403\)/);
+    const down = async () => { throw new TypeError('fetch failed'); };
+    await expect(searxngQuery('http://127.0.0.1:8088', 'x', down as typeof fetch)).rejects.toThrow('SearXNG is not reachable at http://127.0.0.1:8088. Start it from Setup.');
+    await expect(searxngQuery('', 'x', down as typeof fetch)).rejects.toThrow(/not configured/);
+    expect((await searxngHealth('http://s:8088', json({ results: results.slice(0, 1) }) as typeof fetch)).detail).toMatch(/answered JSON .* 1 result\./);
+    expect((await searxngHealth('http://s:8088', down as typeof fetch)).ok).toBe(false);
+  });
+
+  it('runs web_search and kb_search from Debug > Health', async () => {
+    const dir = tmp();
+    const fetchImpl = async (input: string | URL | Request) => String(input).includes('/search?')
+      ? new Response(JSON.stringify({ results: [{ title: 'Ollama v1', url: 'https://ollama.com', content: 'release' }] }), { status: 200 })
+      : new Response('{}', { status: 404 });
+    const { app, store } = await buildApp({ dataDir: dir, startScheduler: false, serveWeb: false, fetchImpl: fetchImpl as typeof fetch });
+    const cookies = await login(app);
+    store.saveSettings({ ...store.getSettings(), searxngUrl: 'http://127.0.0.1:8088' }, 'test', {});
+    const collection = createCollection(store, { name: 'Notes', agentId: null });
+    await ingestBuffer(store, collection.id, { name: 'n.txt', bytes: Buffer.from('The secret bird name is BLUE HERON.') }, hashEmbedder());
+    const res = await app.inject({ method: 'POST', url: '/api/debug/tool-test', cookies, payload: { query: 'secret bird' } });
+    const [web, kb] = res.json().results;
+    expect(web).toMatchObject({ tool: 'web_search', ok: true });
+    expect(web.output).toMatch(/Ollama v1/);
+    expect(kb).toMatchObject({ tool: 'kb_search', ok: true });
+    expect(kb.output).toMatch(/BLUE HERON/);
+    const health = await app.inject({ method: 'GET', url: '/api/debug/health', cookies });
+    expect(health.json().checks.find((c: { id: string }) => c.id === 'searxng').ok).toBe(true);
     await app.close();
   });
 });

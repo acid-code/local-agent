@@ -11,6 +11,8 @@ export interface Settings {
   outputReserveTokens: number;
   summaryTriggerTokens: number;
   searxngUrl: string;
+  /** How many web_search hits go back to the model. */
+  searchHits: number;
   approvalForDestructive: boolean;
   mcpAllowHost: boolean;
   geminiTier: 'free' | 'paid';
@@ -47,6 +49,7 @@ export const DEFAULT_SETTINGS: Settings = {
   outputReserveTokens: 2048,
   summaryTriggerTokens: 1800,
   searxngUrl: '',
+  searchHits: 6,
   approvalForDestructive: true,
   mcpAllowHost: false,
   geminiTier: 'free',

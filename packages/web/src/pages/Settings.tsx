@@ -19,6 +19,7 @@ export function Settings() {
   const [query, setQuery] = useState('');
   const [debugLevel, setDebugLevel] = useState('info');
   const [health, setHealth] = useState<{ id: string; ok: boolean; detail: string }[]>([]);
+  const [toolTests, setToolTests] = useState<{ tool: string; query: string; ok: boolean; ms: number; output: string; error?: string }[]>([]);
   const [runId, setRunId] = useState('');
   const [inspection, setInspection] = useState('');
 
@@ -116,6 +117,14 @@ export function Settings() {
           <p key={check.id} className="row"><span className={check.ok ? 'badge' : 'badge warn'}>{check.ok ? 'ok' : 'check'}</span> {check.id}: {check.detail}
             <button className="btn" type="button" onClick={async () => { const data = await post<{ check: typeof check }>(`/api/debug/health/${encodeURIComponent(check.id)}`); setHealth((items) => items.map((item) => item.id === data.check.id ? data.check : item)); }}>Test now</button>
           </p>
+        ))}
+        <h3>Tool test</h3>
+        <button className="btn" type="button" onClick={async () => setToolTests((await post<{ results: typeof toolTests }>('/api/debug/tool-test', {})).results)}>Test web_search and kb_search</button>
+        {toolTests.map((test) => (
+          <div key={test.tool}>
+            <p className="row"><span className={test.ok ? 'badge' : 'badge warn'}>{test.ok ? 'ok' : 'check'}</span> {test.tool} “{test.query}” in {test.ms} ms{test.error ? `: ${test.error}` : ''}</p>
+            {test.output && <pre className="command">{test.output.slice(0, 1200)}</pre>}
+          </div>
         ))}
         <p><a className="btn" href="/api/debug/bundle">Download redacted diagnostics</a></p>
         <p className="faint">Over SSH: <span className="mono">npm run doctor</span>. To recover a forgotten password: <span className="mono">npm run reset-owner</span>.</p>

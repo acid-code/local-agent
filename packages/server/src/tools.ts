@@ -53,20 +53,72 @@ export interface SearchHit {
   content: string;
 }
 
-/** SearXNG JSON search used by the web_search tool. No cloud search API. */
-export async function searxngSearch(base: string, query: string, fetchImpl: typeof fetch, signal?: AbortSignal): Promise<SearchHit[]> {
+export interface SearchResult {
+  hits: SearchHit[];
+  /** Engines SearXNG could not reach, with the reason it gave. */
+  unresponsive: string[];
+  partial: boolean;
+}
+
+/** SearXNG JSON search with the details a person needs when it goes wrong. No cloud search API. */
+export async function searxngQuery(base: string, query: string, fetchImpl: typeof fetch, signal?: AbortSignal, limit = 6): Promise<SearchResult> {
   const root = base.replace(/\/$/, '');
-  if (!root) throw new Error('SearXNG is not configured. Start it from Setup.');
-  const response = await fetchImpl(`${root}/search?q=${encodeURIComponent(query)}&format=json`, {
-    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(12_000)]) : AbortSignal.timeout(12_000),
-  });
-  if (!response.ok) throw new Error(`SearXNG returned ${response.status}.`);
-  const json = await response.json() as { results?: { title?: string; url?: string; content?: string }[] };
-  return (json.results ?? []).slice(0, 6).map((result) => ({
+  if (!root) throw new Error('SearXNG is not configured. Start it from Setup, or set its URL in Settings.');
+  const q = query.trim();
+  if (!q) throw new Error('web_search needs a non-empty query.');
+  let response: Response;
+  try {
+    response = await fetchImpl(`${root}/search?q=${encodeURIComponent(q)}&format=json`, {
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(12_000)]) : AbortSignal.timeout(12_000),
+    });
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    const timedOut = error instanceof Error && /timeout|aborted/i.test(`${error.name} ${error.message}`);
+    throw new Error(timedOut ? `SearXNG at ${root} did not answer within 12 seconds.` : `SearXNG is not reachable at ${root}. Start it from Setup.`);
+  }
+  if (response.status === 403) throw new Error(`SearXNG at ${root} refused JSON (403). Turn on the json format in its settings.yml, or restart it from Setup.`);
+  if (response.status === 429) throw new Error(`SearXNG at ${root} rate-limited the request (429). Turn its limiter off, or restart it from Setup.`);
+  if (!response.ok) throw new Error(`SearXNG at ${root} returned ${response.status}.`);
+  let json: { results?: { title?: string; url?: string; content?: string }[]; unresponsive_engines?: unknown[] };
+  try {
+    json = await response.json() as typeof json;
+  } catch {
+    throw new Error(`SearXNG at ${root} did not return JSON. Check that the json format is on.`);
+  }
+  const unresponsive = (json.unresponsive_engines ?? []).map((item) => Array.isArray(item) ? `${item[0]}${item[1] ? ` (${item[1]})` : ''}` : String(item));
+  const hits = (json.results ?? []).slice(0, Math.max(1, limit)).map((result) => ({
     title: result.title ?? '',
     url: result.url ?? '',
     content: result.content ?? '',
   }));
+  return { hits, unresponsive, partial: unresponsive.length > 0 };
+}
+
+/** Hits only. Used by reputation checks. */
+export async function searxngSearch(base: string, query: string, fetchImpl: typeof fetch, signal?: AbortSignal, limit = 6): Promise<SearchHit[]> {
+  return (await searxngQuery(base, query, fetchImpl, signal, limit)).hits;
+}
+
+/** A real JSON query, so health means web_search will work, not just that a URL is set. */
+export async function searxngHealth(base: string, fetchImpl: typeof fetch): Promise<{ ok: boolean; detail: string }> {
+  if (!base.trim()) return { ok: false, detail: 'SearXNG is not configured. Start it from Setup.' };
+  try {
+    const result = await searxngQuery(base, 'local-agent health check', fetchImpl, undefined, 3);
+    const partial = result.partial ? ` ${result.unresponsive.length} engine${result.unresponsive.length === 1 ? '' : 's'} did not answer.` : '';
+    return { ok: true, detail: `SearXNG answered JSON at ${base.replace(/\/$/, '')} with ${result.hits.length} result${result.hits.length === 1 ? '' : 's'}.${partial}` };
+  } catch (error) {
+    return { ok: false, detail: error instanceof Error ? error.message : 'SearXNG failed.' };
+  }
+}
+
+/** What web_search hands the model. */
+export function formatSearch(query: string, result: SearchResult): string {
+  const note = result.partial ? `Partial results: ${result.unresponsive.length} engine${result.unresponsive.length === 1 ? '' : 's'} did not answer: ${result.unresponsive.join(', ')}.` : '';
+  if (!result.hits.length) {
+    return [`No results for "${query.trim()}".`, note, 'Try fewer or different words.'].filter(Boolean).join(' ');
+  }
+  const body = result.hits.map((hit, index) => `${index + 1}. ${hit.title}\n${hit.url}\n${hit.content}`).join('\n\n');
+  return note ? `${note}\n\n${body}` : body;
 }
 
 /** Public page fetch used by the web_fetch tool. */
@@ -182,9 +234,9 @@ export const BUILTIN_TOOLS: Tool[] = [
     mutates: () => false,
     approval: () => null,
     async execute(args, ctx) {
-      const results = await searxngSearch(ctx.searxngUrl, String(args.query || ''), ctx.fetchImpl, ctx.signal);
-      if (!results.length) return 'No results.';
-      return results.map((result, index) => `${index + 1}. ${result.title}\n${result.url}\n${result.content}`).join('\n\n');
+      const query = String(args.query ?? '');
+      const result = await searxngQuery(ctx.searxngUrl, query, ctx.fetchImpl, ctx.signal, ctx.store?.getSettings().searchHits ?? 6);
+      return formatSearch(query, result);
     },
   },
   {

@@ -21,9 +21,9 @@ import { ollamaLoaded } from './ollama.js';
 import { doctorChecks, geminiStateOf, redactValue, searchLogs, zipStore, LOG_COMPONENTS, type LogComponent } from './debug.js';
 import { previewPrune, runPrune, snapshotResources } from './resources.js';
 import { speak, transcribe, voiceStatus, KOKORO_COMMAND, WHISPER_COMMAND } from './voice.js';
-import { listWorkspace, readWorkspaceFile } from './tools.js';
+import { formatSearch, listWorkspace, readWorkspaceFile, searxngHealth, searxngQuery } from './tools.js';
 import {
-  createCollection, embedRoleWarning, ingestBuffer, ingestFolder, kbUsage, listCollections, ollamaEmbedder, searchKnowledge,
+  createCollection, embedRoleWarning, formatCitations, ingestBuffer, ingestFolder, kbUsage, listCollections, ollamaEmbedder, searchKnowledge,
 } from './kb.js';
 import {
   exportSkill, importSkill, listSkills, parseSkillMd, saveSkill, setSkillEnabled, skillFit, skillVersions,
@@ -145,6 +145,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       outputReserveTokens: z.number().int().min(128).max(32000).optional(),
       summaryTriggerTokens: z.number().int().min(200).max(20000).optional(),
       searxngUrl: z.string().optional(),
+      searchHits: z.number().int().min(1).max(20).optional(),
       approvalForDestructive: z.boolean().optional(),
       mcpAllowHost: z.boolean().optional(),
       geminiTier: z.enum(['free', 'paid']).optional(),
@@ -666,6 +667,26 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     if (!check) throw http(404, 'No check with that name.');
     return { check };
   });
+  // Runs the real tools once, so a broken search or knowledge base shows up before a chat does.
+  app.post('/api/debug/tool-test', async (req) => {
+    const body = parse(z.object({ tool: z.enum(['web_search', 'kb_search']).optional(), query: z.string().optional() }), req.body);
+    const tools = body.tool ? [body.tool] : ['web_search', 'kb_search'] as const;
+    const settings = store.getSettings();
+    const results = [];
+    for (const tool of tools) {
+      const query = body.query?.trim() || (tool === 'web_search' ? 'Ollama latest release' : 'test');
+      const started = Date.now();
+      try {
+        const output = tool === 'web_search'
+          ? formatSearch(query, await searxngQuery(settings.searxngUrl || process.env.SEARXNG_URL || '', query, fetchImpl, undefined, settings.searchHits))
+          : formatCitations(await searchKnowledge(store, query, { k: 3 }));
+        results.push({ tool, query, ok: !/^No (results|knowledge-base passages)/.test(output), ms: Date.now() - started, output: output.slice(0, 2000) });
+      } catch (error) {
+        results.push({ tool, query, ok: false, ms: Date.now() - started, output: '', error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    return { results };
+  });
   app.get('/api/debug/bundle', async (_req, reply) => {
     const checks = await healthChecks(store, docker, fetchImpl, config.dataDir);
     const runs = store.listRuns(8).map((run) => redactValue({ run, steps: store.listSteps(run.id) }));
@@ -732,16 +753,13 @@ async function healthChecks(store: Store, docker: DockerCtl, fetchImpl: typeof f
   const backups = listBackups(dataDir);
   const mcp = store.listMcp();
   const settings = store.getSettings();
-  let searx = false;
-  if (settings.searxngUrl) {
-    try { searx = (await fetchImpl(`${settings.searxngUrl.replace(/\/$/, '')}/search?q=ping&format=json`, { signal: AbortSignal.timeout(1500) })).ok; } catch { searx = false; }
-  }
+  const searx = await searxngHealth(settings.searxngUrl || process.env.SEARXNG_URL || '', fetchImpl);
   const dbFile = path.join(dataDir, 'local-agent.db');
   const dbBytes = fs.existsSync(dbFile) ? fs.statSync(dbFile).size : 0;
   const embedWarning = ollamaOk ? await embedRoleWarning(store, fetchImpl) : null;
   return [...doctorChecks({
     ollamaOk, loaded, dockerOk: await docker.ping(), mcpCount: mcp.length, mcpErrors: mcp.filter((item) => item.lastError).length,
-    searxngOk: searx, telegramQueued: telegramQueue(dataDir).length, dbBytes,
+    searxngOk: searx.ok, searxngDetail: searx.detail, telegramQueued: telegramQueue(dataDir).length, dbBytes,
     diskFreeBytes: snap.disk.freeBytes, memAvailableGiB: snap.memory.availableGiB,
     geminiOpen: settings.geminiTier === 'paid' ? true : null, geminiState: geminiStateOf(store.getProvider('prov_gemini')) === 'off' ? 'off' : undefined, lastBackupAt: backups[0]?.createdAt ?? null, tailscaleOk: await tailscaleUp(),
   }), { id: 'embed', ok: !embedWarning, detail: embedWarning || (ollamaOk ? 'The embed role is an embedding model.' : 'Ollama is down, so the embed role was not checked.') }];

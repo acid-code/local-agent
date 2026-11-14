@@ -65,6 +65,7 @@ export interface DoctorInput {
   mcpErrors: number;
   mcpCount: number;
   searxngOk: boolean;
+  searxngDetail?: string;
   tailscaleOk: boolean;
   telegramQueued: number;
   dbBytes: number;
@@ -82,7 +83,7 @@ export function doctorChecks(input: DoctorInput): { id: string; ok: boolean; det
     ...input.loaded.map((model) => ({ id: `ctx:${model.name}`, ok: (model.contextLength ?? 0) >= 8192, detail: model.contextLength ? `${model.name} num_ctx ${model.contextLength}.` : `${model.name} did not report num_ctx.` })),
     { id: 'docker', ok: input.dockerOk, detail: input.dockerOk ? 'Docker answered.' : 'Docker is not available.' },
     { id: 'mcp', ok: input.mcpErrors === 0, detail: input.mcpErrors ? `${input.mcpErrors} of ${input.mcpCount} MCP servers are in error.` : `${input.mcpCount} MCP servers.` },
-    { id: 'searxng', ok: input.searxngOk, detail: input.searxngOk ? 'SearXNG answered.' : 'SearXNG did not answer.' },
+    { id: 'searxng', ok: input.searxngOk, detail: input.searxngDetail || (input.searxngOk ? 'SearXNG answered.' : 'SearXNG did not answer.') },
     { id: 'tailscale', ok: input.tailscaleOk, detail: input.tailscaleOk ? 'Tailscale is up.' : 'Tailscale was not detected. The LAN URL still works at home.' },
     { id: 'telegram', ok: true, detail: input.telegramQueued ? `${input.telegramQueued} notification${input.telegramQueued === 1 ? '' : 's'} waiting to send.` : 'Telegram queue is empty.' },
     { id: 'db', ok: input.dbBytes < 2 * 1024 ** 3, detail: `Database is ${input.dbBytes} bytes.` },
