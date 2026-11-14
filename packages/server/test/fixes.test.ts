@@ -6,6 +6,7 @@ import { buildApp } from '../src/app.js';
 import { splitThinking } from '../src/engine.js';
 import { providerFor, type ModelProvider, type ProviderEvent } from '../src/providers.js';
 import type { Store } from '../src/db.js';
+import { likelyNeedsTools, nextAutoTier, DEFAULT_AUTO_MAP } from '@local-agent/shared';
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
@@ -92,6 +93,85 @@ describe('thinking models', () => {
     const second = store.createSession({ agentId: agent.id, title: 'Two' });
     await engine.startTurn({ sessionId: second.id, agentId: agent.id, content: 'Please explain the workshop to a new teammate.', wait: true });
     expect(store.listMessages(second.id).at(-1)?.content).toBe('Second chat works.');
+    await app.close();
+  });
+});
+
+describe('models without tool calls', () => {
+  it('retries on the next tier once, then sends no tools to that model, and skips it when a tool is likely needed', async () => {
+    const dir = tmp();
+    const seen: { model: string; tools: number }[] = [];
+    const provider: ModelProvider = {
+      async *complete(req) {
+        seen.push({ model: req.model, tools: req.tools?.length ?? 0 });
+        if (req.model === 'smollm2:135m' && req.tools?.length) throw new Error('Ollama failed (400): {"error":"registry.ollama.ai/library/smollm2:135m does not support tools"}');
+        yield { type: 'token', text: `from ${req.model}` };
+        yield { type: 'done', finishReason: 'stop', usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+    };
+    const { app, store, engine } = await buildApp({ dataDir: dir, startScheduler: false, serveWeb: false, providerOverride: () => provider });
+    addLocal(store, 'fast', 'smollm2:135m', 'small', 2048);
+    addLocal(store, 'main', 'qwen3:0.6b', 'large', 8192);
+    store.saveSettings({ ...store.getSettings(), autoModels: { ...store.getSettings().autoModels, fast: 'smollm2:135m', main: 'qwen3:0.6b' } }, 'test', {});
+    const agent = store.createAgent({ name: 'House', systemPrompt: 'Be brief.', toolAllowlist: ['web_search'], workspacePath: dir });
+    const session = store.createSession({ agentId: agent.id, title: 'Tools' });
+    const first = await engine.startTurn({ sessionId: session.id, agentId: agent.id, content: 'hi', wait: true });
+    expect(first.status).toBe('completed');
+    expect(store.listMessages(session.id).at(-1)?.content).toBe('from qwen3:0.6b');
+    expect(store.getRun(first.id)?.routingNote).toMatch(/smollm2:135m cannot use tools/);
+    expect(store.getSettings().toolSupport['smollm2:135m']).toBe(false);
+
+    const second = await engine.startTurn({ sessionId: session.id, agentId: agent.id, content: 'hello', wait: true });
+    expect(second.status).toBe('completed');
+    expect(seen.at(-1)).toEqual({ model: 'smollm2:135m', tools: 0 });
+
+    const third = await engine.startTurn({ sessionId: session.id, agentId: agent.id, content: 'search ollama', wait: true });
+    expect(third.status).toBe('completed');
+    expect(seen.at(-1)?.model).toBe('qwen3:0.6b');
+    expect(seen.at(-1)?.tools).toBeGreaterThan(0);
+    await app.close();
+  });
+
+  it('guesses when a turn needs tools', () => {
+    expect(likelyNeedsTools('hi')).toBe(false);
+    expect(likelyNeedsTools('thanks, that helps')).toBe(false);
+    expect(likelyNeedsTools('search the web for ollama')).toBe(true);
+    expect(likelyNeedsTools('read https://example.com')).toBe(true);
+    expect(likelyNeedsTools('What is the secret bird name?', { kb: true })).toBe(true);
+    expect(likelyNeedsTools('What is the secret bird name?')).toBe(false);
+  });
+
+  it('walks the Auto ladder for a retry', () => {
+    const model = (id: string, size: 'small' | 'large', kind = 'openai_compat', local = true) => ({ id, name: id, apiName: id, local, embedding: false, sizeClass: size, providerKind: kind, practicalBudget: 4096, enabled: true });
+    const models = [model('tiny', 'small'), model('big', 'large'), model('rehearsal', 'small', 'rehearsal', false)];
+    const map = { ...DEFAULT_AUTO_MAP, fast: 'tiny', main: 'big' };
+    expect(nextAutoTier({ role: 'fast', map, models, currentId: 'tiny' })?.id).toBe('big');
+    expect(nextAutoTier({ role: 'main', map, models, currentId: 'big' })?.id).toBe('tiny');
+    expect(nextAutoTier({ role: 'fast', map, models, currentId: 'tiny', exclude: new Set(['big']) })).toBeUndefined();
+  });
+});
+
+describe('models removed from Ollama', () => {
+  it('marks the model missing and falls back to the next tier with a note', async () => {
+    const dir = tmp();
+    const provider: ModelProvider = {
+      async *complete(req) {
+        if (req.model === 'gone:1b') throw new Error('Ollama failed (404): {"error":"model \'gone:1b\' not found"}');
+        yield { type: 'token', text: `from ${req.model}` };
+        yield { type: 'done', finishReason: 'stop', usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+    };
+    const { app, store, engine } = await buildApp({ dataDir: dir, startScheduler: false, serveWeb: false, providerOverride: () => provider });
+    addLocal(store, 'gone', 'gone:1b', 'small', 2048);
+    addLocal(store, 'main', 'qwen3:0.6b', 'large', 8192);
+    store.saveSettings({ ...store.getSettings(), autoModels: { ...store.getSettings().autoModels, fast: 'gone:1b', main: 'qwen3:0.6b' } }, 'test', {});
+    const agent = store.createAgent({ name: 'House', systemPrompt: 'Be brief.', toolAllowlist: [], workspacePath: dir });
+    const session = store.createSession({ agentId: agent.id, title: 'Gone' });
+    const run = await engine.startTurn({ sessionId: session.id, agentId: agent.id, content: 'hi', wait: true });
+    expect(run.status).toBe('completed');
+    expect(store.listMessages(session.id).at(-1)?.content).toBe('from qwen3:0.6b');
+    expect(store.getRun(run.id)?.routingNote).toMatch(/gone:1b is not installed anymore/);
+    expect(store.getModel('gone')?.enabled).toBe(false);
     await app.close();
   });
 });

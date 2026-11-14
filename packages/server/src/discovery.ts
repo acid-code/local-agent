@@ -103,6 +103,12 @@ function rememberOllama(store: Store, ollama: NonNullable<DiscoveryReport['ollam
       parameterSize: model.parameterSize ?? null, family: model.family ?? profile.family, source: 'discovered', embedding: false, freeTier: null, enabled: true,
     });
   }
+  // A model removed from Ollama stays listed otherwise, and chats fail on it.
+  const installed = new Set(ollama.models.map((model) => model.name));
+  for (const row of store.listModels()) {
+    if (row.providerId !== provider.id || row.source !== 'discovered' || !row.enabled) continue;
+    if (!installed.has(row.apiName) && !installed.has(`${row.apiName}:latest`)) store.updateModel(row.id, { enabled: false });
+  }
 }
 
 function rememberOpenAI(store: Store, id: string, base: string, json: { data?: { id?: string }[] }) {

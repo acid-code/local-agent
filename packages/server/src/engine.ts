@@ -7,6 +7,8 @@ import {
   freeTierByApiName,
   geminiQuotaDay,
   isContextOverflowError,
+  likelyNeedsTools,
+  nextAutoTier,
   planContext,
   shrinkBudget,
   quotaAvailability,
@@ -31,6 +33,8 @@ import { runSkillScript, skillCatalog } from './skills.js';
 import { getWorkshop, workshopBrief } from './workshops.js';
 import { checkOrRepair, contractForAgent, pickAutoRole, toolArgumentsSchema, toolParameters } from './contracts.js';
 import { addProjectNote, changesSince, ensureTaskBranch, isSmallEdit, listSharedRepos, matchRepos, refreshRepo, releaseRepoLocks, repoSyncTool, sharedRepoBrief, taskBranchName, tryLockRepo, type GitIdentity } from './repos.js';
+import { isMissingModelError, isToolUnsupportedError, ollamaCapabilities } from './ollama.js';
+import { scanMachine } from './discovery.js';
 import { CrashError, InterruptedToolError, StopError, clampText, now } from './util.js';
 import type { Vault } from './vault.js';
 
@@ -76,6 +80,7 @@ export class Engine {
     }
     if (command?.unpin && !command.rest) commandAck = 'Back on Auto.';
     if (command?.smart && !command.rest && !command.pinName) commandAck = 'Add the question after /smart. The next ordinary message goes back to the main model.';
+    let userMessageId: string | undefined;
     if (input.content) {
       const message = this.store.insertMessage({
         sessionId: session.id, role: 'user', content: input.content, toolCallId: null, toolName: null, toolCalls: null,
@@ -84,9 +89,9 @@ export class Engine {
       if (session.title === 'New chat') {
         this.store.updateSession(session.id, { title: input.content.slice(0, 72) });
       }
-      void message;
+      userMessageId = message.id;
     }
-    const cursor: RunCursor = { phase: 'route', turn: 0, messageModelId: input.modelId, depth: input.depth ?? 0, configVersion: this.store.getSettings().version, agentUpdatedAt: agent.updatedAt, commandAck, pinMiss };
+    const cursor: RunCursor = { phase: 'route', turn: 0, userMessageId, messageModelId: input.modelId, depth: input.depth ?? 0, configVersion: this.store.getSettings().version, agentUpdatedAt: agent.updatedAt, commandAck, pinMiss };
     const run = this.store.createRun({ sessionId: session.id, agentId: agent.id, parentRunId: input.parentRunId, configVersion: cursor.configVersion ?? 1, cursor });
     const task = this.execute(run.id);
     if (input.wait) await task;
@@ -243,6 +248,7 @@ export class Engine {
     const stage = stageFor(this.store, run);
     const prepared = await prepareRepos(this.store, run, stage);
     const staged = { ...run, cursor: { ...run.cursor, stage: prepared.stage, syncNote: prepared.syncNote, branched: prepared.branched } };
+    await this.probeToolSupport();
     const decision = this.choose(agent, staged);
     let reason = prepared.lockedOut || decision.reason;
     let switched = prepared.lockedOut ? true : decision.switched;
@@ -331,7 +337,8 @@ export class Engine {
       this.bus.publish({ type: 'quota', runId: run.id, exhausted: true });
     }
     const provider = this.provider(model);
-    const tools = this.tools(agent, this.store.getSession(run.sessionId)?.mode, current.cursor.stage).map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
+    const toolless = Boolean(current.cursor.noTools) || this.toolSupportOf(model) === false;
+    const tools = toolless ? [] : this.tools(agent, this.store.getSession(run.sessionId)?.mode, current.cursor.stage).map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
     if (model.local && model.sizeClass === 'large') {
       await this.waitForLarge(run.id, model.name);
       await this.loadLarge(run.id, model);
@@ -370,6 +377,36 @@ export class Engine {
     } catch (error) {
       if (error instanceof StopError) throw error;
       const message = error instanceof Error ? error.message : String(error);
+      if (isToolUnsupportedError(message)) {
+        this.recordToolSupport(model.apiName, false);
+        this.store.updateStep(step.id, { status: 'failed', error: message, endedAt: now(), latencyMs: Date.now() - started });
+        const version = this.store.getSettings().version;
+        const next = current.cursor.toolRetry ? undefined : this.nextTier(current, model, true);
+        if (next) {
+          const reason = `Switched to ${next.name} — ${model.name} cannot use tools.`;
+          this.store.addLog('warn', reason, undefined, 'router');
+          this.store.updateRun(run.id, { cursor: { ...current.cursor, modelId: next.id, toolRetry: true, phase: 'model', switched: true, routingReason: reason, configVersion: version }, modelId: next.id, switched: true, routingNote: reason });
+          return;
+        }
+        if (!current.cursor.noTools) {
+          this.store.addLog('warn', `${model.name} cannot use tools. Retrying without tools.`, undefined, 'router');
+          this.store.updateRun(run.id, { cursor: { ...current.cursor, noTools: true, toolRetry: true, phase: 'model', configVersion: version } });
+          return;
+        }
+      }
+      if (model.local && isMissingModelError(message)) {
+        this.store.updateModel(model.id, { enabled: false });
+        this.store.addLog('warn', `${model.name} is not installed in Ollama anymore. Marked it missing.`, undefined, 'router');
+        this.store.updateStep(step.id, { status: 'failed', error: message, endedAt: now(), latencyMs: Date.now() - started });
+        void this.refreshModels();
+        const next = current.cursor.missingRetry ? undefined : this.nextTier(current, model, false);
+        if (next) {
+          const reason = `Switched to ${next.name} — ${model.name} is not installed anymore.`;
+          this.store.updateRun(run.id, { cursor: { ...current.cursor, modelId: next.id, missingRetry: true, phase: 'model', switched: true, routingReason: reason }, modelId: next.id, switched: true, routingNote: reason });
+          return;
+        }
+        throw new Error(`${model.name} is not installed in Ollama. Pull it again or choose another model in Setup.`);
+      }
       if (isContextOverflowError(message) && !current.cursor.budgetOverride) {
         const shrunk = shrinkBudget(model.practicalBudget);
         this.store.addLog('warn', `Context overflow from ${model.name}. Retrying at ${shrunk} tokens.`, undefined, 'context');
@@ -602,7 +639,8 @@ export class Engine {
     const settings = this.store.getSettings();
     const session = this.store.getSession(run.sessionId);
     const messages = this.store.listMessages(run.sessionId);
-    const user = [...messages].reverse().find((message) => message.role === 'user');
+    const user = (run.cursor.userMessageId && messages.find((message) => message.id === run.cursor.userMessageId))
+      || [...messages].reverse().find((message) => message.role === 'user');
     const text = user?.content ?? '';
     const pinnedPersona = agent.routing === 'pinned' && agent.modelId && !session?.modelPin && !run.cursor.messageModelId;
     const decision = pinnedPersona
@@ -642,15 +680,21 @@ export class Engine {
     return picked;
   }
 
-  private autoDecision(text: string, run: RunRow, settings: Settings): RouteDecision {
-    const session = this.store.getSession(run.sessionId);
-    const models: AutoCandidate[] = this.candidates(settings).map((model) => ({
+  private autoCandidates(settings: Settings): AutoCandidate[] {
+    return this.candidates(settings).map((model) => ({
       id: model.id, name: model.name, apiName: model.apiName, local: model.local, embedding: false,
       sizeClass: model.sizeClass, providerKind: model.providerKind, quotaOpen: model.quotaOpen,
       practicalBudget: model.practicalBudget, enabled: model.enabled,
     }));
+  }
+
+  private autoDecision(text: string, run: RunRow, settings: Settings): RouteDecision {
+    const session = this.store.getSession(run.sessionId);
+    const models = this.autoCandidates(settings);
     const unsupported = new Set(Object.entries(settings.toolSupport).filter(([, ok]) => ok === false).map(([name]) => name));
-    const capable = models.filter((model) => !unsupported.has(model.apiName) && !unsupported.has(model.name));
+    // A model without tool calls still answers chat. Skip it only when this turn probably needs a tool.
+    const needsTools = likelyNeedsTools(text, { kb: this.hasKnowledge(run.agentId), code: session?.mode === 'code' || Boolean(run.cursor.stage) });
+    const capable = needsTools ? models.filter((model) => !unsupported.has(model.apiName) && !unsupported.has(model.name)) : models;
     const pool = capable.length ? capable : models;
     const auto = decideAuto({
       text, stage: run.cursor.stage, failures: this.localFailureCount(run.agentId), map: settings.autoModels, models: pool,
@@ -825,6 +869,68 @@ export class Engine {
     } catch {
       return prompt.slice(0, 800);
     }
+  }
+
+  /** Tool support from Ollama capabilities or a rejected request. undefined when not known yet. */
+  private toolSupportOf(model: { apiName: string; name: string }): boolean | undefined {
+    const map = this.store.getSettings().toolSupport;
+    return map[model.apiName] ?? map[model.name];
+  }
+
+  private recordToolSupport(apiName: string, ok: boolean) {
+    const current = this.store.getSettings();
+    if (current.toolSupport[apiName] === ok) return;
+    const toolSupport = { ...current.toolSupport, [apiName]: ok };
+    this.store.saveSettings({ ...current, toolSupport }, ok ? `${apiName} supports tool calls` : `${apiName} does not support tool calls`, { toolSupport });
+  }
+
+  private ollamaRootFor(model: ModelRow): string | null {
+    const provider = this.store.getProvider(model.providerId);
+    if (!provider || provider.kind === 'openrouter' || provider.kind === 'gemini' || provider.kind === 'rehearsal') return null;
+    const base = (provider.baseUrl || 'http://127.0.0.1:11434/v1').replace(/\/$/, '');
+    if (provider.id === 'prov_ollama' || provider.name === 'Ollama' || /:11434(\/|$)/.test(base)) return base.replace(/\/v1$/, '');
+    return null;
+  }
+
+  /** Ask Ollama once per model whether it takes tools. Cached in settings.toolSupport. */
+  private async probeToolSupport() {
+    if (this.providerOverride) return;
+    const unknown = this.store.listModels().filter((model) => model.enabled && model.local && !model.embedding && this.toolSupportOf(model) === undefined);
+    await Promise.all(unknown.map(async (model) => {
+      const root = this.ollamaRootFor(model);
+      if (!root) return;
+      const found = await ollamaCapabilities(this.fetchImpl, model.apiName, root);
+      if (found.capabilities) this.recordToolSupport(model.apiName, found.capabilities.includes('tools'));
+    }));
+  }
+
+  /** The next Auto tier after `model`, for a retry. */
+  private nextTier(run: RunRow, model: ModelRow, needTools: boolean): ModelRow | undefined {
+    const settings = this.store.getSettings();
+    const models = this.autoCandidates(settings);
+    const exclude = new Set<string>();
+    if (needTools) for (const item of models) if (this.toolSupportOf(item) === false) exclude.add(item.id);
+    const pick = nextAutoTier({ role: run.cursor.autoRole, map: settings.autoModels, models, currentId: model.id, exclude });
+    return pick ? this.store.getModel(pick.id) ?? undefined : undefined;
+  }
+
+  private hasKnowledge(agentId: string): boolean {
+    try {
+      const row = this.store.db.prepare('SELECT COUNT(*) AS n FROM kb_documents d JOIN kb_collections c ON c.id = d.collection_id WHERE c.agent_id IS NULL OR c.agent_id = ?').get(agentId) as { n: number } | undefined;
+      return Number(row?.n ?? 0) > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  private refreshing: Promise<unknown> | null = null;
+  private refreshModels() {
+    if (this.providerOverride || this.refreshing) return this.refreshing;
+    this.refreshing = scanMachine(this.fetchImpl, this.docker, this.store)
+      .then((scan) => { this.residentLarge = scan.resident; })
+      .catch(() => undefined)
+      .finally(() => { this.refreshing = null; });
+    return this.refreshing;
   }
 
   private tools(agent: Agent, sessionMode?: string, stage?: 'plan' | 'implement') {

@@ -200,3 +200,31 @@ export function decideAuto(input: {
     switched, escalated, reason, unload: unloadOf(resolved.model), trace: why === 'task' ? `auto:${role}` : `auto:${why}`,
   };
 }
+
+/** True when a message probably needs a tool: the web, files, the shell, memory, or the knowledge base. */
+export function likelyNeedsTools(text: string, opts: { kb?: boolean; code?: boolean } = {}): boolean {
+  const body = readChatCommand(text).rest || text;
+  if (opts.code) return true;
+  if (/https?:\/\/|www\.|(^|\s)[~.]?\/[\w.-]+\//i.test(body)) return true;
+  if (/\b(search|google|look\s?up|browse|latest|news|today|tonight|current(ly)?|weather|price|stock|web(site)?|url|link|download|fetch|file|files|folder|directory|read|open|list|run|execute|shell|terminal|command|docker|containers?|install|kb|knowledge|documents?|docs|pdf|remember|recall|notes?|schedule|remind)\b/i.test(body)) return true;
+  if (opts.kb && body.trim().length >= 12 && /\?|\b(what|which|who|where|when|how|why|according|explain|summari[sz]e|find)\b/i.test(body)) return true;
+  return false;
+}
+
+/**
+ * The next model up the Auto ladder after `currentId`, skipping `exclude`.
+ * fast → main → thinking → cloud. Coder steps to thinking. A pin or unknown role starts at main.
+ */
+export function nextAutoTier(input: { role?: string; map: AutoMap; models: AutoCandidate[]; currentId: string; exclude?: Set<string> }): AutoCandidate | undefined {
+  const pool = input.models.filter((model) => model.enabled && model.id !== input.currentId && !input.exclude?.has(model.id) && !model.embedding);
+  const real = pool.filter((model) => model.providerKind !== 'rehearsal');
+  if (!real.length) return undefined;
+  const known = (['fast', 'main', 'coder', 'thinking', 'cloud'] as string[]).includes(input.role || '');
+  const role = input.role as AutoRole;
+  const startIndex = !known ? 1 : (role === 'coder' ? LADDER.indexOf('main') : LADDER.indexOf(role)) + 1;
+  for (const next of LADDER.slice(startIndex)) {
+    const resolved = resolveRole(next, input.map, real).model;
+    if (resolved && resolved.id !== input.currentId && resolved.providerKind !== 'rehearsal' && (next !== 'cloud' || resolved.local || resolved.quotaOpen !== false)) return resolved;
+  }
+  return real.find((model) => model.local) ?? real[0];
+}

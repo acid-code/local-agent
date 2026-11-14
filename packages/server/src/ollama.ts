@@ -51,3 +51,30 @@ export async function toolCapabilityWarnings(fetchImpl: typeof fetch, models: { 
   if (unanswered) warnings.push(`${unanswered} local model${unanswered === 1 ? '' : 's'} did not answer /api/show.`);
   return warnings;
 }
+
+/** Ollama /api/show capabilities. null when Ollama did not answer or did not list them. */
+export async function ollamaCapabilities(fetchImpl: typeof fetch, apiName: string, root = ollamaRoot()): Promise<{ capabilities: string[] | null; missing: boolean }> {
+  try {
+    const response = await fetchImpl(`${root}/api/show`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: apiName }),
+      signal: AbortSignal.timeout(2500),
+    });
+    if (response.status === 404) return { capabilities: null, missing: true };
+    if (!response.ok) return { capabilities: null, missing: false };
+    const json = await response.json() as { capabilities?: unknown };
+    return { capabilities: Array.isArray(json.capabilities) ? json.capabilities.map(String) : null, missing: false };
+  } catch {
+    return { capabilities: null, missing: false };
+  }
+}
+
+export function isToolUnsupportedError(message: string) {
+  return /does not support tools/i.test(message);
+}
+
+export function isMissingModelError(message: string) {
+  return /\(404\)/.test(message) && /not found|no such model|pull/i.test(message)
+    || /model ['"][^'"]+['"] not found/i.test(message);
+}
