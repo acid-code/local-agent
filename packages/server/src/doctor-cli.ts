@@ -3,6 +3,7 @@ import path from 'node:path';
 import { geminiQuotaDay } from '@local-agent/shared';
 import { loadConfig } from './config.js';
 import { Store } from './db.js';
+import { DockerCtl } from './docker.js';
 import { doctorChecks, geminiStateOf } from './debug.js';
 import { ollamaLoaded } from './ollama.js';
 import { snapshotResources } from './resources.js';
@@ -27,7 +28,7 @@ const dbFile = path.join(config.dataDir, 'local-agent.db');
 const checks = doctorChecks({
   ollamaOk: loaded.length >= 0 && await ollamaUp(),
   loaded,
-  dockerOk: fs.existsSync('/var/run/docker.sock'),
+  dockerOk: await new DockerCtl().ping(),
   mcpCount: store.listMcp().length,
   mcpErrors: store.listMcp().filter((item) => item.lastError).length,
   searxngOk: Boolean(store.getSettings().searxngUrl),

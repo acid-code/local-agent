@@ -740,7 +740,7 @@ async function healthChecks(store: Store, docker: DockerCtl, fetchImpl: typeof f
   const dbBytes = fs.existsSync(dbFile) ? fs.statSync(dbFile).size : 0;
   const embedWarning = ollamaOk ? await embedRoleWarning(store, fetchImpl) : null;
   return [...doctorChecks({
-    ollamaOk, loaded, dockerOk: docker.available(), mcpCount: mcp.length, mcpErrors: mcp.filter((item) => item.lastError).length,
+    ollamaOk, loaded, dockerOk: await docker.ping(), mcpCount: mcp.length, mcpErrors: mcp.filter((item) => item.lastError).length,
     searxngOk: searx, telegramQueued: telegramQueue(dataDir).length, dbBytes,
     diskFreeBytes: snap.disk.freeBytes, memAvailableGiB: snap.memory.availableGiB,
     geminiOpen: settings.geminiTier === 'paid' ? true : null, geminiState: geminiStateOf(store.getProvider('prov_gemini')) === 'off' ? 'off' : undefined, lastBackupAt: backups[0]?.createdAt ?? null, tailscaleOk: await tailscaleUp(),
@@ -893,6 +893,30 @@ function registerLibrary(app: FastifyInstance, ctx: Ctx) {
   });
 }
 
+/** SearXNG settings with JSON on and the limiter off. The secret is generated once and kept in the data dir. */
+export function searxngConfig(dataDir: string): { yaml: string; secret: string; path: string } {
+  const dir = path.join(dataDir, 'searxng');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const file = path.join(dir, 'settings.yml');
+  const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  const secret = existing.match(/secret_key:\s*"([a-f0-9]{32,})"/)?.[1] || randomBytes(32).toString('hex');
+  const yaml = [
+    '# Written by local-agent. JSON must stay on: web_search calls /search?format=json.',
+    'use_default_settings: true',
+    'server:',
+    `  secret_key: "${secret}"`,
+    '  limiter: false',
+    '  image_proxy: false',
+    'search:',
+    '  formats:',
+    '    - html',
+    '    - json',
+    '',
+  ].join('\n');
+  fs.writeFileSync(file, yaml, { mode: 0o600 });
+  return { yaml, secret, path: file };
+}
+
 function hookUrl(id: string, kind: TriggerKind) {
   return kind === 'github' ? `/api/hooks/github/${id}` : kind === 'webhook' ? `/api/hooks/${id}` : null;
 }
@@ -913,15 +937,28 @@ async function runSetup(action: string, model: string | undefined, jobId: string
         store.appendJob(jobId, decoder.decode(chunk.value));
       }
     } else if (action === 'start-searxng') {
-      if (!docker.available()) throw new Error('Docker is not available.');
+      if (!(await docker.ping())) throw new Error(`Docker is not available at ${docker.describe()}.`);
+      const config = searxngConfig(ctx.config.dataDir);
+      store.appendJob(jobId, 'pulling docker.io/searxng/searxng:latest\n');
+      await docker.pull('docker.io/searxng/searxng:latest').catch(() => store.appendJob(jobId, 'pull failed; using the local image if there is one\n'));
+      // The stock settings only allow HTML, so format=json is a 403. Ship our own into a writable volume.
       const id = await docker.startDetached({
         Image: 'docker.io/searxng/searxng:latest',
         name: 'local-agent-searxng',
+        replace: true,
         Labels: { 'local-agent.role': 'searxng' },
+        Env: [`SEARXNG_SECRET=${config.secret}`, 'SEARXNG_BASE_URL=http://127.0.0.1:8088/'],
         ExposedPorts: { '8080/tcp': {} },
-        HostConfig: { PortBindings: { '8080/tcp': [{ HostPort: '8088' }] }, RestartPolicy: { Name: 'unless-stopped' } },
+        HostConfig: {
+          PortBindings: { '8080/tcp': [{ HostPort: '8088' }] },
+          RestartPolicy: { Name: 'unless-stopped' },
+          Binds: ['local-agent-searxng-config:/etc/searxng'],
+        },
+        files: [{ dir: '/etc/searxng', name: 'settings.yml', content: config.yaml, mode: 0o644 }],
       });
-      store.appendJob(jobId, `started ${id}\n`);
+      store.appendJob(jobId, `started ${id.slice(0, 12)} with JSON output on\n`);
+      const current = store.getSettings();
+      if (!current.searxngUrl) store.saveSettings({ ...current, searxngUrl: 'http://127.0.0.1:8088' }, 'SearXNG started', { searxngUrl: 'http://127.0.0.1:8088' });
     } else if (action === 'start-whisper' || action === 'start-kokoro') {
       if (!docker.available()) throw new Error('Docker is not available.');
       const whisper = action === 'start-whisper';

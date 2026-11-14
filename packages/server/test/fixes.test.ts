@@ -6,6 +6,9 @@ import { buildApp } from '../src/app.js';
 import { splitThinking } from '../src/engine.js';
 import { providerFor, type ModelProvider, type ProviderEvent } from '../src/providers.js';
 import type { Store } from '../src/db.js';
+import { spawnSync } from 'node:child_process';
+import { DockerCtl, dockerTarget, tarFile } from '../src/docker.js';
+import { searxngConfig } from '../src/routes.js';
 import { createCollection, embedRoleWarning, hashEmbedder, ingestBuffer } from '../src/kb.js';
 import { decideAuto, foldCandidates, likelyNeedsTools, nextAutoTier, DEFAULT_AUTO_MAP } from '@local-agent/shared';
 import { doctorChecks, geminiStateOf } from '../src/debug.js';
@@ -318,6 +321,52 @@ describe('knowledge base use', () => {
     expect(await embedRoleWarning(store, notEmbed as typeof fetch)).toMatch(/is not an embedding model.*1 collection was indexed/);
     const missing = async () => new Response('{"error":"not found"}', { status: 404 });
     expect(await embedRoleWarning(store, missing as typeof fetch)).toMatch(/not installed in Ollama/);
+    await app.close();
+  });
+});
+
+describe('Docker and SearXNG setup', () => {
+  it('honors DOCKER_HOST', () => {
+    expect(dockerTarget({ DOCKER_HOST: 'tcp://127.0.0.1:2375' })).toEqual({ host: '127.0.0.1', port: 2375, protocol: 'http' });
+    expect(dockerTarget({ DOCKER_HOST: 'unix:///run/user/1000/docker.sock' })).toEqual({ socketPath: '/run/user/1000/docker.sock' });
+    expect(dockerTarget({})).toEqual({ socketPath: '/var/run/docker.sock' });
+    expect(new DockerCtl(undefined, { DOCKER_HOST: 'tcp://10.0.0.5:2375' }).available()).toBe(true);
+    expect(new DockerCtl(undefined, { DOCKER_HOST: 'tcp://10.0.0.5:2375' }).describe()).toBe('http://10.0.0.5:2375');
+    expect(new DockerCtl('/nope/docker.sock').available()).toBe(false);
+  });
+
+  it('writes a valid one-file tar', () => {
+    const dir = tmp();
+    fs.writeFileSync(path.join(dir, 'a.tar'), tarFile('settings.yml', Buffer.from('hello: world\n')));
+    const listed = spawnSync('tar', ['-xOf', path.join(dir, 'a.tar'), 'settings.yml'], { encoding: 'utf8' });
+    expect(listed.status).toBe(0);
+    expect(listed.stdout).toBe('hello: world\n');
+  });
+
+  it('ships settings.yml with JSON on into a writable volume and keeps the secret', async () => {
+    const dir = tmp();
+    const first = searxngConfig(dir);
+    expect(first.yaml).toMatch(/formats:\n {4}- html\n {4}- json/);
+    expect(first.yaml).toMatch(/limiter: false/);
+    expect(searxngConfig(dir).secret).toBe(first.secret);
+    const specs: Record<string, unknown>[] = [];
+    const docker = {
+      available: () => true, ping: async () => true, describe: () => 'test', pull: async () => undefined,
+      startDetached: async (spec: Record<string, unknown>) => { specs.push(spec); return 'abcdef1234567890'; },
+    } as unknown as DockerCtl;
+    const { app, store } = await buildApp({ dataDir: dir, startScheduler: false, serveWeb: false, docker });
+    const cookies = await login(app);
+    const run = await app.inject({ method: 'POST', url: '/api/setup/actions/start-searxng/run', cookies, payload: { confirm: true } });
+    expect(run.statusCode).toBe(200);
+    for (let i = 0; i < 50 && store.getJob(run.json().job.id)?.status === 'running'; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(store.getJob(run.json().job.id)?.status).toBe('completed');
+    const spec = specs[0] as { replace: boolean; HostConfig: { Binds: string[] }; files: { dir: string; name: string; content: string }[] };
+    expect(spec.replace).toBe(true);
+    expect(spec.HostConfig.Binds).toEqual(['local-agent-searxng-config:/etc/searxng']);
+    expect(spec.files[0]).toMatchObject({ dir: '/etc/searxng', name: 'settings.yml' });
+    expect(spec.files[0]!.content).toMatch(/- json/);
+    expect(store.getSettings().searxngUrl).toBe('http://127.0.0.1:8088');
+    expect(JSON.stringify(store.getJob(run.json().job.id))).not.toContain(first.secret);
     await app.close();
   });
 });

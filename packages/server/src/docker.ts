@@ -24,18 +24,50 @@ export interface RunSpec {
   StdinOnce?: boolean;
 }
 
+/** Where the Docker API lives: DOCKER_HOST (tcp:// or unix://) wins over the default socket. */
+export function dockerTarget(env: NodeJS.ProcessEnv = process.env, socketPath?: string): { socketPath: string } | { host: string; port: number; protocol: 'http' | 'https' } {
+  const raw = (env.DOCKER_HOST || '').trim();
+  if (raw.startsWith('unix://')) return { socketPath: raw.slice('unix://'.length) };
+  const tcp = raw.match(/^(?:tcp|http|https):\/\/\[?([^\]/:]+)\]?(?::(\d+))?/i);
+  if (tcp) {
+    const tls = /^https:/i.test(raw) || Boolean(env.DOCKER_TLS_VERIFY && env.DOCKER_TLS_VERIFY !== '0');
+    return { host: tcp[1]!, port: Number(tcp[2] || (tls ? 2376 : 2375)), protocol: tls ? 'https' : 'http' };
+  }
+  return { socketPath: socketPath || env.DOCKER_SOCKET || '/var/run/docker.sock' };
+}
+
 export class DockerCtl {
   private client: Docker | null = null;
+  private readonly target: ReturnType<typeof dockerTarget>;
 
-  constructor(private readonly socketPath = process.env.DOCKER_SOCKET || '/var/run/docker.sock') {}
+  constructor(socketPath?: string, env: NodeJS.ProcessEnv = process.env) {
+    this.target = socketPath ? { socketPath } : dockerTarget(env);
+  }
+
+  /** Where this talks to Docker, for messages. */
+  describe() {
+    return 'socketPath' in this.target ? this.target.socketPath : `${this.target.protocol}://${this.target.host}:${this.target.port}`;
+  }
 
   available() {
-    return fs.existsSync(this.socketPath);
+    if ('host' in this.target) return true;
+    return fs.existsSync(this.target.socketPath);
+  }
+
+  /** True when the Docker API answers. */
+  async ping(): Promise<boolean> {
+    if (!this.available()) return false;
+    try {
+      await Promise.race([this.api().ping(), new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000))]);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private api() {
-    if (!this.available()) throw new Error('Docker socket is not available.');
-    if (!this.client) this.client = new Docker({ socketPath: this.socketPath });
+    if (!this.available()) throw new Error(`Docker is not available at ${this.describe()}.`);
+    if (!this.client) this.client = new Docker(this.target);
     return this.client;
   }
 
@@ -72,7 +104,14 @@ export class DockerCtl {
     await this.api().getImage(id).remove();
   }
 
-  async startDetached(spec: RunSpec & { ExposedPorts?: Record<string, object> }) {
+  async startDetached(spec: RunSpec & { ExposedPorts?: Record<string, object>; files?: { dir: string; name: string; content: string | Buffer; mode?: number }[]; replace?: boolean }) {
+    if (spec.replace && spec.name) {
+      try {
+        await this.api().getContainer(spec.name).remove({ force: true });
+      } catch (error) {
+        if ((error as { statusCode?: number }).statusCode !== 404) throw error;
+      }
+    }
     const container = await this.api().createContainer({
       Image: spec.Image,
       Cmd: spec.Cmd,
@@ -82,6 +121,9 @@ export class DockerCtl {
       ExposedPorts: spec.ExposedPorts,
       HostConfig: spec.HostConfig,
     });
+    for (const file of spec.files ?? []) {
+      await container.putArchive(tarFile(file.name, Buffer.isBuffer(file.content) ? file.content : Buffer.from(file.content), file.mode), { path: file.dir });
+    }
     await container.start();
     return container.id;
   }
@@ -237,4 +279,26 @@ export function mcpContainerSpec(input: {
       Binds: input.mounts,
     },
   };
+}
+
+/** A one-file ustar archive, enough for Docker putArchive. */
+export function tarFile(name: string, content: Buffer, mode = 0o644): Buffer {
+  const header = Buffer.alloc(512, 0);
+  const put = (value: string, offset: number, length: number) => header.write(value.slice(0, length), offset, length, 'utf8');
+  const octal = (value: number, length: number) => value.toString(8).padStart(length - 1, '0') + '\0';
+  put(name, 0, 100);
+  put(octal(mode, 8), 100, 8);
+  put(octal(0, 8), 108, 8);
+  put(octal(0, 8), 116, 8);
+  put(octal(content.length, 12), 124, 12);
+  put(octal(Math.floor(Date.now() / 1000), 12), 136, 12);
+  header.fill(' ', 148, 156);
+  put('0', 156, 1);
+  put('ustar\0', 257, 6);
+  put('00', 263, 2);
+  let sum = 0;
+  for (const byte of header) sum += byte;
+  put(sum.toString(8).padStart(6, '0') + '\0 ', 148, 8);
+  const pad = Buffer.alloc((512 - (content.length % 512)) % 512, 0);
+  return Buffer.concat([header, content, pad, Buffer.alloc(1024, 0)]);
 }
