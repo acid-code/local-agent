@@ -33,6 +33,7 @@ import {
   type TriggerKind,
 } from './triggers.js';
 import { secret as randomSecret } from './util.js';
+import { memoryFiles, rollbackRun, writeMemoryFile } from './learning.js';
 import { createWorkshop, getWorkshop, listWorkshops } from './workshops.js';
 import { ACCENT_DEFAULT, FACES, accentOk, avatarPath, saveAvatar } from './avatars.js';
 import type { Bus } from './bus.js';
@@ -347,6 +348,20 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     store.markAgentRead(agentId);
     return { session, created };
   });
+  // Capped memory files (USER, NOTES): readable and editable by the persona's owner.
+  app.get('/api/agents/:id/memory-files', async (req) => {
+    const id = (req.params as { id: string }).id;
+    mustOwn(store, req, 'agent', id, 'Persona not found.');
+    return { files: memoryFiles(store, id) };
+  });
+  app.put('/api/agents/:id/memory-files/:kind', async (req) => {
+    const { id, kind } = req.params as { id: string; kind: string };
+    mustOwn(store, req, 'agent', id, 'Persona not found.');
+    if (kind !== 'user' && kind !== 'notes') throw http(404, 'No such memory file.');
+    const body = parse(z.object({ content: z.string().max(10_000) }), req.body);
+    writeMemoryFile(store, id, kind, body.content);
+    return { files: memoryFiles(store, id) };
+  });
   app.post('/api/agents/:id/read', async (req) => {
     mustOwn(store, req, 'agent', (req.params as { id: string }).id, 'Persona not found.');
     store.markAgentRead((req.params as { id: string }).id);
@@ -637,7 +652,18 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       helpers, approvals: waiting,
       timers: engine.autonomy.timersFor(id), triggers: accountOf(req).role === 'member' ? [] : engine.autonomy.triggersFor(id),
       files: { uploads: files.filter((file) => file.source === 'upload'), produced: [...files.filter((file) => file.source !== 'upload'), ...helperFiles] },
+      // One entry per reply that changed files and can still be rolled back.
+      checkpoints: (store.db.prepare(`SELECT run_id AS runId, COUNT(*) AS edits, GROUP_CONCAT(label, ', ') AS labels, MAX(created_at) AS createdAt FROM edit_batches
+        WHERE session_id = ? AND run_id IS NOT NULL AND reverted_at IS NULL GROUP BY run_id ORDER BY createdAt DESC LIMIT 20`).all(id) as { runId: string; edits: number; labels: string; createdAt: string }[])
+        .map((row) => ({ ...row, edits: Number(row.edits), labels: String(row.labels || '').slice(0, 200) })),
     };
+  });
+  // One click: undo every file edit a reply made (newest checkpoint first).
+  app.post('/api/runs/:id/rollback', async (req) => {
+    const id = (req.params as { id: string }).id;
+    mustOwn(store, req, 'run', id, 'Run not found.');
+    if (store.getSettings().readOnly) throw http(423, 'Read-only mode is on.');
+    return { reverted: await rollbackRun(store, id) };
   });
   app.post('/api/helpers/:id/stop', async (req) => {
     const helper = engine.autonomy.getHelper((req.params as { id: string }).id);

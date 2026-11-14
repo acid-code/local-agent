@@ -146,7 +146,8 @@ export function skillCatalog(store: Store, agentId: string, userText: string): s
   const ranked = skills
     .map((skill) => ({ skill, score: skillFit(skill.description, userText) }))
     .sort((a, b) => b.score - a.score);
-  const lines = ranked.map(({ skill }) => `- ${skill.slug}: ${skill.description}`);
+  // Names and one-line descriptions only; a body loads with load_skill when a task fits.
+  const lines = ranked.slice(0, 40).map(({ skill }) => `- ${skill.slug}: ${skill.description.length > 200 ? `${skill.description.slice(0, 197)}…` : skill.description}`);
   const best = ranked[0];
   const hint = best && best.score >= 0.5 ? `\nThe skill ${best.skill.slug} fits this message. Call load_skill before you answer.` : '';
   return `\n\nSkills you can load with load_skill when one fits:\n${lines.join('\n')}${hint}`;

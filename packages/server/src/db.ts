@@ -657,6 +657,7 @@ export class Store {
 
   updateMessageContent(id: string, content: string) {
     this.db.prepare('UPDATE messages SET content = ? WHERE id = ?').run(content, id);
+    try { this.db.prepare('UPDATE messages_fts SET content = ? WHERE message_id = ?').run(content.slice(0, 20_000), id); } catch { /* search index not built yet */ }
   }
 
   archiveMessagesAfter(sessionId: string, messageId: string) {

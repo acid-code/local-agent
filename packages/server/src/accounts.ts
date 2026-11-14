@@ -192,6 +192,8 @@ export const MEMBER_DENIED_TOOLS = new Set([
   'shell', 'docker_ps', 'docker_inspect', 'docker_run', 'docker_rm', 'request_folder', 'handoff_cli', 'repo_sync', 'run_skill_script', 'request_secret',
   // Triggers are an owner feature (webhooks and folders on this box).
   'manage_trigger',
+  // Skills are one shared catalog the owner curates.
+  'propose_skill',
 ]);
 
 /**
@@ -206,7 +208,7 @@ export const MEMBER_ROUTES = new Set([
   'POST /api/files', 'GET /api/files', 'GET /api/files/:id', 'GET /api/files/:id/raw', 'DELETE /api/files/:id',
   'GET /api/messages/:id', 'GET /api/context/search',
   'GET /api/git/roots', 'GET /api/git/:root/status', 'GET /api/git/:root/diff', 'GET /api/git/:root/tree', 'GET /api/git/:root/raw', 'GET /api/git/:root/file', 'POST /api/git/:root/action',
-  'GET /api/sessions', 'POST /api/sessions', 'GET /api/sessions/:id', 'GET /api/sessions/:id/context', 'POST /api/helpers/:id/stop', 'PATCH /api/sessions/:id', 'DELETE /api/sessions/:id', 'POST /api/sessions/:id/messages',
+  'GET /api/sessions', 'POST /api/sessions', 'GET /api/sessions/:id', 'GET /api/sessions/:id/context', 'POST /api/helpers/:id/stop', 'POST /api/runs/:id/rollback', 'GET /api/agents/:id/memory-files', 'PUT /api/agents/:id/memory-files/:kind', 'PATCH /api/sessions/:id', 'DELETE /api/sessions/:id', 'POST /api/sessions/:id/messages',
   'GET /api/sessions/:id/plan', 'PUT /api/sessions/:id/plan', 'PATCH /api/plan-items/:id', 'GET /api/sessions/:id/edits', 'POST /api/edits/:id/revert',
   'GET /api/runs', 'GET /api/runs/:id', 'GET /api/runs/:id/events', 'POST /api/runs/:id/control',
   'GET /api/approvals', 'POST /api/approvals/:id',

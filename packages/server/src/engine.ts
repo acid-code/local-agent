@@ -45,6 +45,7 @@ import { NO_MODEL_MESSAGE } from './usable-models.js';
 import { BudgetError, type Lease, type MemoryBudget } from './memory.js';
 import { MEMBER_DENIED_TOOLS, OWNER_ID, foreignPath, getAccount } from './accounts.js';
 import { Autonomy, HELPER_DENIED } from './autonomy.js';
+import { memoryBrief, memoryFileTool, projectRules, proposeSkillTool, searchChatsTool, skillNudge } from './learning.js';
 
 export class Engine {
   private readonly inflight = new Map<string, { abort: AbortController; paused: boolean; resumePause: () => void }>();
@@ -861,7 +862,12 @@ export class Engine {
     const hasKb = this.hasKnowledge(agent.id);
     const kbHint = hasKb ? '\n\nA knowledge base of the owner\'s documents is attached. When a question could be answered from it, call kb_search first and cite the numbered sources.' : '';
     const kbNote = hasKb ? await this.knowledgeNote(agent.id, user?.content ?? '') : '';
-    const system = `${agent.systemPrompt}${sharedRepoBrief(this.store)}${chatWorkspaces}${stageNote}${roleNote}${kbHint}${CITE_HINT}`;
+    // Hermes-style context: capped memory files, the project's own rule files, and a nudge to save a skill after hard tasks.
+    const memoryNote = agent.memoryEnabled ? memoryBrief(this.store, agent.id) : '';
+    const rulesNote = session ? projectRules(chatWorkspacePaths(this.store, run.sessionId, session.ownerId || OWNER_ID)) : '';
+    const toolNames = this.tools(agent, session?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId)).map((tool) => tool.name);
+    const nudge = run.cursor.helperId ? '' : skillNudge(run.cursor.turn, toolNames);
+    const system = `${agent.systemPrompt}${sharedRepoBrief(this.store)}${chatWorkspaces}${rulesNote}${memoryNote}${stageNote}${roleNote}${kbHint}${CITE_HINT}${nudge}`;
     const preambleGuess = `${system}\n${notes.map((note) => note.content).join('\n')}`;
     if (model.providerId === 'prov_gemini' && estimateTokens(preambleGuess, 'gemini') > budget * 0.75) {
       const key = process.env.GEMINI_API_KEY;
@@ -1059,7 +1065,7 @@ export class Engine {
     names.add('repo_sync');
     names.add('find_context');
     names.add('share_file');
-    for (const name of ['manage_timer', 'manage_trigger', 'spawn_agent', 'helpers']) names.add(name);
+    for (const name of ['manage_timer', 'manage_trigger', 'spawn_agent', 'helpers', 'memory_file', 'search_chats', 'propose_skill', 'run_tool_script']) names.add(name);
     if (this.store.getSettings().imageGen.mode !== 'off') names.add('generate_image');
     if (stage === 'plan') {
       for (const name of ['web_search', 'web_fetch', 'read_file', 'list_dir', 'grep', 'glob', 'plan', 'recall', 'consult_agent']) names.add(name);
@@ -1069,13 +1075,14 @@ export class Engine {
     // A helper run gets only the tools it was started with (never more than its persona allows).
     if (subset) for (const name of [...names]) if (!subset.includes(name)) names.delete(name);
     if (helper) for (const name of HELPER_DENIED) names.delete(name);
-    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), ...this.autonomy.tools(), ...this.extraTools];
+    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), ...this.autonomy.tools(), memoryFileTool(), searchChatsTool(), proposeSkillTool(), ...this.extraTools];
     const seen = new Set<string>();
-    return catalog.filter((tool) => {
+    const chosen = catalog.filter((tool) => {
       if (!names.has(tool.name) || seen.has(tool.name)) return false;
       seen.add(tool.name);
       return true;
     }).map((tool) => ({ ...tool, parameters: toolParameters(tool.name).properties ? toolParameters(tool.name) : tool.parameters }));
+    return names.has('run_tool_script') ? [...chosen, toolScript(chosen)] : chosen;
   }
 
   private contextFor(run: RunRow, signal: AbortSignal): ToolContext {
@@ -1462,6 +1469,66 @@ function turnRoots(store: Store, run: RunRow, dataDir = '') {
   }
   for (const root of chatWorkspacePaths(store, run.sessionId, OWNER_ID)) roots.set(root.path, { label: root.label, path: root.path, write });
   return [...roots.values()].filter((root) => !dataDir || !foreignPath(dataDir, OWNER_ID, root.path));
+}
+
+/** Tools a script may not call: no nesting, no helpers or scheduling, nothing that pauses for the user. */
+const SCRIPT_DENIED = new Set(['run_tool_script', 'spawn_agent', 'helpers', 'manage_timer', 'manage_trigger', 'request_secret', 'request_folder', 'propose_skill', 'handoff_cli']);
+const SCRIPT_MAX_STEPS = 10;
+
+/**
+ * Several tool calls in one step, run in order. Plain data, not code: each step names an allowed tool and its args,
+ * and string args may use {{name}} for an earlier step's output. If any step would need approval, the whole script asks once.
+ */
+export function toolScript(available: Tool[]): Tool {
+  const byName = new Map(available.filter((tool) => !SCRIPT_DENIED.has(tool.name)).map((tool) => [tool.name, tool]));
+  const stepsOf = (args: Record<string, unknown>) => {
+    const steps = Array.isArray(args.steps) ? args.steps as { tool?: unknown; args?: unknown; save_as?: unknown }[] : [];
+    if (!steps.length) throw new Error('Pass steps: [{ tool, args, save_as }].');
+    if (steps.length > SCRIPT_MAX_STEPS) throw new Error(`At most ${SCRIPT_MAX_STEPS} steps per script.`);
+    return steps.map((step, index) => {
+      const name = String(step.tool || '');
+      const tool = byName.get(name);
+      if (!tool) throw new Error(`Step ${index + 1}: ${name || 'a tool'} is not allowed in a script here. Allowed: ${[...byName.keys()].join(', ')}.`);
+      const stepArgs = step.args && typeof step.args === 'object' && !Array.isArray(step.args) ? step.args as Record<string, unknown> : {};
+      return { tool, args: stepArgs, saveAs: step.save_as ? String(step.save_as).replace(/[^\w-]/g, '').slice(0, 32) : `step${index + 1}` };
+    });
+  };
+  const fill = (value: unknown, vars: Map<string, string>): unknown => {
+    if (typeof value === 'string') return value.replace(/\{\{\s*([\w-]+)\s*\}\}/g, (_, key: string) => (vars.get(key) ?? '').slice(0, 4000));
+    if (Array.isArray(value)) return value.map((item) => fill(item, vars));
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, fill(item, vars)]));
+    return value;
+  };
+  return {
+    name: 'run_tool_script',
+    description: `Run up to ${SCRIPT_MAX_STEPS} of your tools in one step, in order: steps [{ tool, args, save_as }]. A string arg may contain {{save_as}} (or {{step1}}) to use an earlier output. Stops at the first error unless continue_on_error. Use it for mechanical sequences (read several files, search then fetch); it cannot start helpers or schedule anything.`,
+    parameters: { type: 'object', properties: { steps: { type: 'array', items: { type: 'object', properties: { tool: { type: 'string' }, args: { type: 'object' }, save_as: { type: 'string' } }, required: ['tool'] } }, continue_on_error: { type: 'boolean' } }, required: ['steps'], additionalProperties: false },
+    mutates: (args) => { try { return stepsOf(args).some((step) => step.tool.mutates(step.args)); } catch { return false; } },
+    approval: (args, ctx) => {
+      let steps;
+      try { steps = stepsOf(args); } catch { return null; }
+      const asks = steps.map((step) => step.tool.approval(step.args, ctx)).filter(Boolean);
+      return asks.length ? `Run a ${steps.length}-step tool script: ${steps.map((step) => step.tool.name).join(' → ')}. Needs approval for: ${asks.join('; ')}` : null;
+    },
+    async execute(args, ctx) {
+      const steps = stepsOf(args);
+      const vars = new Map<string, string>();
+      const log: string[] = [];
+      for (const [index, step] of steps.entries()) {
+        if (ctx.signal.aborted) throw new StopError();
+        const filled = fill(step.args, vars) as Record<string, unknown>;
+        try {
+          const output = await step.tool.execute(filled, { ...ctx, toolCallId: ctx.toolCallId ? `${ctx.toolCallId}:${index}` : undefined });
+          vars.set(step.saveAs, output);
+          log.push(`[${index + 1}] ${step.tool.name} → ${step.saveAs}\n${output.slice(0, 3000)}`);
+        } catch (error) {
+          log.push(`[${index + 1}] ${step.tool.name} failed: ${(error as Error).message}`);
+          if (!args.continue_on_error) break;
+        }
+      }
+      return log.join('\n\n').slice(0, 16_000);
+    },
+  };
 }
 
 function skillScriptTool(): Tool {
