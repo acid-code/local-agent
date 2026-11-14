@@ -120,3 +120,53 @@ describe('workspaces', () => {
     await app.close();
   });
 });
+
+describe('chat workspaces', () => {
+  it('stores workspaces per chat, pre-fills from the persona, briefs the agent, and saves files', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const { chatWorkspaceBrief } = await import('../src/chat-workspaces.js');
+    const { app, store, cookies, dir } = await owner();
+    const repo = path.join(dir, 'api'); fs.mkdirSync(repo);
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'first commit'], { cwd: repo });
+    fs.writeFileSync(path.join(repo, 'todo.md'), 'draft\n');
+    expect((await app.inject({ method: 'POST', url: '/api/workspaces/folder', cookies, payload: { path: repo, label: 'api' } })).statusCode).toBe(200);
+    const set = (await app.inject({ method: 'POST', url: '/api/workspaces/sets', cookies, payload: { name: 'API', labels: ['api'] } })).json();
+    const setId = set.workshop?.id || set.set?.id || set.id;
+    const agent = store.createAgent({ name: 'Coder', systemPrompt: 'Code.', toolAllowlist: [], workspacePath: dir });
+    store.updateAgent(agent.id, { workshopIds: [setId] });
+
+    // A new chat starts with the persona's default set.
+    const chat = (await app.inject({ method: 'POST', url: '/api/sessions', cookies, payload: { agentId: agent.id } })).json().session;
+    const prefilled = (await app.inject({ method: 'GET', url: `/api/sessions/${chat.id}/workspaces`, cookies })).json();
+    expect(prefilled.items).toEqual([{ kind: 'set', id: setId }]);
+    expect(prefilled.roots[0]).toMatchObject({ id: 'prj:api', label: 'api', branch: 'main', isRepo: true, dirty: 1, via: 'API' });
+
+    // Edit the list: a root on its own, then check another chat is unaffected.
+    const put = await app.inject({ method: 'PUT', url: `/api/sessions/${chat.id}/workspaces`, cookies, payload: { items: [{ kind: 'root', id: 'prj:api' }] } });
+    expect(put.statusCode).toBe(200);
+    expect(put.json().items).toEqual([{ kind: 'root', id: 'prj:api' }]);
+    expect(put.json().session.mode).toBe('code');
+    const other = store.createSession({ agentId: agent.id, title: 'Other', ownerId: 'owner' });
+    expect((await app.inject({ method: 'GET', url: `/api/sessions/${other.id}/workspaces`, cookies })).json().roots).toEqual([]);
+    expect((await app.inject({ method: 'PUT', url: `/api/sessions/${chat.id}/workspaces`, cookies, payload: { items: [{ kind: 'root', id: 'prj:nope' }] } })).statusCode).toBe(404);
+
+    // The agent is told exactly this chat's workspaces.
+    const brief = await chatWorkspaceBrief(store, chat.id, 'owner');
+    expect(brief).toContain(`api: ${repo}`);
+    expect(brief).toContain('branch main');
+    expect(brief).toContain('todo.md');
+    expect(brief).toContain('first commit');
+    expect(await chatWorkspaceBrief(store, other.id, 'owner')).toBe('');
+
+    // Inline editor saves inside the workspace only; the diff shows it.
+    const saved = await app.inject({ method: 'PUT', url: '/api/git/prj:api/file', cookies, payload: { path: 'todo.md', content: 'done\n' } });
+    expect(saved.statusCode).toBe(200);
+    expect(fs.readFileSync(path.join(repo, 'todo.md'), 'utf8')).toBe('done\n');
+    expect((await app.inject({ method: 'PUT', url: '/api/git/prj:api/file', cookies, payload: { path: '../escape.txt', content: 'x' } })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'PUT', url: '/api/git/prj:api/file', cookies, payload: { path: '.git/config', content: 'x' } })).statusCode).toBe(400);
+    const diff = (await app.inject({ method: 'GET', url: '/api/git/prj:api/diff?path=todo.md', cookies })).json().diff;
+    expect(diff).toContain('+done');
+    await app.close();
+  });
+});

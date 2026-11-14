@@ -48,6 +48,7 @@ import { MEMBER_DENIED_TOOLS, OWNER_ID, accountOf, foreignPath, mustOwn, ownerOf
 import { memberByUsername } from './accounts.js';
 import { registerAccounts } from './members.js';
 import { registerMedia } from './media.js';
+import { prefillChatWorkspaces, resolveChatWorkspaces, setChatWorkspaces } from './chat-workspaces.js';
 import { usableModels } from './usable-models.js';
 import { registerWorkspaceRoutes } from './workspaces.js';
 import { budgetConfig, budgetReport, type MemoryBudget } from './memory.js';
@@ -494,6 +495,19 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const q = req.query as { path?: string; start?: string; end?: string };
     try { return { file: readExcerpt(root.path, String(q.path || ''), { start: Number(q.start) || undefined, end: Number(q.end) || undefined }) }; } catch (error) { throw http(400, error instanceof Error ? error.message : 'Bad path.'); }
   });
+  /** Save a text file from the workspace editor. Stays inside the root; refused in read-only mode. */
+  app.put('/api/git/:root/file', async (req) => {
+    const root = rootFor(req, (req.params as { root: string }).root);
+    const body = parse(z.object({ path: z.string().min(1).max(1000), content: z.string().max(2_000_000) }), req.body);
+    if (store.getSettings().readOnly) throw http(423, 'Read-only mode is on. Turn it off in Settings to save files.');
+    const full = path.resolve(root.path, body.path);
+    if (body.path.startsWith('-') || !isInside(root.path, full) || full === root.path) throw http(400, 'Bad path.');
+    if (full.split(path.sep).includes('.git')) throw http(400, 'Files inside .git cannot be edited here.');
+    if (fs.existsSync(full) && !fs.statSync(full).isFile()) throw http(400, 'That is a folder.');
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(full, body.content);
+    return { ok: true, bytes: Buffer.byteLength(body.content) };
+  });
   app.post('/api/git/clone', async (req) => {
     const body = parse(z.object({ url: z.string().min(1), label: z.string().optional(), workshopId: z.string().optional(), parentDir: z.string().max(500).optional() }), req.body);
     if (body.parentDir && accountOf(req).role === 'member') throw http(403, 'Only the owner can pick a clone location.');
@@ -587,6 +601,8 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     if (!body.agentId && !body.roomId) body.agentId = store.listAgents(me(req))[0]?.id;
     const session = store.createSession({ ...body, ownerId: me(req) });
     if (body.mode) store.updateSession(session.id, { mode: body.mode });
+    // The persona's default workspaces pre-fill a new chat.
+    prefillChatWorkspaces(store, session.id, body.agentId);
     return { session: store.getSession(session.id) };
   });
   app.get('/api/sessions/:id', async (req) => {
@@ -604,6 +620,24 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     if (body.agentId) mustOwn(store, req, 'agent', body.agentId, 'Persona not found.');
     if (body.modelPin) body.modelPin = allowedModel(req, chatModelId(store, body.modelPin));
     return { session: store.updateSession((req.params as { id: string }).id, body) };
+  });
+  /** The workspaces this chat works in (its context), sets expanded, with branch and uncommitted count. */
+  app.get('/api/sessions/:id/workspaces', async (req) => {
+    const id = (req.params as { id: string }).id;
+    mustOwn(store, req, 'session', id, 'Chat not found.');
+    return resolveChatWorkspaces(store, id, me(req));
+  });
+  app.put('/api/sessions/:id/workspaces', async (req) => {
+    const id = (req.params as { id: string }).id;
+    mustOwn(store, req, 'session', id, 'Chat not found.');
+    const body = parse(z.object({ items: z.array(z.object({ kind: z.enum(['root', 'set']), id: z.string().min(1).max(200) })).max(24) }), req.body);
+    const roots = new Set(listGitRoots(store, me(req)).map((root) => root.id));
+    for (const item of body.items) {
+      if (item.kind === 'set') mustOwn(store, req, 'workshop', item.id, 'Workspace set not found.');
+      else if (!roots.has(item.id)) throw http(404, 'Unknown workspace.');
+    }
+    setChatWorkspaces(store, id, body.items);
+    return { ...(await resolveChatWorkspaces(store, id, me(req))), session: store.getSession(id) };
   });
   app.delete('/api/sessions/:id', async (req) => {
     const id = (req.params as { id: string }).id;

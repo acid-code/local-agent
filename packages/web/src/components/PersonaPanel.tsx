@@ -31,9 +31,9 @@ export function useWorkspaces() {
  * Right panel opened from the persona chip. Edits apply to the next message and save as you go.
  * Tabs: the persona (name, model, tools, skills, workspaces, instructions) and workspaces (add a folder, a repo, or clone).
  */
-export function PersonaPanel({ agent, tab, onTab, onClose, onSaved, ws, canManage }: {
+export function PersonaPanel({ agent, tab, onTab, onClose, onSaved, ws, canManage, onAttach }: {
   agent: PanelAgent | null; tab: 'persona' | 'workspace'; onTab: (tab: 'persona' | 'workspace') => void; onClose: () => void;
-  onSaved: (agent: PanelAgent, what: string) => void; ws: ReturnType<typeof useWorkspaces>; canManage: boolean;
+  onSaved: (agent: PanelAgent, what: string) => void; ws: ReturnType<typeof useWorkspaces>; canManage: boolean; onAttach?: (rootId: string, label: string) => void;
 }) {
   const [draft, setDraft] = useState<PanelAgent | null>(agent);
   const [skills, setSkills] = useState<Skill[]>([]);
@@ -122,7 +122,7 @@ export function PersonaPanel({ agent, tab, onTab, onClose, onSaved, ws, canManag
             </div>
           )}
           {canManage && (
-            <div className="field"><span>Workspace sets this persona can use</span>
+            <div className="field"><span>Default workspaces for new chats</span>
               {ws.sets.length === 0 && <p className="faint">None yet. <button className="link-btn" onClick={() => onTab('workspace')}>Add a workspace</button></p>}
               <div className="chip-row">
                 {ws.sets.map((set) => {
@@ -135,12 +135,12 @@ export function PersonaPanel({ agent, tab, onTab, onClose, onSaved, ws, canManag
           <p className="faint"><Link to={`/agents?edit=${draft.id}`}>Open full persona settings</Link> for face, color, memory and more.</p>
         </div>
       ))}
-      {tab === 'workspace' && <WorkspaceTab ws={ws} canManage={canManage} />}
+      {tab === 'workspace' && <WorkspaceTab ws={ws} canManage={canManage} onAttach={onAttach} />}
     </aside>
   );
 }
 
-function WorkspaceTab({ ws, canManage }: { ws: ReturnType<typeof useWorkspaces>; canManage: boolean }) {
+function WorkspaceTab({ ws, canManage, onAttach }: { ws: ReturnType<typeof useWorkspaces>; canManage: boolean; onAttach?: (rootId: string, label: string) => void }) {
   const [mode, setMode] = useState<'folder' | 'clone' | 'set' | null>(null);
   const [pathValue, setPathValue] = useState('');
   const [label, setLabel] = useState('');
@@ -153,11 +153,16 @@ function WorkspaceTab({ ws, canManage }: { ws: ReturnType<typeof useWorkspaces>;
   const reset = () => { setMode(null); setPathValue(''); setLabel(''); setUrl(''); setParent(''); setSetName(''); setPicked([]); };
   const run = async (action: () => Promise<unknown>, done: string) => {
     setBusy(true);
-    try { await action(); await ws.reload(); toast(done, 'ok'); reset(); } catch (error) { toast(errorText(error), 'error'); } finally { setBusy(false); }
+    try {
+      const result = await action() as { workspace?: { label: string }; label?: string };
+      await ws.reload(); toast(done, 'ok'); reset();
+      const label = result?.workspace?.label || result?.label;
+      if (label && onAttach) onAttach(`prj:${label}`, label);
+    } catch (error) { toast(errorText(error), 'error'); } finally { setBusy(false); }
   };
   return (
     <div className="panel-body">
-      <p className="faint panel-note">A workspace is a folder or a git repo the coder works in. Repos get git (branches, pulls, pushes with your approval); folders are plain files. Group several into a set, then attach the set to a chat from the composer.</p>
+      <p className="faint panel-note">A workspace is a folder or a git repo. Each chat has its own: what you add here is attached to this chat, and the agent works in exactly those. Repos get git (pulls, commits, branches; pushes need your approval). Save several as a set to attach them together, or make a set a persona default.</p>
       <div className="ws-list">
         {ws.workspaces.length === 0 && <p className="faint">No workspaces yet.</p>}
         {ws.workspaces.map((row) => (
@@ -181,8 +186,8 @@ function WorkspaceTab({ ws, canManage }: { ws: ReturnType<typeof useWorkspaces>;
       ) : (
         <form className="ws-form" onSubmit={(event) => {
           event.preventDefault();
-          if (mode === 'folder') void run(() => post('/api/workspaces/folder', { path: pathValue.trim(), label: label.trim() || undefined }), 'Workspace added.');
-          if (mode === 'clone') void run(() => post('/api/git/clone', { url: url.trim(), label: label.trim() || undefined, parentDir: parent.trim() || undefined }), 'Cloned. Pull from Workspaces to keep it in sync.');
+          if (mode === 'folder') void run(() => post('/api/workspaces/folder', { path: pathValue.trim(), label: label.trim() || undefined }), onAttach ? 'Workspace added and attached to this chat.' : 'Workspace added.');
+          if (mode === 'clone') void run(() => post('/api/git/clone', { url: url.trim(), label: label.trim() || undefined, parentDir: parent.trim() || undefined }), onAttach ? 'Cloned and attached to this chat. Pull from its panel to stay in sync.' : 'Cloned. Pull from Workspaces to keep it in sync.');
           if (mode === 'set') void run(() => post('/api/workspaces/sets', { name: setName.trim(), labels: picked }), 'Set saved.');
         }}>
           {mode === 'folder' && <>

@@ -3,15 +3,16 @@ import { useEffect, useRef, useState } from 'react';
 import { Menu as DropMenu } from '../components/ui';
 import { ModelPicker, useUsableModels } from '../lib/models';
 import { browserDictationSupported, startDictation } from '../lib/dictation';
-import { AtSign, Brain, Check, ChevronDown, Code2, Copy, Download, Eye, FileText, Folder, FolderGit2, ListTree, Menu, MessageSquarePlus, Pin, PinOff, Search, Mic, Paperclip, Pencil, Quote, RotateCcw, Send, Square, Trash2, Wrench, X } from 'lucide-react';
+import { AtSign, Brain, Check, ChevronDown, Code2, Copy, Download, Eye, FileText, Folder, FolderGit2, GitBranch, ListTree, Menu, MessageSquarePlus, Pin, PinOff, Plus, Search, Mic, Paperclip, Pencil, Quote, RotateCcw, Send, Square, Trash2, Wrench, X } from 'lucide-react';
 import { CiteContext, type CiteHandlers } from '../components/Markdown';
 import { FileViewer, type QuotePick, type ViewerSource } from '../components/FileViewer';
 import { MentionPicker, type MentionPick } from '../components/MentionPicker';
 import { CONTEXT_MARK, citationsIn, fileMeta, humanSize, kindOf, quoteBlock, rawUrl, saveFile, uploadFile, type Cite, type FileMeta } from '../lib/files';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { PullModel } from '../components/PullModel';
+import { WorkspaceBrowser, type ChatRoot } from '../components/WorkspaceBrowser';
 import { PersonaPanel, useWorkspaces, type PanelAgent } from '../components/PersonaPanel';
-import { PersonaChip, WorkspaceChip, greetingFor, startersFor } from '../components/ChatChips';
+import { PersonaChip, greetingFor, startersFor } from '../components/ChatChips';
 import { parseSources, toolSummary } from '@local-agent/shared';
 import { toast, errorText } from '../lib/toast';
 import { api, post } from '../lib/api';
@@ -75,7 +76,9 @@ export function Chat() {
   const [selQuote, setSelQuote] = useState<{ x: number; y: number; text: string; id: string } | null>(null);
   const [dragging, setDragging] = useState(false);
   const pendingJump = useRef<string | null>(null);
-  const [panel, setPanel] = useState<null | 'persona' | 'workspace'>(null);
+  const [panel, setPanel] = useState<null | 'persona' | 'workspace' | 'files'>(null);
+  const [chatWs, setChatWs] = useState<{ items: { kind: 'root' | 'set'; id: string }[]; roots: ChatRoot[]; sets: { id: string; name: string; roots: string[] }[] }>({ items: [], roots: [], sets: [] });
+  const [wsRoot, setWsRoot] = useState<string | null>(null);
   const [chatQuery, setChatQuery] = useState('');
   const [pins, setPins] = useState<string[]>(() => { try { return JSON.parse(localStorage.getItem('la-pinned-chats') || '[]'); } catch { return []; } });
   const ws = useWorkspaces();
@@ -100,10 +103,15 @@ export function Chat() {
     setNextCursor(page.nextCursor);
   }
 
+  async function loadChatWs(id: string | null) {
+    if (!id) { setChatWs({ items: [], roots: [], sets: [] }); return; }
+    try { setChatWs(await api(`/api/sessions/${id}/workspaces`)); } catch { setChatWs({ items: [], roots: [], sets: [] }); }
+  }
   async function openSession(id: string) {
     // Restore this chat's unsent draft in the same render as the switch, so the save effect never wipes it.
     if (!new URLSearchParams(window.location.search).get('share')) setDraft(localStorage.getItem(draftKey(id)) || '');
     setCurrent(id);
+    void loadChatWs(id);
     const data = await api<{ session: Session; messages: Message[]; plan: Plan | null; edits: Edit[] }>(`/api/sessions/${id}`);
     setMessages(data.messages);
     setPlan(data.plan);
@@ -448,16 +456,30 @@ export function Chat() {
       toast('Persona created. Name it and pick its tools here.', 'ok');
     } catch (error) { toast(errorText(error), 'error'); }
   }
-  async function attachWorkspace(id: string | null) {
+  async function saveChatWs(items: { kind: 'root' | 'set'; id: string }[], note_?: string) {
     const target = current || await createChat('code').catch(() => undefined);
     if (!target) return;
     try {
-      await api(`/api/sessions/${target}`, { method: 'PATCH', body: JSON.stringify({ workshopId: id }) });
-      setSessions((rows) => rows.map((row) => (row.id === target ? { ...row, workshopId: id, mode: id ? 'code' : row.mode } : row)));
-      if (id) setMode('code');
-      const set = ws.sets.find((item) => item.id === id);
-      note(set ? `Working in ${set.name}` : 'Workspace detached');
+      const data = await api<typeof chatWs & { session: Session }>(`/api/sessions/${target}/workspaces`, { method: 'PUT', body: JSON.stringify({ items }) });
+      setChatWs({ items: data.items, roots: data.roots, sets: data.sets });
+      setSessions((rows) => rows.map((row) => (row.id === target ? { ...row, ...data.session } : row)));
+      setMode(data.session.mode);
+      if (note_) note(note_);
     } catch (error) { toast(errorText(error), 'error'); }
+  }
+  function addWorkspace(item: { kind: 'root' | 'set'; id: string }, label: string) {
+    if (chatWs.items.some((row) => row.kind === item.kind && row.id === item.id)) return;
+    void saveChatWs([...chatWs.items, item], `${label} attached to this chat`);
+  }
+  function removeWorkspace(root: ChatRoot) {
+    let items = chatWs.items.filter((row) => !(row.kind === 'root' && row.id === root.id));
+    // A root that came from a set: drop the set but keep its other folders attached.
+    for (const set of chatWs.sets.filter((row) => row.roots.includes(root.id))) {
+      items = items.filter((row) => !(row.kind === 'set' && row.id === set.id));
+      for (const other of set.roots) if (other !== root.id && !items.some((row) => row.kind === 'root' && row.id === other)) items.push({ kind: 'root', id: other });
+    }
+    if (wsRoot === root.id) { setPanel(null); setWsRoot(null); }
+    void saveChatWs(items, `${root.label} removed from this chat`);
   }
   function togglePin(id: string) {
     setPins((rows) => { const next = rows.includes(id) ? rows.filter((row) => row !== id) : [id, ...rows]; localStorage.setItem('la-pinned-chats', JSON.stringify(next)); return next; });
@@ -528,7 +550,7 @@ export function Chat() {
       <section className="thread">
         <div className="thread-head">
           <button className="btn ghost chats-btn" aria-label="Show chats" onClick={() => setRail(true)}><Menu size={16} /> <span>Chats</span></button>
-          {persona && <button className="persona-name" title="Persona settings" aria-expanded={panel === 'persona'} onClick={() => setPanel(panel === 'persona' ? null : 'persona')}><Face agent={persona} size={22} /><span>{persona.name}</span></button>}
+          {persona && <button className="persona-name" title={`${persona.name} · persona settings`} aria-label={`${persona.name}, open persona settings`} aria-expanded={panel === 'persona'} onClick={() => setPanel(panel === 'persona' ? null : 'persona')}><Face agent={persona} size={22} /><span className="persona-label">{persona.name}</span></button>}
           <strong className="thread-title" dir="auto" title={currentSession?.title}>{currentSession?.title || 'No chat open'}</strong>
           {status && status !== 'completed' && <span className={`badge ${status === 'failed' ? 'bad' : active ? 'warn' : ''}`}>{status}</span>}
           {mode === 'code' && <span className="badge warn">{currentSession?.workshopId ? 'workshop' : 'coding'}</span>}
@@ -537,11 +559,32 @@ export function Chat() {
             { label: 'Rename chat', icon: Pencil, onSelect: () => { setRail(true); setRenaming(currentSession.id); setTitleDraft(currentSession.title); } },
             { label: trace ? 'Hide trace' : 'Show trace', icon: ListTree, onSelect: () => setTrace((value) => !value) },
             { label: 'Persona settings', icon: Pencil, onSelect: () => setPanel('persona') },
-            { label: 'Workspaces', icon: FolderGit2, onSelect: () => setPanel('workspace') },
+            { label: 'Add or create workspaces', icon: FolderGit2, onSelect: () => setPanel('workspace') },
             { label: 'New chat', icon: MessageSquarePlus, onSelect: () => void createChat('chat') },
             { label: 'Delete chat', icon: Trash2, danger: true, separator: true, onSelect: () => void removeChat(currentSession.id) },
           ]} />}
         </div>
+        {(current || chatWs.roots.length > 0) && (
+          <div className="ws-strip" aria-label="Workspaces in this chat">
+            {chatWs.roots.map((root) => (
+              <span key={root.id} className={wsRoot === root.id && panel === 'files' ? 'ws-pill on' : 'ws-pill'}>
+                <button type="button" className="ws-pill-open" title={`${root.path}${root.via ? ` · from ${root.via}` : ''}${root.dirty ? ` · ${root.dirty} uncommitted` : ''}`} onClick={() => { if (panel === 'files' && wsRoot === root.id) setPanel(null); else { setWsRoot(root.id); setPanel('files'); } }}>
+                  {root.isRepo ? <GitBranch size={13} aria-hidden /> : <Folder size={13} aria-hidden />}
+                  <span className="ws-pill-label">{root.label}</span>
+                  {root.branch && <span className="faint mono">{root.branch}</span>}
+                  {root.dirty > 0 && <span className="dirty-dot" aria-label={`${root.dirty} uncommitted`} />}
+                </button>
+                <button type="button" className="chip-x" aria-label={`Remove ${root.label} from this chat`} title="Remove from this chat" onClick={() => removeWorkspace(root)}><X size={12} /></button>
+              </span>
+            ))}
+            <DropMenu className="ws-add" align="start" label="Add a workspace to this chat" icon={Plus} text={chatWs.roots.length ? undefined : 'Add workspace'} items={[
+              ...ws.workspaces.filter((row) => !chatWs.roots.some((root) => root.id === row.id)).map((row, index) => ({ label: row.label, heading: index === 0 ? 'Folders and repos' : undefined, hint: row.kind === 'repo' ? row.branch || 'repo' : 'folder', onSelect: () => addWorkspace({ kind: 'root', id: row.id }, row.label) })),
+              ...ws.sets.filter((set) => !chatWs.items.some((item) => item.kind === 'set' && item.id === set.id)).map((set, index) => ({ label: set.name, heading: index === 0 ? 'Sets' : undefined, hint: set.projects.join(' + '), onSelect: () => addWorkspace({ kind: 'set', id: set.id }, set.name) })),
+              ...(canManage ? [{ label: 'Add folder, repo or clone…', icon: FolderGit2, separator: true, onSelect: () => setPanel('workspace') }] : []),
+            ]} />
+            {chatWs.roots.length === 0 && <span className="faint ws-hint">Attach folders or repos; the agent works in exactly these.</span>}
+          </div>
+        )}
         <div className={dragging ? 'messages dragging' : 'messages'} ref={box} onMouseUp={onSelectText} onTouchEnd={() => setTimeout(onSelectText, 50)} onScroll={() => selQuote && setSelQuote(null)}
           onDragOver={(event) => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); setDragging(true); } }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); void dropFiles(event.dataTransfer.files); }}>
           <div className="messages-inner">
@@ -688,7 +731,6 @@ export function Chat() {
             }} onPaste={(event) => { if (event.clipboardData.files.length) { event.preventDefault(); void dropFiles(event.clipboardData.files); } }} onKeyDown={(event) => { if (picker && event.key === 'Escape') { event.preventDefault(); setPicker(null); return; } if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(event); } }} />
             <div className="composer-bar">
               <PersonaChip agents={agents} active={persona} onSwitch={(id) => void switchPersona(id)} onEdit={() => setPanel('persona')} onNew={() => void newPersona()} />
-              <WorkspaceChip sets={ws.sets} workspaces={ws.workspaces} activeId={currentSession?.workshopId} canManage={canManage} onAttach={(id) => void attachWorkspace(id)} onAdd={() => setPanel('workspace')} />
               <span title={modelPin ? `Pinned to ${pinnedName}` : lastModel ? `Auto picks per message. Last reply: ${lastModel}` : 'Auto picks a model per message'}>
                 <ModelPicker state={modelState} value={modelPin} autoLabel={lastModel && !modelPin ? `Auto · ${lastModel}` : 'Auto'} onChange={async (value) => {
                   const previous = modelPin;
@@ -711,7 +753,12 @@ export function Chat() {
           {(voiceNote || loadingNote) ? <p className="composer-hint faint">{voiceNote || loadingNote}</p> : <p className="composer-hint faint"><span className="kbd-hint">Enter to send · Shift+Enter for a new line · Esc to stop</span></p>}
         </div>
       </section>
-      {panel && <PersonaPanel agent={persona || null} tab={panel} onTab={setPanel} onClose={() => setPanel(null)} ws={ws} canManage={canManage}
+      {panel === 'files' && wsRoot && chatWs.roots.find((root) => root.id === wsRoot) && (
+        <WorkspaceBrowser root={chatWs.roots.find((root) => root.id === wsRoot)!} live={active} onClose={() => setPanel(null)} onChanged={() => void loadChatWs(current)}
+          onMention={(path) => addMention({ kind: 'path', root: wsRoot, path, dir: false, label: path })} />
+      )}
+      {(panel === 'persona' || panel === 'workspace') && <PersonaPanel agent={persona || null} tab={panel} onTab={setPanel} onClose={() => setPanel(null)} ws={ws} canManage={canManage}
+        onAttach={(rootId, label) => addWorkspace({ kind: 'root', id: rootId }, label)}
         onSaved={(agent, what) => {
           setAgents((rows) => rows.map((row) => (row.id === agent.id ? { ...row, ...agent } : row)));
           setMessages((rows) => { const last = rows[rows.length - 1]; const text = 'Settings changed · applies to the next message'; return last?.role === 'divider' && last.content === text ? rows : rows.length ? [...rows, { id: `div-${Date.now()}`, role: 'divider', content: text }] : rows; });

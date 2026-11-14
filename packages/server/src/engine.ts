@@ -32,6 +32,7 @@ import { formatCitations, searchKnowledge } from './kb.js';
 import { kbSearchTool, loadSkillTool, toolsFor, type Tool, type ToolContext } from './tools.js';
 import { runSkillScript, skillCatalog } from './skills.js';
 import { getWorkshop, workshopBrief } from './workshops.js';
+import { chatWorkspaceBrief, chatWorkspacePaths } from './chat-workspaces.js';
 import { checkOrRepair, contractForAgent, pickAutoRole, toolArgumentsSchema, toolParameters } from './contracts.js';
 import { addProjectNote, changesSince, ensureTaskBranch, isSmallEdit, listSharedRepos, matchRepos, refreshRepo, releaseRepoLocks, repoSyncTool, sharedRepoBrief, taskBranchName, tryLockRepo, type GitIdentity } from './repos.js';
 import { isMissingModelError, isToolUnsupportedError, ollamaCapabilities } from './ollama.js';
@@ -145,18 +146,23 @@ export class Engine {
     } catch (error) {
       const status = error instanceof StopError ? 'stopped' : 'failed';
       const message = error instanceof Error ? error.message : String(error);
-      const latest = this.store.getRun(runId);
-      if (latest && latest.status !== 'stopped') {
-        this.store.updateRun(runId, { status, error: message, endedAt: now() });
-      }
-      this.bus.publish({ type: 'error', runId, message });
+      try {
+        const latest = this.store.getRun(runId);
+        if (latest && latest.status !== 'stopped') {
+          this.store.updateRun(runId, { status, error: message, endedAt: now() });
+        }
+        this.bus.publish({ type: 'error', runId, message });
+      } catch { /* the store closed while shutting down */ }
     } finally {
       clearInterval(beat);
       if (limitTimer) clearTimeout(limitTimer);
-      releaseRepoLocks(this.store, runId);
       this.heldLarge.delete(runId);
       this.inflight.delete(runId);
-      this.bus.publish({ type: 'done', runId, run: this.store.getRun(runId) });
+      // The store can already be closed when the app shuts down mid-run.
+      try {
+        releaseRepoLocks(this.store, runId);
+        this.bus.publish({ type: 'done', runId, run: this.store.getRun(runId) });
+      } catch { /* shutting down */ }
     }
   }
 
@@ -834,6 +840,8 @@ export class Engine {
     let budget = Math.min(model.contextWindow, model.practicalBudget);
     const session = this.store.getSession(run.sessionId);
     const workshopNote = session?.workshopId ? workshopBrief(this.store, session.workshopId) : '';
+    // Exactly this chat's attached workspaces: names, paths, branch, recent changes.
+    const chatWorkspaces = session ? await chatWorkspaceBrief(this.store, run.sessionId, session.ownerId || OWNER_ID).catch(() => '') : '';
     const stageNote = run.cursor.syncNote ? `\n\nWhat changed since you last looked:\n${run.cursor.syncNote}` : '';
     const roleNote = run.cursor.stage === 'plan'
       ? '\n\nYou are planning a change to a shared repo. Pull it with repo_sync, summarize what changed, and consult the coder persona with that summary if one exists. Search the web when the task depends on current facts. Save the plan with the plan tool. Do not edit files yet.'
@@ -844,7 +852,7 @@ export class Engine {
     const hasKb = this.hasKnowledge(agent.id);
     const kbHint = hasKb ? '\n\nA knowledge base of the owner\'s documents is attached. When a question could be answered from it, call kb_search first and cite the numbered sources.' : '';
     const kbNote = hasKb ? await this.knowledgeNote(agent.id, user?.content ?? '') : '';
-    const system = `${agent.systemPrompt}${sharedRepoBrief(this.store)}${stageNote}${roleNote}${kbHint}${CITE_HINT}`;
+    const system = `${agent.systemPrompt}${sharedRepoBrief(this.store)}${chatWorkspaces}${stageNote}${roleNote}${kbHint}${CITE_HINT}`;
     const preambleGuess = `${system}\n${notes.map((note) => note.content).join('\n')}`;
     if (model.providerId === 'prov_gemini' && estimateTokens(preambleGuess, 'gemini') > budget * 0.75) {
       const key = process.env.GEMINI_API_KEY;
@@ -1439,6 +1447,7 @@ function turnRoots(store: Store, run: RunRow, dataDir = '') {
       roots.set(project.path, { label: project.label, path: project.path, write });
     }
   }
+  for (const root of chatWorkspacePaths(store, run.sessionId, OWNER_ID)) roots.set(root.path, { label: root.label, path: root.path, write });
   return [...roots.values()].filter((root) => !dataDir || !foreignPath(dataDir, OWNER_ID, root.path));
 }
 
