@@ -175,3 +175,72 @@ describe('models removed from Ollama', () => {
     await app.close();
   });
 });
+
+async function login(app: Awaited<ReturnType<typeof buildApp>>['app']) {
+  const setup = await app.inject({ method: 'POST', url: '/api/setup', payload: { username: 'owner', password: ['fixture', 'only', '01'].join('-') } });
+  return { la_session: setup.cookies.find((item) => item.name === 'la_session')!.value };
+}
+
+describe('chat API guards', () => {
+  it('refuses an unknown model id with the valid list, and maps an API name to its id', async () => {
+    const dir = tmp();
+    const provider: ModelProvider = {
+      async *complete(req) {
+        yield { type: 'token', text: `from ${req.model}` };
+        yield { type: 'done', finishReason: 'stop', usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+    };
+    const { app, store } = await buildApp({ dataDir: dir, startScheduler: false, serveWeb: false, providerOverride: () => provider });
+    const cookies = await login(app);
+    addLocal(store, 'main', 'qwen3:0.6b', 'large');
+    const agent = store.createAgent({ name: 'House', systemPrompt: 'Be brief.', toolAllowlist: [], workspacePath: dir });
+    const session = store.createSession({ agentId: agent.id, title: 'Guard' });
+    const bad = await app.inject({ method: 'POST', url: `/api/sessions/${session.id}/messages`, cookies, payload: { content: 'hi', modelId: 'nope' } });
+    expect(bad.statusCode).toBe(400);
+    expect(bad.json().error).toMatch(/Unknown or disabled model "nope".*main \(qwen3:0\.6b\)/);
+    expect(store.listMessages(session.id)).toHaveLength(0);
+    const pin = await app.inject({ method: 'PATCH', url: `/api/sessions/${session.id}`, cookies, payload: { modelPin: 'missing:7b' } });
+    expect(pin.statusCode).toBe(400);
+    const named = await app.inject({ method: 'PATCH', url: `/api/sessions/${session.id}`, cookies, payload: { modelPin: 'qwen3:0.6b' } });
+    expect(named.json().session.modelPin).toBe('main');
+    const blank = await app.inject({ method: 'POST', url: `/api/sessions/${session.id}/messages`, cookies, payload: { content: '   ' } });
+    expect(blank.statusCode).toBe(400);
+    await app.close();
+  });
+
+  it('refuses a second message while a reply is running, and binds each run to its own message', async () => {
+    const dir = tmp();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const prompts: string[] = [];
+    const provider: ModelProvider = {
+      async *complete(req) {
+        prompts.push(String(req.messages.filter((m) => m.role === 'user').at(-1)?.content));
+        await gate;
+        yield { type: 'token', text: `answer to ${prompts.at(-1)}` };
+        yield { type: 'done', finishReason: 'stop', usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+    };
+    const { app, store, engine } = await buildApp({ dataDir: dir, startScheduler: false, serveWeb: false, providerOverride: () => provider });
+    const cookies = await login(app);
+    addLocal(store, 'main', 'qwen3:0.6b', 'large');
+    const agent = store.createAgent({ name: 'House', systemPrompt: 'Be brief.', toolAllowlist: [], workspacePath: dir });
+    const session = store.createSession({ agentId: agent.id, title: 'Race' });
+    const [one, two] = await Promise.all([
+      app.inject({ method: 'POST', url: `/api/sessions/${session.id}/messages`, cookies, payload: { content: 'first question about the workshop' } }),
+      app.inject({ method: 'POST', url: `/api/sessions/${session.id}/messages`, cookies, payload: { content: 'second question about the workshop' } }),
+    ]);
+    expect([one.statusCode, two.statusCode].sort()).toEqual([200, 409]);
+    const winner = one.statusCode === 200 ? one : two;
+    expect(store.getRun(winner.json().run.id)?.cursor.userMessageId).toBeTruthy();
+    release();
+    for (let i = 0; i < 50 && engine.sessionBusy(session.id); i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    const after = await app.inject({ method: 'POST', url: `/api/sessions/${session.id}/messages`, cookies, payload: { content: 'third question about the workshop' } });
+    expect(after.statusCode).toBe(200);
+    for (let i = 0; i < 50 && engine.sessionBusy(session.id); i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    const answers = store.listMessages(session.id).filter((m) => m.role === 'assistant').map((m) => m.content);
+    expect(answers.at(-1)).toBe('answer to third question about the workshop');
+    expect(store.listMessages(session.id).filter((m) => m.role === 'user')).toHaveLength(2);
+    await app.close();
+  });
+});

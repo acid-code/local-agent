@@ -351,6 +351,8 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   });
   app.patch('/api/sessions/:id', async (req) => {
     const body = parse(z.object({ title: z.string().optional(), mode: z.enum(['chat', 'code']).optional(), modelPin: z.string().nullable().optional() }), req.body);
+    if (!store.getSession((req.params as { id: string }).id)) throw http(404, 'Chat not found.');
+    if (body.modelPin) body.modelPin = chatModelId(store, body.modelPin);
     return { session: store.updateSession((req.params as { id: string }).id, body) };
   });
   app.post('/api/sessions/:id/messages', async (req) => {
@@ -358,10 +360,13 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const session = store.getSession(id);
     if (!session) throw http(404, 'Chat not found.');
     const body = parse(z.object({ content: z.string().min(1), agentId: z.string().optional(), modelId: z.string().optional(), imageUrl: z.string().optional() }), req.body);
-    const offers = vault.capture(null, body.content);
+    const modelId = body.modelId ? chatModelId(store, body.modelId) : undefined;
+    if (!body.content.trim()) throw http(400, 'Type a message first.');
     const agentId = body.agentId || session.agentId;
     if (!agentId) throw http(400, 'Choose a persona.');
-    const run = await engine.startTurn({ sessionId: id, agentId, content: vault.redact(body.content), imageUrl: body.imageUrl, modelId: body.modelId });
+    if (engine.sessionBusy(id)) throw http(409, 'A reply is still running in this chat. Wait for it or press Stop, then send again.');
+    const offers = vault.capture(null, body.content);
+    const run = await engine.startTurn({ sessionId: id, agentId, content: vault.redact(body.content), imageUrl: body.imageUrl, modelId });
     return { run, offers };
   });
   app.get('/api/sessions/:id/plan', async (req) => ({ plan: readPlan(store, (req.params as { id: string }).id) }));
@@ -699,6 +704,15 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   });
 
   registerLibrary(app, ctx);
+}
+
+/** Resolves a chat model by id, API name, or name. Unknown or disabled models are a 400 that lists the valid ones. */
+function chatModelId(store: Store, wanted: string): string {
+  const models = store.listModels().filter((model) => model.enabled && !model.embedding);
+  const match = models.find((model) => model.id === wanted) ?? models.find((model) => model.apiName === wanted || model.name === wanted);
+  if (match) return match.id;
+  const valid = models.filter((model) => model.profileId !== 'rehearsal').map((model) => `${model.id} (${model.apiName})`);
+  throw http(400, `Unknown or disabled model "${wanted}". Valid models: ${valid.join(', ') || 'none — scan Local models in Setup'}.`);
 }
 
 function parse<T>(schema: z.ZodType<T>, value: unknown): T {
