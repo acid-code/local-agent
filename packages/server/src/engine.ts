@@ -131,7 +131,8 @@ export class Engine {
     const baseLimit = runForLimit ? this.runLimitMs(runForLimit.agentId) : null;
     const ownLimit = runForLimit?.cursor.timeoutMs;
     const limitMs = ownLimit ? Math.min(ownLimit, baseLimit || ownLimit) : baseLimit;
-    const limitTimer = limitMs ? setTimeout(() => abort.abort(), limitMs) : null;
+    let timedOut = false;
+    const limitTimer = limitMs ? setTimeout(() => { timedOut = true; abort.abort(); }, limitMs) : null;
     this.inflight.set(runId, state);
     this.touch(runId);
     const beat = setInterval(() => this.touch(runId), 5000);
@@ -155,8 +156,9 @@ export class Engine {
         this.store.updateRun(runId, { status: 'completed', endedAt: now(), cursor: { ...latest.cursor, phase: 'done' } });
       }
     } catch (error) {
-      const status = error instanceof StopError ? 'stopped' : 'failed';
-      const message = error instanceof Error ? error.message : String(error);
+      // A run that hit its time limit failed (with a reason); only a real Stop is "stopped".
+      const status = error instanceof StopError && !timedOut ? 'stopped' : 'failed';
+      const message = timedOut ? `Ran out of time after ${Math.round((limitMs ?? 0) / 1000)} s.` : error instanceof Error ? error.message : String(error);
       try {
         const latest = this.store.getRun(runId);
         if (latest && latest.status !== 'stopped') {
@@ -172,7 +174,10 @@ export class Engine {
       // The store can already be closed when the app shuts down mid-run.
       try {
         releaseRepoLocks(this.store, runId);
-        this.bus.publish({ type: 'done', runId, run: this.store.getRun(runId) });
+        const ended = this.store.getRun(runId);
+        this.bus.publish({ type: 'done', runId, run: ended });
+        // Helper results are delivered from the run's own record, so they survive a restart (no in-memory callback needed).
+        if (ended?.cursor.helperId && ['completed', 'failed', 'stopped', 'interrupted', 'cancelled'].includes(ended.status)) this.autonomy.deliver(ended);
       } catch { /* shutting down */ }
     }
   }
@@ -213,6 +218,8 @@ export class Engine {
   }
 
   stop(runId: string) {
+    // Stopping a reply also stops the helpers it started.
+    this.autonomy.stopChildrenOf(runId);
     const state = this.inflight.get(runId);
     state?.abort.abort();
     if (state?.paused) state.resumePause();
@@ -268,6 +275,8 @@ export class Engine {
         this.store.updateRun(run.id, { status: 'interrupted', error: 'The process stopped before this run finished. Resume to continue from the last checkpoint.', endedAt: now(), leaseOwner: null });
       }
     }
+    // Deliver helper results whose runs ended while the process was down.
+    this.autonomy.sweep();
   }
 
   /** /image <prompt>: one picture, saved to the user's files, shown as a preview in the chat. */

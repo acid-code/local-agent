@@ -4,7 +4,7 @@ import type { Store } from './db.js';
 import { listSkills, renderSkillMd, saveSkill } from './skills.js';
 import type { Tool } from './tools.js';
 import { now } from './util.js';
-import { revertBatch } from './coding.js';
+import { revertBatches } from './coding.js';
 
 /**
  * Ideas borrowed from Hermes Agent: capped memory files, a skill learning loop, full-text search of past chats,
@@ -172,6 +172,5 @@ export function projectRules(roots: { label: string; path: string }[], disabled?
 /** Undo every edit checkpoint a reply made, newest first. */
 export async function rollbackRun(store: Store, runId: string) {
   const rows = store.db.prepare('SELECT id FROM edit_batches WHERE run_id = ? AND reverted_at IS NULL ORDER BY created_at DESC, rowid DESC').all(runId) as { id: string }[];
-  for (const row of rows) await revertBatch(store, row.id);
-  return rows.length;
+  return rows.length ? revertBatches(store, rows.map((row) => row.id)) : 0;
 }

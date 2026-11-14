@@ -128,7 +128,9 @@ function ensure(store: Store) {
 }
 export function disabledRules(store: Store, sessionId: string): Set<string> {
   ensure(store);
-  return new Set((store.db.prepare('SELECT rule_key AS k FROM session_rules_off WHERE session_id = ?').all(sessionId) as { k: string }[]).map((row) => row.k));
+  // A helper's chat follows the switches of the chat that started it.
+  const parent = (store.db.prepare('SELECT helper_of AS p FROM chat_sessions WHERE id = ?').get(sessionId) as { p: string | null } | undefined)?.p ?? null;
+  return new Set((store.db.prepare('SELECT rule_key AS k FROM session_rules_off WHERE session_id = ? OR session_id = ?').all(sessionId, parent ?? sessionId) as { k: string }[]).map((row) => row.k));
 }
 export function setRuleEnabled(store: Store, sessionId: string, key: string, enabled: boolean) {
   ensure(store);

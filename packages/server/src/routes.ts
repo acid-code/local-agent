@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { FREE_TIER_OBSERVED_AT, FREE_TIER_SNAPSHOT, VERSION, geminiQuotaDay, nextCron, quotaAvailability } from '@local-agent/shared';
 import { authenticate, hashPassword, noteFailure, rateLimit, setSession, verifyPassword } from './auth.js';
 import { TEMPLATES } from './catalog.js';
-import { detectCodingClis, listEdits, readPlan, replacePlan, revertBatch, updatePlanItem } from './coding.js';
+import { detectCodingClis, listEdits, readPlan, replacePlan, revertBatch, RollbackConflict, updatePlanItem } from './coding.js';
 import { secretDrift, secretNames, writeSecret } from './config.js';
 import type { DockerCtl } from './docker.js';
 import { checklist, scanMachine, setupPreview } from './discovery.js';
@@ -752,7 +752,8 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const id = (req.params as { id: string }).id;
     mustOwn(store, req, 'run', id, 'Run not found.');
     if (store.getSettings().readOnly) throw http(423, 'Read-only mode is on.');
-    return { reverted: await rollbackRun(store, id) };
+    try { return { reverted: await rollbackRun(store, id) }; }
+    catch (error) { if (error instanceof RollbackConflict) throw http(409, error.message); throw error; }
   });
   // Rule files the chat's workspaces bring (AGENTS.md, .cursor/rules, CLAUDE.md…), each switchable per chat.
   app.get('/api/sessions/:id/rules', async (req) => {
@@ -811,6 +812,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const id = (req.params as { id: string }).id;
     mustOwn(store, req, 'session', id, 'Chat not found.');
     if (engine.sessionBusy(id)) throw http(409, 'A reply is still running in this chat. Press Stop first, then delete it.');
+    engine.autonomy.stopForSession(id);
     store.updateSession(id, { archived: true });
     return { ok: true };
   });
@@ -859,7 +861,8 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   app.post('/api/edits/:id/revert', async (req) => {
     const batch = store.db.prepare('SELECT session_id AS s FROM edit_batches WHERE id = ?').get((req.params as { id: string }).id) as { s?: string } | undefined;
     if (!batch?.s || ownerOf(store, 'session', batch.s) !== me(req)) throw http(404, 'Edit not found.');
-    await revertBatch(store, (req.params as { id: string }).id);
+    try { await revertBatch(store, (req.params as { id: string }).id); }
+    catch (error) { if (error instanceof RollbackConflict) throw http(409, error.message); throw error; }
     return { ok: true };
   });
 

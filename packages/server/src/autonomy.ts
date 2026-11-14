@@ -20,7 +20,7 @@ const act = (args: Record<string, unknown>) => String(args.action || (args.id ? 
  * A persona only ever touches its own timers and triggers, so a member's persona only touches that member's.
  */
 
-export const HELPER_LIMITS = { perChat: 3, total: 4, defaultSteps: 8, maxSteps: 24, defaultMinutes: 10, maxMinutes: 30, maxTimersPerPersona: 20 };
+export const HELPER_LIMITS = { perChat: 3, total: 4, defaultSteps: 8, maxSteps: 24, defaultMinutes: 10, minMinutes: 1, maxMinutes: 30, maxTimersPerPersona: 20 };
 /** A helper never gets these: no helpers of helpers, no scheduling from the background. */
 export const HELPER_DENIED = ['spawn_agent', 'helpers', 'manage_timer', 'manage_trigger'];
 
@@ -125,7 +125,7 @@ export class Autonomy {
     const cli = input.cli?.trim() || null;
     if (cli && owner !== OWNER_ID) throw new Error('Coding CLIs are for the owner\'s personas.');
     const maxSteps = Math.max(1, Math.min(HELPER_LIMITS.maxSteps, Math.floor(input.maxSteps || HELPER_LIMITS.defaultSteps)));
-    const timeoutMs = Math.max(1, Math.min(HELPER_LIMITS.maxMinutes, input.timeoutMinutes || HELPER_LIMITS.defaultMinutes)) * 60_000;
+    const timeoutMs = Math.max(HELPER_LIMITS.minMinutes, Math.min(HELPER_LIMITS.maxMinutes, input.timeoutMinutes || HELPER_LIMITS.defaultMinutes)) * 60_000;
     let tools = input.tools?.length ? input.tools.map(String).filter((name) => !HELPER_DENIED.includes(name)) : null;
     if (cli) tools = [...new Set([...(tools ?? ['read_file', 'list_dir', 'grep', 'glob', 'git']), 'handoff_cli'])];
     const parent = this.store.getSession(ctx.sessionId);
@@ -145,9 +145,9 @@ export class Autonomy {
       const run = await this.startTurn({
         sessionId: child.id, agentId: agent.id, content: prompt, parentRunId: ctx.runId ?? null, depth: 1, background: true,
         cursorExtras: { maxSteps, timeoutMs, toolSubset: tools ?? undefined, helperId: id },
-        onDone: (done) => { this.finish(id, done); },
       });
-      this.store.db.prepare('UPDATE helpers SET child_run_id = ?, status = ? WHERE id = ?').run(run.id, TERMINAL.has(run.status) ? 'running' : 'running', id);
+      this.store.db.prepare("UPDATE helpers SET child_run_id = ?, status = CASE WHEN delivered = 1 THEN status ELSE 'running' END WHERE id = ?").run(run.id, id);
+      if (TERMINAL.has(run.status)) this.finish(id, run);
     } catch (error) {
       this.store.db.prepare('UPDATE helpers SET status = ?, error = ?, ended_at = ?, delivered = 1 WHERE id = ?').run('failed', (error as Error).message, now(), id);
       throw error;
@@ -155,6 +155,38 @@ export class Autonomy {
     const helper = this.getHelper(id)!;
     this.bus.publish({ type: 'helper', sessionId: ctx.sessionId, helper });
     return helper;
+  }
+
+  /** Called by the engine whenever a helper's run ends, from the run record itself. */
+  deliver(run: RunRow) {
+    const id = run.cursor.helperId;
+    if (!id) return;
+    const row = this.store.db.prepare('SELECT id, child_run_id FROM helpers WHERE id = ?').get(id) as { id: string; child_run_id: string | null } | undefined;
+    if (!row) return;
+    // The run can end before spawn() records child_run_id (very fast helpers).
+    if (!row.child_run_id) this.store.db.prepare('UPDATE helpers SET child_run_id = ? WHERE id = ?').run(run.id, id);
+    this.finish(id, run);
+  }
+
+  /** On startup: hand over results of helpers whose runs finished while nobody was listening. */
+  sweep() {
+    const rows = this.store.db.prepare(`SELECT * FROM helpers WHERE delivered = 0 AND child_run_id IS NOT NULL`).all() as Record<string, unknown>[];
+    for (const row of rows) {
+      const run = this.store.getRun(String(row.child_run_id));
+      if (run && TERMINAL.has(run.status)) this.finish(String(row.id), run);
+    }
+  }
+
+  /** Stop helpers that a reply started (when that reply is stopped). */
+  stopChildrenOf(runId: string) {
+    const rows = this.store.db.prepare(`SELECT id FROM helpers WHERE parent_run_id = ? AND status IN ('queued','running','waiting')`).all(runId) as { id: string }[];
+    for (const row of rows) this.stop(row.id);
+  }
+
+  /** Stop every helper working for a chat (when the chat is deleted). */
+  stopForSession(sessionId: string) {
+    const rows = this.store.db.prepare(`SELECT id FROM helpers WHERE parent_session_id = ? AND status IN ('queued','running','waiting')`).all(sessionId) as { id: string }[];
+    for (const row of rows) this.stop(row.id);
   }
 
   stop(id: string): HelperRow | null {
@@ -245,6 +277,8 @@ export class Autonomy {
             if (ctx.store.listSchedules().filter((row) => row.agentId === ctx.agent.id).length >= HELPER_LIMITS.maxTimersPerPersona) throw new Error(`You already have ${HELPER_LIMITS.maxTimersPerPersona} timers. Delete one first.`);
             const row = ctx.store.createSchedule({ agentId: ctx.agent.id, name: name.slice(0, 80), cron, prompt: prompt.slice(0, 4000), nextRunAt: next });
             ctx.store.db.prepare(`UPDATE schedules SET origin_session_id = ?, created_by = 'agent' WHERE id = ?`).run(ctx.sessionId ?? null, row.id);
+            // It fires in the chat that asked for it.
+            if (ctx.sessionId) ctx.store.updateSchedule(row.id, { sessionId: ctx.sessionId });
             self.bus.publish({ type: 'context', sessionId: ctx.sessionId, what: 'timers' });
             return `Created timer ${row.id} “${row.name}” (${cron}). Next run ${next}.`;
           }

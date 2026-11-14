@@ -189,7 +189,7 @@ export const BUILTIN_TOOLS: Tool[] = [
         try { before = await fs.readFile(hit.full, 'utf8'); } catch { before = null; }
         const rel = path.relative(ctx.workspace, hit.full);
         ctx.store.db.prepare('INSERT INTO edit_batches (id, session_id, run_id, label, files, diff, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
-          nid('edit'), ctx.sessionId, ctx.runId ?? null, String(args.path), JSON.stringify([{ path: hit.full, before }]), lineDiff(rel, before ?? '', String(args.content ?? '')), now(),
+          nid('edit'), ctx.sessionId, ctx.runId ?? null, String(args.path), JSON.stringify([{ path: hit.full, before, after: String(args.content ?? '') }]), lineDiff(rel, before ?? '', String(args.content ?? '')), now(),
         );
       }
       await fs.mkdir(path.dirname(hit.full), { recursive: true });
