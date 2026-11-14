@@ -1179,3 +1179,35 @@ table.limits tbody th { color: var(--text); font-weight: 500; }
 :root:not([data-flat="off"]) .chat.with-panel .side-panel { box-shadow: none; }
 .pane-section .link-btn.pane-more { color: var(--text); text-decoration: none; padding: 0; background: none; border: 0; }
 .pane-section a.pane-more { color: var(--text); text-decoration: none; }
+
+/* Chat context panel: helpers, timers/triggers, files both ways, edits */
+.context-pane .panel-body { overflow-y: auto; }
+.ctx-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.ctx-item { border: 1px solid var(--line); border-radius: calc(10px * var(--round)); padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.ctx-item .row { gap: 6px; min-width: 0; }
+.ctx-item .row svg { color: var(--faint); flex: none; }
+.ctx-task { color: var(--muted); font-size: calc(13px * var(--fs)); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.ctx-err { font-size: calc(12px * var(--fs)); }
+.ctx-actions { font-size: calc(12px * var(--fs)); }
+.ctx-status { margin-left: auto; font-size: calc(12px * var(--fs)); color: var(--muted); white-space: nowrap; }
+.ctx-status.waiting { color: var(--brass); }
+.ctx-status.failed { color: var(--rose, #d46a6a); }
+.ctx-approval { border-top: 1px dashed var(--line); padding-top: 8px; display: flex; flex-direction: column; gap: 6px; font-size: calc(13px * var(--fs)); }
+.ctx-sched li .icon-btn, .icon-btn.sm { width: 26px; height: 26px; min-height: 26px; padding: 0; }
+.ctx-files { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.ctx-files .link-btn { color: var(--text); text-decoration: none; text-align: left; }
+.ctx-files .link-btn:hover { text-decoration: underline; }
+.ctx-transcript { display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+.ctx-msg { display: flex; flex-direction: column; gap: 2px; font-size: calc(14px * var(--fs)); }
+.ctx-msg.user { padding: 8px 10px; background: var(--bg-3); border-radius: calc(8px * var(--round)); }
+.ctx-tool summary { cursor: pointer; font-size: calc(12px * var(--fs)); }
+/* A helper's result posted back into the chat: same message, quieter frame. */
+.msg.helper-result > div[dir="auto"] { border-left: 2px solid var(--line); padding-left: 12px; color: var(--muted); }
+.memory-field textarea { font-size: calc(13px * var(--fs)); }
+.memory-field .over { color: var(--rose, #d46a6a); }
+.chat-files-head { gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+.chat-files-head h3 { margin: 0; }
+.chat-files-head select { max-width: 220px; }
+.chat-files .pane-list li a { color: var(--text); text-decoration: none; }
+.chat-files .pane-list li a:hover { text-decoration: underline; }
+.chat-files-chat { max-width: 160px; }

@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { api, post } from '../lib/api';
 import { EmptyState, PageHeader } from '../components/ui';
-import { Library as LibraryIcon, Plus } from 'lucide-react';
+import { FileText, Library as LibraryIcon, Plus } from 'lucide-react';
+import { humanSize, rawUrl, type FileMeta } from '../lib/files';
 
 interface KbFile { id: string; name: string; bytes: number }
 
@@ -15,6 +16,52 @@ async function toBase64(file: File) {
   let binary = '';
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary);
+}
+
+interface ChatRow { id: string; title: string }
+
+/** Files from chats, both ways: what you uploaded and what personas produced. Filter by chat and direction. */
+function ChatFiles() {
+  const [chats, setChats] = useState<ChatRow[]>([]);
+  const [chat, setChat] = useState('');
+  const [source, setSource] = useState<'' | 'upload' | 'agent'>('');
+  const [files, setFiles] = useState<FileMeta[] | null>(null);
+  useEffect(() => { api<{ sessions: ChatRow[] }>('/api/sessions?limit=200').then((data) => setChats(data.sessions)).catch(() => setChats([])); }, []);
+  useEffect(() => {
+    const params = new URLSearchParams({ limit: '100' });
+    if (chat) params.set('sessionId', chat);
+    if (source) params.set('source', source);
+    setFiles(null);
+    api<{ files: FileMeta[] }>(`/api/files?${params}`).then((data) => setFiles(data.files)).catch(() => setFiles([]));
+  }, [chat, source]);
+  const title = new Map(chats.map((row) => [row.id, row.title]));
+  return (
+    <section className="card chat-files" aria-label="Chat files">
+      <div className="row chat-files-head">
+        <h3 className="grow">Chat files</h3>
+        <select aria-label="Chat" value={chat} onChange={(event) => setChat(event.target.value)}>
+          <option value="">All chats</option>
+          {chats.map((row) => <option key={row.id} value={row.id}>{row.title}</option>)}
+        </select>
+        <div className="seg" role="group" aria-label="Direction">
+          {([['', 'All'], ['upload', 'From you'], ['agent', 'From agents']] as const).map(([value, label]) => <button key={value} type="button" className={source === value ? 'on' : ''} aria-pressed={source === value} onClick={() => setSource(value)}>{label}</button>)}
+        </div>
+      </div>
+      {files === null ? <div className="skeleton-lines"><span /></div> : files.length === 0 ? <p className="faint">No files here yet.</p> : (
+        <ul className="pane-list">
+          {files.map((file) => (
+            <li key={file.id}>
+              <FileText size={14} aria-hidden />
+              <a className="grow ellipsis" href={rawUrl(file.id)} target="_blank" rel="noreferrer">{file.name}</a>
+              <span className="faint">{file.source === 'upload' ? 'from you' : 'from agent'}</span>
+              {!chat && file.sessionId && <span className="faint ellipsis chat-files-chat">{title.get(file.sessionId) || ''}</span>}
+              <span className="faint mono">{humanSize(file.size)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
 }
 
 export function Library() {
@@ -64,6 +111,7 @@ export function Library() {
         <button className="btn primary">Create collection</button>
       </form>
       )}
+      <ChatFiles />
       {!adding && collections.length === 0 && <EmptyState icon={LibraryIcon} title="No collections yet" action={<button className="btn primary" onClick={() => setAdding(true)}>New collection</button>}>Create a collection, then drop files into it. Answers cite the passage they came from.</EmptyState>}
       {collections.map((collection) => (
         <article key={collection.id} className="card">

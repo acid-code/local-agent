@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Menu as DropMenu } from '../components/ui';
 import { ModelPicker, useUsableModels } from '../lib/models';
 import { browserDictationSupported, startDictation } from '../lib/dictation';
-import { AtSign, Info, Brain, Check, ChevronDown, Code2, Copy, Download, Eye, FileText, Folder, FolderGit2, GitBranch, ListTree, Menu, MessageSquarePlus, Pin, PinOff, Plus, Search, Mic, Paperclip, Pencil, Quote, RotateCcw, Send, Square, Trash2, Wrench, X } from 'lucide-react';
+import { AtSign, Info, Layers, Brain, Check, ChevronDown, Code2, Copy, Download, Eye, FileText, Folder, FolderGit2, GitBranch, ListTree, Menu, MessageSquarePlus, Pin, PinOff, Plus, Search, Mic, Paperclip, Pencil, Quote, RotateCcw, Send, Square, Trash2, Wrench, X } from 'lucide-react';
 import { CiteContext, type CiteHandlers } from '../components/Markdown';
 import { FileViewer, type QuotePick, type ViewerSource } from '../components/FileViewer';
 import { MentionPicker, type MentionPick } from '../components/MentionPicker';
@@ -13,6 +13,7 @@ import { PullModel } from '../components/PullModel';
 import { WorkspaceBrowser, type ChatRoot } from '../components/WorkspaceBrowser';
 import { PersonaPanel, useWorkspaces, type PanelAgent } from '../components/PersonaPanel';
 import { PersonaChip, greetingFor, startersFor } from '../components/ChatChips';
+import { ContextPanel } from '../components/ContextPanel';
 import { parseSources, toolSummary } from '@local-agent/shared';
 import { toast, errorText } from '../lib/toast';
 import { api, post } from '../lib/api';
@@ -77,7 +78,9 @@ export function Chat() {
   const [selQuote, setSelQuote] = useState<{ x: number; y: number; text: string; id: string } | null>(null);
   const [dragging, setDragging] = useState(false);
   const pendingJump = useRef<string | null>(null);
-  const [panel, setPanel] = useState<null | 'persona' | 'settings' | 'workspace' | 'files'>(null);
+  const [panel, setPanel] = useState<null | 'persona' | 'settings' | 'workspace' | 'files' | 'context'>(null);
+  // Bumps when a background helper finishes, so the chat and its context panel refresh.
+  const [helperTick, setHelperTick] = useState(0);
   const [chatWs, setChatWs] = useState<{ items: { kind: 'root' | 'set'; id: string }[]; roots: ChatRoot[]; sets: { id: string; name: string; roots: string[] }[] }>({ items: [], roots: [], sets: [] });
   const [wsRoot, setWsRoot] = useState<string | null>(null);
   const [chatQuery, setChatQuery] = useState('');
@@ -139,6 +142,30 @@ export function Chat() {
       if (!isAbort(error) && gate.current()) toast((error as Error).message, 'error');
     }
   }
+
+  // While helpers run in the background, check now and then; when the last one ends, its result is in the chat.
+  useEffect(() => {
+    if (!current) return;
+    const id = current;
+    let stopped = false;
+    let wasBusy = false;
+    let timer: number | undefined;
+    const check = async () => {
+      try {
+        const ctx = await api<{ helpers: { status: string }[] }>(`/api/sessions/${id}/context`);
+        if (stopped || currentRef.current !== id) return;
+        const busy = ctx.helpers.some((row) => row.status === 'running' || row.status === 'waiting');
+        if (wasBusy && !busy) {
+          const data = await api<{ messages: Message[] }>(`/api/sessions/${id}`);
+          if (!stopped && currentRef.current === id) { setMessages(data.messages); setHelperTick((value) => value + 1); }
+        }
+        wasBusy = busy;
+        if (busy) timer = window.setTimeout(() => void check(), 4000);
+      } catch { /* the next run or open checks again */ }
+    };
+    void check();
+    return () => { stopped = true; window.clearTimeout(timer); };
+  }, [current, status]);
 
   const location = useLocation();
   // Runs on every navigation (location.key), so clicking the same persona again still opens it.
@@ -596,9 +623,11 @@ export function Chat() {
           {status && status !== 'completed' && <span className={`badge ${status === 'failed' ? 'bad' : active ? 'warn' : ''}`}>{status}</span>}
           {mode === 'code' && <span className="badge warn">{currentSession?.workshopId ? 'workshop' : 'coding'}</span>}
           <button className={trace ? 'btn ghost on' : 'btn ghost'} aria-pressed={trace} title="Show what the agent did: model, tools, timings" onClick={() => setTrace((value) => !value)}><ListTree size={16} aria-hidden /> <span>Trace</span></button>
+          {currentSession && <button className={panel === 'context' ? 'btn ghost on' : 'btn ghost'} aria-pressed={panel === 'context'} title="Helpers, timers, files and edits from this chat" onClick={() => setPanel(panel === 'context' ? null : 'context')}><Layers size={16} aria-hidden /> <span>This chat</span></button>}
           {currentSession && <DropMenu label="Chat options" items={[
             { label: 'Rename chat', icon: Pencil, onSelect: () => { setRail(true); setRenaming(currentSession.id); setTitleDraft(currentSession.title); } },
             { label: trace ? 'Hide trace' : 'Show trace', icon: ListTree, onSelect: () => setTrace((value) => !value) },
+            { label: 'Helpers, timers and files', icon: Layers, onSelect: () => setPanel('context') },
             { label: 'Persona info', icon: Info, hint: 'Ctrl+Shift+I', onSelect: () => setPanel('persona') },
             { label: 'Persona settings', icon: Pencil, onSelect: () => setPanel('settings') },
             { label: 'Add or create workspaces', icon: FolderGit2, onSelect: () => setPanel('workspace') },
@@ -690,10 +719,11 @@ export function Chat() {
             }
             const [visible, attached] = message.content.split(CONTEXT_MARK);
             const cites = citationsIn(visible || '').filter((cite) => cite.kind === 'file');
+            const helperNote = Boolean(message.routingNote?.startsWith('helper:'));
             return (
-            <article key={message.id} id={`m-${message.id}`} data-mid={message.id} title={message.createdAt ? new Date(message.createdAt).toLocaleString() : undefined} className={message.role === 'user' ? 'msg user' : fromAgent ? `msg from-agent${streak ? ' cont' : ''}` : 'msg'} style={fromAgent ? { ['--accent' as string]: speaker.accent || '#e4b56a' } : undefined}>
+            <article key={message.id} id={`m-${message.id}`} data-mid={message.id} title={message.createdAt ? new Date(message.createdAt).toLocaleString() : undefined} className={`${message.role === 'user' ? 'msg user' : fromAgent ? `msg from-agent${streak ? ' cont' : ''}` : 'msg'}${helperNote ? ' helper-result' : ''}`} style={fromAgent ? { ['--accent' as string]: speaker.accent || '#e4b56a' } : undefined}>
               {fromAgent ? !streak && <div className="who"><Face agent={speaker} size={28} /><span className="meta">{speaker.emoji ? `${speaker.emoji} ` : ''}{speaker.name}</span></div> : message.role !== 'user' && message.role !== 'assistant' && <div className="meta"><span>{message.role}</span></div>}
-              {message.routingNote && <div className="switch">{message.routingNote}</div>}
+              {message.routingNote && !helperNote && <div className="switch">{message.routingNote}</div>}
               <div dir="auto"><Markdown text={visible || ''} sourceId={message.id} /></div>
               {attached && <details className="attached-note"><summary className="faint">Context sent with this message ({Math.round(attached.length / 1000)}k characters)</summary><pre className="mono tool-output">{attached.slice(0, 4000)}{attached.length > 4000 ? '\n…' : ''}</pre></details>}
               {cites.length > 0 && <div className="file-cards">{[...new Map(cites.map((c) => [c.kind === 'file' ? c.id : '', c])).values()].map((cite) => cite.kind === 'file' && <FileCard key={cite.id} id={cite.id} onOpen={() => setViewer({ source: { kind: 'file', id: cite.id }, anchor: cite.anchor })} />)}</div>}
@@ -799,6 +829,8 @@ export function Chat() {
         <WorkspaceBrowser root={chatWs.roots.find((root) => root.id === wsRoot)!} live={active} onClose={() => setPanel(null)} onChanged={() => void loadChatWs(current)}
           onMention={(path) => addMention({ kind: 'path', root: wsRoot, path, dir: false, label: path })} />
       )}
+      {panel === 'context' && current && <ContextPanel sessionId={current} tick={messages.length + helperTick} onClose={() => setPanel(null)}
+        onOpenFile={(id) => setViewer({ source: { kind: 'file', id } })} onRolledBack={() => void openSession(current)} />}
       {(panel === 'persona' || panel === 'settings' || panel === 'workspace') && <PersonaPanel agent={persona || null} tab={panel} onTab={setPanel} onClose={() => setPanel(null)} ws={ws} canManage={canManage}
         onAttach={(rootId, label) => addWorkspace({ kind: 'root', id: rootId }, label)}
         onSaved={(agent, what) => {

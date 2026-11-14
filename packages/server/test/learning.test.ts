@@ -197,6 +197,19 @@ describe('checkpoints and rollback', () => {
   });
 });
 
+describe('context panel controls', () => {
+  it('pauses and resumes a trigger for the owner only', async () => {
+    const built = await setup();
+    const agent = await built.persona(built.owner, 'Ada');
+    const created = (await built.app.inject({ method: 'POST', url: '/api/triggers', cookies: built.owner, payload: { name: 'Hook', kind: 'webhook', agentId: agent.id, prompt: 'Handle {{event}}' } })).json().trigger as { id: string };
+    expect((await built.app.inject({ method: 'PATCH', url: `/api/triggers/${created.id}`, cookies: built.member, payload: { enabled: false } })).statusCode).toBeGreaterThanOrEqual(403);
+    const paused = await built.app.inject({ method: 'PATCH', url: `/api/triggers/${created.id}`, cookies: built.owner, payload: { enabled: false } });
+    expect(paused.json().trigger).toEqual({ id: created.id, enabled: false });
+    const resumed = await built.app.inject({ method: 'PATCH', url: `/api/triggers/${created.id}`, cookies: built.owner, payload: { enabled: true } });
+    expect(resumed.json().trigger.enabled).toBe(true);
+  });
+});
+
 describe('project rule files', () => {
   it('loads AGENTS.md, CLAUDE.md and .cursorrules from each workspace, capped', () => {
     const a = tmp();

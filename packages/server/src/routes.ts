@@ -29,7 +29,7 @@ import {
   exportSkill, importSkill, listSkills, parseSkillMd, saveSkill, setSkillEnabled, skillFit, skillVersions,
 } from './skills.js';
 import {
-  createTrigger, fireTrigger, getTrigger, githubSignatureOk, listTriggerEvents, listTriggers, secretEquals, triggerSecret,
+  createTrigger, fireTrigger, getTrigger, githubSignatureOk, listTriggerEvents, listTriggers, secretEquals, triggerSecret, updateTrigger,
   type TriggerKind,
 } from './triggers.js';
 import { secret as randomSecret } from './util.js';
@@ -1374,6 +1374,14 @@ function registerLibrary(app: FastifyInstance, ctx: Ctx) {
     if (!trigger) throw http(404, 'Trigger not found.');
     const event = body.event ?? { test: true, note: 'Fired from the triggers page.' };
     return fireTrigger(store, engine, trigger, event, { test: true, wait: true });
+  });
+  app.patch('/api/triggers/:id', async (req) => {
+    const id = (req.params as { id: string }).id;
+    mustOwn(store, req, 'trigger', id, 'Trigger not found.');
+    const body = parse(z.object({ enabled: z.boolean() }), req.body);
+    const trigger = updateTrigger(store, id, { enabled: body.enabled });
+    ctx.bus.publish({ type: 'trigger', message: body.enabled ? 'resumed' : 'paused' });
+    return { trigger: { id: trigger.id, enabled: trigger.enabled } };
   });
   app.delete('/api/triggers/:id', async (req) => {
     mustOwn(store, req, 'trigger', (req.params as { id: string }).id, 'Trigger not found.');
