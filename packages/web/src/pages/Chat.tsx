@@ -16,6 +16,7 @@ import { PersonaChip, greetingFor, startersFor } from '../components/ChatChips';
 import { parseSources, toolSummary } from '@local-agent/shared';
 import { toast, errorText } from '../lib/toast';
 import { api, post } from '../lib/api';
+import { isAbort, latestOnly } from '../lib/latest';
 import { Markdown } from '../components/Markdown';
 import { Face, type FaceAgent } from '../components/Face';
 
@@ -107,42 +108,61 @@ export function Chat() {
     if (!id) { setChatWs({ items: [], roots: [], sets: [] }); return; }
     try { setChatWs(await api(`/api/sessions/${id}/workspaces`)); } catch { setChatWs({ items: [], roots: [], sets: [] }); }
   }
-  async function openSession(id: string) {
+  // Latest click wins: every open aborts the one before it, and stale replies are dropped.
+  const openGate = useRef(latestOnly());
+  const currentRef = useRef<string | null>(null);
+  async function openSession(id: string, gate = openGate.current.begin()) {
     // Restore this chat's unsent draft in the same render as the switch, so the save effect never wipes it.
     if (!new URLSearchParams(window.location.search).get('share')) setDraft(localStorage.getItem(draftKey(id)) || '');
     setCurrent(id);
-    void loadChatWs(id);
-    const data = await api<{ session: Session; messages: Message[]; plan: Plan | null; edits: Edit[] }>(`/api/sessions/${id}`);
-    setMessages(data.messages);
-    setPlan(data.plan);
-    setEdits(data.edits);
-    setMode(data.session.mode);
-    setModelPin(data.session.modelPin || null);
-    setStreaming('');
-    setThinking('');
-    setRunError(null);
-    if (data.session.agentId) await post(`/api/agents/${data.session.agentId}/read`, {}).catch(() => undefined);
+    currentRef.current = id;
+    try {
+      const [data, wsData] = await Promise.all([
+        api<{ session: Session; messages: Message[]; plan: Plan | null; edits: Edit[] }>(`/api/sessions/${id}`, { signal: gate.signal }),
+        api<typeof chatWs>(`/api/sessions/${id}/workspaces`, { signal: gate.signal }).catch((error) => { if (isAbort(error)) throw error; return { items: [], roots: [], sets: [] }; }),
+      ]);
+      if (!gate.current()) return;
+      setChatWs(wsData);
+      setMessages(data.messages);
+      setPlan(data.plan);
+      setEdits(data.edits);
+      setMode(data.session.mode);
+      setModelPin(data.session.modelPin || null);
+      setStreaming('');
+      setThinking('');
+      setRunError(null);
+      if (data.session.agentId) void post(`/api/agents/${data.session.agentId}/read`, {}).catch(() => undefined);
+    } catch (error) {
+      if (!isAbort(error) && gate.current()) toast((error as Error).message, 'error');
+    }
   }
 
   const location = useLocation();
+  // Runs on every navigation (location.key), so clicking the same persona again still opens it.
+  // This effect only reads the URL; nothing here navigates, so URL and state cannot ping-pong.
   useEffect(() => {
-    const share = new URLSearchParams(location.search).get('share');
+    const params = new URLSearchParams(location.search);
+    const share = params.get('share');
     if (share) setDraft(share);
-    const persona = new URLSearchParams(location.search).get('persona');
-    refreshLists().then(async (rows) => {
-      if (persona) {
-        const existing = rows.find((session) => session.agentId === persona);
-        if (existing) await openSession(existing.id);
-        else {
-          const created = await post<{ session: Session }>('/api/sessions', { agentId: persona, title: 'New chat' });
-          await openSession(created.session.id);
+    const persona = params.get('persona');
+    const gate = openGate.current.begin();
+    void (async () => {
+      try {
+        if (persona) {
+          // One server call finds or creates the persona's chat atomically: no duplicates, however fast the clicks.
+          const opened = await post<{ session: Session; created: boolean }>(`/api/agents/${persona}/open-chat`, {}, { signal: gate.signal });
+          if (!gate.current()) return;
+          await openSession(opened.session.id, gate);
+          if (gate.current()) void refreshLists().catch(() => undefined);
+          return;
         }
-        await post(`/api/agents/${persona}/read`, {});
-        return;
+        const rows = await refreshLists();
+        if (gate.current() && rows[0] && !currentRef.current) await openSession(rows[0].id, gate);
+      } catch (error) {
+        if (!isAbort(error) && gate.current()) toast((error as Error).message, 'error');
       }
-      if (rows[0]) void openSession(rows[0].id);
-    }).catch(() => undefined);
-  }, [location.search]);
+    })();
+  }, [location.key]);
   useEffect(() => {
     if (pendingJump.current && messages.some((m) => m.id === pendingJump.current)) {
       const id = pendingJump.current; pendingJump.current = null;
@@ -210,7 +230,7 @@ export function Chat() {
         setStatus(data.run?.status || 'completed');
         if (data.run?.modelId) setLastModel(models.find((model) => model.id === data.run.modelId)?.name || String(data.run.modelId));
         if (data.run?.status === 'failed' && data.run?.error) setRunError(String(data.run.error));
-        if (current) void openSession(current);
+        if (current && currentRef.current === current) void openSession(current);
         void refreshLists().catch(() => undefined);
         source.close();
       }

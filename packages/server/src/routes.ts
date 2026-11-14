@@ -331,6 +331,21 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     if (!agent) throw http(404, 'Persona not found.');
     return { agent };
   });
+  // Quick chat: the persona's latest chat, or a new one. Find-or-create runs synchronously on one
+  // connection, so rapid or repeated clicks (or two tabs) never make duplicate chats.
+  app.post('/api/agents/:id/open-chat', async (req) => {
+    const agentId = (req.params as { id: string }).id;
+    mustOwn(store, req, 'agent', agentId, 'Persona not found.');
+    let session = store.latestSessionForAgent(agentId, me(req));
+    const created = !session;
+    if (!session) {
+      session = store.createSession({ agentId, ownerId: me(req), title: 'New chat' });
+      prefillChatWorkspaces(store, session.id, agentId);
+      session = store.getSession(session.id)!;
+    }
+    store.markAgentRead(agentId);
+    return { session, created };
+  });
   app.post('/api/agents/:id/read', async (req) => {
     mustOwn(store, req, 'agent', (req.params as { id: string }).id, 'Persona not found.');
     store.markAgentRead((req.params as { id: string }).id);

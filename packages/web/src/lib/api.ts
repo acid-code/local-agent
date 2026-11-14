@@ -23,9 +23,12 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError('The server sent something that was not JSON.', res.status);
   }
   if (!res.ok) throw new ApiError(data.error || res.statusText || `Request failed (${res.status}).`, res.status);
+  const method = (init?.method || 'GET').toUpperCase();
+  // Lets autosaving pages (Settings) show a "Saved" tick for any change, whichever card made it.
+  if (method === 'PUT' || method === 'PATCH' || method === 'DELETE') window.dispatchEvent(new CustomEvent('la:saved', { detail: { path } }));
   return data as T;
 }
 
-export function post<T>(path: string, body?: unknown) {
-  return api<T>(path, { method: 'POST', body: body ? JSON.stringify(body) : '{}' });
+export function post<T>(path: string, body?: unknown, init?: RequestInit) {
+  return api<T>(path, { ...init, method: 'POST', body: body ? JSON.stringify(body) : '{}' });
 }

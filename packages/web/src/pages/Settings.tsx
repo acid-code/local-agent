@@ -37,6 +37,11 @@ const ALIASES: Record<string, string> = { backups: 'data', account: 'data', quot
 function useSavedTick() {
   const [state, setState] = useState<'idle' | 'saving' | 'saved'>('idle');
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    const flash = () => { setState('saved'); if (timer.current) clearTimeout(timer.current); timer.current = setTimeout(() => setState('idle'), 2200); };
+    window.addEventListener('la:saved', flash);
+    return () => window.removeEventListener('la:saved', flash);
+  }, []);
   return {
     state,
     track: async <T,>(work: Promise<T>): Promise<T> => {

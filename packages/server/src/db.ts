@@ -594,6 +594,12 @@ export class Store {
     return { sessions: page.map(mapSession), nextCursor: more && last ? `${String(last.updated_at)}|${String(last.id)}` : null };
   }
 
+  /** The persona's most recently active one-to-one chat for this account, if any. */
+  latestSessionForAgent(agentId: string, ownerId: string): Session | null {
+    const row = this.one<Raw>('SELECT * FROM chat_sessions WHERE archived = 0 AND agent_id = ? AND room_id IS NULL AND owner_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1', agentId, ownerId);
+    return row ? mapSession(row) : null;
+  }
+
   getSession(id: string): Session | null {
     const row = this.one<Raw>('SELECT * FROM chat_sessions WHERE id = ?', id);
     return row ? mapSession(row) : null;
