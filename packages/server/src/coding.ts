@@ -5,6 +5,7 @@ import { isInside } from '@local-agent/shared';
 import { locatePath, projectPath, type PathHit } from './workshops.js';
 import { addProjectNote, explainPull, git, pushApproval, tryLockRepo } from './repos.js';
 import { openPullRequest, validBranch } from './gitops.js';
+import { OWNER_ID, foreignPath } from './accounts.js';
 import type { Store } from './db.js';
 import type { Tool, ToolContext } from './tools.js';
 import { nid, now } from './util.js';
@@ -109,7 +110,8 @@ function allowedRoot(ctx: ToolContext, target: string): PathHit | null {
   return locatePath({
     workspace: ctx.workspace,
     roots: ctx.roots,
-    grants: grantsFor(ctx.store, ctx.agent.id),
+    // Grants never open another account's folder.
+    grants: grantsFor(ctx.store, ctx.agent.id).filter((grant) => !ctx.libraryDir || !foreignPath(ctx.libraryDir, ctx.agent.ownerId || OWNER_ID, grant.path)),
     target,
   });
 }

@@ -319,6 +319,7 @@ export interface CollectionRow {
   id: string;
   name: string;
   agentId: string | null;
+  ownerId: string;
   rootPath: string | null;
   embedder: string;
   documents: number;
@@ -326,8 +327,10 @@ export interface CollectionRow {
   chunks: number;
 }
 
-export function listCollections(store: Store): CollectionRow[] {
-  const rows = store.db.prepare('SELECT * FROM kb_collections ORDER BY name').all() as Record<string, unknown>[];
+export function listCollections(store: Store, ownerId?: string): CollectionRow[] {
+  const rows = (ownerId
+    ? store.db.prepare('SELECT * FROM kb_collections WHERE owner_id = ? ORDER BY name').all(ownerId)
+    : store.db.prepare('SELECT * FROM kb_collections ORDER BY name').all()) as Record<string, unknown>[];
   return rows.map((row) => {
     const id = String(row.id);
     const stats = store.db.prepare(`SELECT
@@ -335,33 +338,35 @@ export function listCollections(store: Store): CollectionRow[] {
       (SELECT COALESCE(SUM(bytes), 0) FROM kb_documents WHERE collection_id = ?) AS bytes,
       (SELECT COUNT(*) FROM kb_chunks WHERE collection_id = ?) AS chunks`).get(id, id, id) as { documents: number; bytes: number; chunks: number };
     return {
-      id, name: String(row.name), agentId: row.agent_id ? String(row.agent_id) : null,
+      id, name: String(row.name), agentId: row.agent_id ? String(row.agent_id) : null, ownerId: String(row.owner_id || 'owner'),
       rootPath: row.root_path ? String(row.root_path) : null, embedder: String(row.embedder),
       documents: Number(stats.documents), bytes: Number(stats.bytes), chunks: Number(stats.chunks),
     };
   });
 }
 
-export function kbUsage(store: Store) {
+export function kbUsage(store: Store, ownerId?: string) {
+  const scope = ownerId ? ' WHERE collection_id IN (SELECT id FROM kb_collections WHERE owner_id = ?)' : '';
+  const args = ownerId ? [ownerId, ownerId, ownerId, ownerId] : [];
   const row = store.db.prepare(`SELECT
-    (SELECT COUNT(*) FROM kb_documents) AS documents,
-    (SELECT COUNT(*) FROM kb_chunks) AS chunks,
-    (SELECT COALESCE(SUM(bytes), 0) FROM kb_documents) AS bytes,
-    (SELECT COALESCE(SUM(LENGTH(embedding)), 0) FROM kb_chunks) AS embeddingBytes`).get() as { documents: number; chunks: number; bytes: number; embeddingBytes: number };
+    (SELECT COUNT(*) FROM kb_documents${scope}) AS documents,
+    (SELECT COUNT(*) FROM kb_chunks${scope}) AS chunks,
+    (SELECT COALESCE(SUM(bytes), 0) FROM kb_documents${scope}) AS bytes,
+    (SELECT COALESCE(SUM(LENGTH(embedding)), 0) FROM kb_chunks${scope}) AS embeddingBytes`).get(...args) as { documents: number; chunks: number; bytes: number; embeddingBytes: number };
   return {
     documents: Number(row.documents),
     chunks: Number(row.chunks),
     bytes: Number(row.bytes),
     embeddingBytes: Number(row.embeddingBytes),
-    collections: listCollections(store).map((collection) => ({ id: collection.id, name: collection.name, bytes: collection.bytes, chunks: collection.chunks, agentId: collection.agentId })),
+    collections: listCollections(store, ownerId).map((collection) => ({ id: collection.id, name: collection.name, bytes: collection.bytes, chunks: collection.chunks, agentId: collection.agentId })),
   };
 }
 
-export function createCollection(store: Store, input: { name: string; agentId?: string | null; rootPath?: string | null }): CollectionRow {
+export function createCollection(store: Store, input: { name: string; agentId?: string | null; rootPath?: string | null; ownerId?: string }): CollectionRow {
   const id = nid('kbc');
   const ts = now();
-  store.db.prepare('INSERT INTO kb_collections (id, name, agent_id, root_path, embedder, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
-    id, input.name.trim(), input.agentId || null, input.rootPath || null, 'pending', ts, ts,
+  store.db.prepare('INSERT INTO kb_collections (id, name, agent_id, root_path, embedder, created_at, updated_at, owner_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+    id, input.name.trim(), input.agentId || null, input.rootPath || null, 'pending', ts, ts, input.ownerId || 'owner',
   );
   return listCollections(store).find((collection) => collection.id === id)!;
 }
@@ -454,9 +459,12 @@ export async function reindexRoots(store: Store, embed: EmbedFn) {
   return reports;
 }
 
-export async function searchKnowledge(store: Store, query: string, opts: { agentId?: string | null; collectionId?: string | null; k?: number; embed?: EmbedFn }): Promise<KbHit[]> {
+export async function searchKnowledge(store: Store, query: string, opts: { agentId?: string | null; collectionId?: string | null; k?: number; embed?: EmbedFn; ownerId?: string }): Promise<KbHit[]> {
   const k = opts.k ?? 6;
-  const collections = listCollections(store).filter((collection) => {
+  // Only the account's own collections: a persona's owner, or the caller.
+  const agentOwner = opts.agentId ? (store.db.prepare('SELECT owner_id FROM agents WHERE id = ?').get(opts.agentId) as { owner_id?: string } | undefined)?.owner_id : undefined;
+  const ownerId = opts.ownerId ?? agentOwner ?? 'owner';
+  const collections = listCollections(store, ownerId).filter((collection) => {
     if (opts.collectionId) return collection.id === opts.collectionId;
     if (!opts.agentId) return true;
     return collection.agentId === null || collection.agentId === opts.agentId;

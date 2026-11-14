@@ -1,4 +1,4 @@
-import { DEFAULT_AUTO_MAP, type AutoMap } from '@local-agent/shared';
+import { DEFAULT_AUTO_MAP, type AutoMap, type ImageModelSpec } from '@local-agent/shared';
 
 export type SandboxMode = 'docker-or-host' | 'docker-only' | 'host';
 
@@ -38,6 +38,24 @@ export interface Settings {
   /** api name -> whether Ollama reported tool support. Absent means unknown. */
   toolSupport: Record<string, boolean>;
   agentLimits: Record<string, { maxTokensPerDay?: number; maxSpendUsd?: number; maxRunMs?: number; readOnly?: boolean }>;
+  /** The image role. Auto tries the local runner first, then Gemini when the account may use it. */
+  imageGen: ImageGenSettings;
+}
+
+export interface ImageGenSettings {
+  mode: 'auto' | 'local' | 'gemini' | 'off';
+  /** sdcpp runs stable-diffusion.cpp's sd-cli. http talks to an AUTOMATIC1111-compatible /sdapi/v1/txt2img (sd-webui, Forge, sd.cpp sd-server). */
+  backend: 'sdcpp' | 'http';
+  /** Empty means <dataDir>/image/bin/sd-cli, where the installer puts it. */
+  sdBinary: string;
+  /** Catalog id of the local model (models live in <dataDir>/image/models). */
+  localModel: string;
+  /** More Hugging Face models, same shape as IMAGE_MODELS in @local-agent/shared. */
+  extraModels: ImageModelSpec[];
+  httpUrl: string;
+  geminiModel: string;
+  steps: number;
+  size: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -72,6 +90,7 @@ export const DEFAULT_SETTINGS: Settings = {
   debugLevel: 'info',
   toolSupport: {},
   agentLimits: {},
+  imageGen: { mode: 'auto', backend: 'sdcpp', sdBinary: '', localModel: 'sd-turbo', extraModels: [], httpUrl: '', geminiModel: 'gemini-2.5-flash-image', steps: 1, size: 512 },
 };
 
 export function normalizeSettings(value: Partial<Settings> | null | undefined): Settings {
@@ -80,6 +99,7 @@ export function normalizeSettings(value: Partial<Settings> | null | undefined): 
     ...(value ?? {}),
     autoModels: { ...DEFAULT_AUTO_MAP, ...(value?.autoModels ?? {}) },
     toolSupport: { ...(value?.toolSupport ?? {}) },
+    imageGen: { ...DEFAULT_SETTINGS.imageGen, ...(value?.imageGen ?? {}) },
     version: value?.version || DEFAULT_SETTINGS.version,
   };
 }

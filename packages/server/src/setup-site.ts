@@ -14,6 +14,9 @@ import { toolCapabilityWarnings } from './ollama.js';
 import { embedRoleWarning } from './kb.js';
 import type { Settings } from './settings.js';
 import type { Vault } from './vault.js';
+import { registerImageAdmin } from './media.js';
+import fs from 'node:fs';
+import { accountDir, createMember, listMembers } from './accounts.js';
 
 const ENV_KEYS = new Set(['GEMINI_API_KEY', 'OPENROUTER_API_KEY', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID']);
 const VAULT_KEYS = new Set([...ENV_KEYS, 'IMAP_USER', 'IMAP_PASSWORD']);
@@ -56,7 +59,7 @@ export async function buildSetupApp(options: {
 
   app.get('/api/setup/state', async (req, reply) => {
     const owner = options.store.getOwner();
-    const authed = owner ? await authenticate(options.store, req) : false;
+    const authed = owner ? (await authenticate(options.store, req)) && (req as { account?: { role?: string } }).account?.role === 'owner' : false;
     if (!owner) return { needsOwner: true, authenticated: false };
     if (!authed) return reply.code(401).send({ needsOwner: false, authenticated: false });
     const models = options.store.listModels();
@@ -199,6 +202,23 @@ export async function buildSetupApp(options: {
     }
     const saved = options.store.saveSettings(next, 'LAN setup defaults', { settings: next });
     return { settings: publicSettings(saved) };
+  });
+
+  registerImageAdmin(app, '/api/setup', { store: options.store, dataDir: options.dataDir, vault: options.vault, fetchImpl }, (req, reply) => requireOwner(options.store, req, reply));
+  app.get('/api/setup/members', async (req, reply) => {
+    if (!(await requireOwner(options.store, req, reply))) return;
+    return { members: listMembers(options.store).map((member) => ({ username: member.username, displayName: member.displayName, disabled: member.disabled, cloud: member.limits.cloud })) };
+  });
+  app.post('/api/setup/members', async (req, reply) => {
+    if (!(await requireOwner(options.store, req, reply))) return;
+    const body = parse(z.object({ username: z.string().min(1).max(32), displayName: z.string().max(60).optional(), password: z.string().min(8).max(200), cloud: z.string().optional() }), req.body);
+    try {
+      const member = createMember(options.store, { username: body.username, displayName: body.displayName || undefined, passwordHash: await hashPassword(body.password), limits: { cloud: body.cloud !== 'off' } });
+      fs.mkdirSync(accountDir(options.dataDir, member.id), { recursive: true });
+      return { ok: true, username: member.username };
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : 'Could not create that account.' });
+    }
   });
 
   app.post('/api/setup/password', async (req, reply) => {
@@ -349,6 +369,11 @@ async function requireOwner(store: Store, req: FastifyRequest, reply: FastifyRep
     reply.code(401).send({ error: 'Sign in required.' });
     return false;
   }
+  // A member's sign-in never opens the setup site.
+  if ((req as { account?: { role?: string } }).account?.role !== 'owner') {
+    reply.code(403).send({ error: 'Only the owner can use setup.' });
+    return false;
+  }
   return true;
 }
 
@@ -381,6 +406,7 @@ const PAGE = `<!doctype html>
     .card { border: 1px solid rgba(243,236,223,.1); border-radius: 16px; padding: 1rem; margin: 1rem 0; }
     .warn { color: #f3d7a6; }
     .ok { color: #c8e6c4; }
+    .imglist { list-style: none; padding: 0; } .imglist li { padding: 10px 0; border-top: 1px solid rgba(255,255,255,.08); } .imglist progress { width: 60%; vertical-align: middle; }
     .steps { display: flex; gap: 0.4rem; flex-wrap: wrap; margin: 1rem 0; }
     .steps span { border: 1px solid rgba(243,236,223,.16); border-radius: 999px; padding: 0.2rem 0.6rem; color: #b7b1a6; }
     .steps span.on { color: #1a140c; background: #e4b56a; border-color: #e4b56a; }
@@ -545,6 +571,13 @@ const PAGE = `<!doctype html>
         + field('Smart / cloud', 'autoCloud', 'text', (s.autoModels && s.autoModels.cloud) || '')
         + field('Embed', 'autoEmbed', 'text', (s.autoModels && s.autoModels.embed) || 'nomic-embed-text')
         + '<button>Save defaults</button><p id="msg"></p></form>'
+        + '<form class="card" id="people"><h2>People</h2><p class="muted">Add a second person. They get their own chats, personas, memory, files and theme, and never see yours. You keep setup, keys and models.</p><ul id="plist"></ul>'
+        + field('Username', 'username') + field('Display name', 'displayName') + field('Password (8+ characters)', 'password', 'password')
+        + '<label>Cloud models (Gemini)</label><select name="cloud"><option value="on">On, shared quota</option><option value="off">Off, local models only</option></select>'
+        + '<button>Add person</button><p id="pmsg"></p></form>'
+        + '<div class="card" id="imagecard"><h2>Images</h2><p class="muted">Pictures from a model on this machine with stable-diffusion.cpp. Models download from Hugging Face. Gated models need an HF_TOKEN in the vault (accept the licence on huggingface.co first). Gemini covers images when it is allowed and no local model is ready.</p>'
+        + '<p id="imgrunner" class="muted">Checking the runner…</p><button type="button" class="ghost" id="imgruninstall">Install stable-diffusion.cpp</button>'
+        + '<p class="muted" id="imgdisk"></p><ul id="imglist" class="imglist"></ul><p id="imgmsg"></p></div>'
         + '<form class="card" id="pw"><h2>Owner password</h2>' + field('Current', 'current', 'password') + field('New', 'next', 'password') + '<button>Change password</button><p id="pwmsg"></p></form>'
         + '<p><button class="ghost" id="wiz" type="button">Run the wizard again</button></p>');
       const transport = document.querySelector('[name=backupTransport]');
@@ -565,6 +598,75 @@ const PAGE = `<!doctype html>
         catch (error) { msg.textContent = error.message; msg.className = 'warn'; }
       };
       document.querySelector('#wiz').onclick = () => models();
+      const listPeople = async () => {
+        const data = await api('/api/setup/members').catch(() => ({ members: [] }));
+        const list = document.querySelector('#plist');
+        list.textContent = '';
+        for (const person of data.members) {
+          const item = document.createElement('li');
+          item.textContent = person.displayName + ' (' + person.username + ')' + (person.disabled ? ' · disabled' : '') + (person.cloud ? '' : ' · local only');
+          list.appendChild(item);
+        }
+      };
+      void listPeople();
+      const gbs = (bytes) => (bytes / 1073741824).toFixed(1) + ' GB';
+      let imgTimer = null;
+      const listImages = async () => {
+        const data = await api('/api/setup/image').catch((error) => ({ error: error.message }));
+        if (data.error) { document.querySelector('#imgrunner').textContent = data.error; return; }
+        const runnerJob = data.jobs.find((job) => job.kind === 'runner');
+        document.querySelector('#imgrunner').textContent = runnerJob && runnerJob.status === 'running' ? 'Installing stable-diffusion.cpp…' : runnerJob && runnerJob.status === 'error' ? runnerJob.error : data.local.detail;
+        document.querySelector('#imgdisk').textContent = 'Disk free: ' + (data.diskFreeBytes == null ? 'unknown' : gbs(data.diskFreeBytes)) + ' · Hugging Face token: ' + (data.hfToken ? 'saved' : 'not set');
+        const list = document.querySelector('#imglist');
+        list.textContent = '';
+        let busy = Boolean(runnerJob && runnerJob.status === 'running');
+        for (const model of data.catalog) {
+          const job = data.jobs.find((item) => item.id === 'model:' + model.id);
+          const item = document.createElement('li');
+          const title = document.createElement('strong');
+          title.textContent = model.name + (model.id === data.selected ? ' · selected' : '');
+          const info = document.createElement('div');
+          info.className = 'muted';
+          info.textContent = model.blurb + ' ' + gbs(model.totalBytes) + ' download, about ' + model.ramGiB + ' GB RAM.' + (model.gated ? ' Needs HF_TOKEN.' : '') + ' Licence: ' + model.licence + '.';
+          item.append(title, info);
+          if (job && job.status === 'running') {
+            busy = true;
+            const bar = document.createElement('progress');
+            bar.max = job.total; bar.value = job.received;
+            const label = document.createElement('span');
+            label.className = 'muted';
+            label.textContent = ' ' + gbs(job.received) + ' of ' + gbs(job.total) + (job.file ? ' · ' + job.file : '');
+            item.append(bar, label);
+          } else if (job && job.status === 'error') {
+            const error = document.createElement('div'); error.className = 'warn'; error.textContent = job.error; item.append(error);
+          }
+          const row = document.createElement('div');
+          if (!model.installed && !(job && job.status === 'running')) {
+            const get = document.createElement('button'); get.type = 'button'; get.className = 'ghost';
+            get.textContent = model.neededBytes < model.totalBytes ? 'Resume download (' + gbs(model.neededBytes) + ' left)' : 'Download ' + gbs(model.totalBytes);
+            get.onclick = async () => { try { await api('/api/setup/image/download', { method: 'POST', body: JSON.stringify({ id: model.id }) }); } catch (error) { document.querySelector('#imgmsg').textContent = error.message; document.querySelector('#imgmsg').className = 'warn'; } void listImages(); };
+            row.append(get);
+          }
+          if (model.installed && model.id !== data.selected) {
+            const use = document.createElement('button'); use.type = 'button'; use.className = 'ghost'; use.textContent = 'Use this model';
+            use.onclick = async () => { await api('/api/setup/image/select', { method: 'POST', body: JSON.stringify({ id: model.id }) }); void listImages(); };
+            row.append(use);
+          }
+          if (model.installed) { const ok = document.createElement('span'); ok.className = 'ok'; ok.textContent = ' Downloaded'; row.append(ok); }
+          item.append(row);
+          list.appendChild(item);
+        }
+        clearTimeout(imgTimer);
+        if (busy) imgTimer = setTimeout(listImages, 1500);
+      };
+      void listImages();
+      document.querySelector('#imgruninstall').onclick = async () => { await api('/api/setup/image/runner', { method: 'POST', body: '{}' }).catch(() => undefined); void listImages(); };
+      document.querySelector('#people').onsubmit = async (event) => {
+        event.preventDefault();
+        const msg = document.querySelector('#pmsg');
+        try { await api('/api/setup/members', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(event.target))) }); msg.textContent = 'Added. They sign in with that username and password.'; msg.className = 'ok'; event.target.reset(); await listPeople(); }
+        catch (error) { msg.textContent = error.message; msg.className = 'warn'; }
+      };
     }
     boot();
   </script>

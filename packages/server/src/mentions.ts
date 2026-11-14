@@ -21,14 +21,16 @@ export function mentionLabel(mention: Mention, store: Store): string {
 }
 
 /** Turns @-mentions into text the model can read: folder trees, file contents or excerpts, uploaded file text. Each block says when it was cut. */
-export function expandMentions(store: Store, mentions: Mention[]): string {
+/** Only the caller's own uploads and folders resolve. */
+export function expandMentions(store: Store, mentions: Mention[], ownerId = 'owner'): string {
   const blocks: string[] = [];
   let used = 0;
   for (const mention of mentions.slice(0, 12)) {
     let block = '';
     try {
       if (mention.kind === 'file') {
-        const file = getFile(store, mention.id);
+        const found = getFile(store, mention.id);
+        const file = found && found.ownerId === ownerId ? found : null;
         if (!file) { blocks.push(`[file:${mention.id}] was not found.`); continue; }
         const text = fileText(store, file.id);
         const room = Math.max(2_000, Math.min(20_000, CONTEXT_BUDGET - used));
@@ -36,7 +38,7 @@ export function expandMentions(store: Store, mentions: Mention[]): string {
           ? `### [file:${file.id}] ${file.name} (${file.mime}, ${file.size} bytes)\n\`\`\`\n${text.slice(0, room)}\n\`\`\`${text.length > room ? `\n(Truncated: showing ${room} of ${text.length} characters. Use find_context with id ${file.id} for more.)` : ''}`
           : `### [file:${file.id}] ${file.name} (${file.mime}, ${file.size} bytes)\nNo readable text (binary or media). The owner can open it in the preview.`;
       } else {
-        const root = gitRoot(store, mention.root);
+        const root = gitRoot(store, mention.root, ownerId);
         const full = path.resolve(root.path, mention.path || '.');
         if (!isInside(root.path, full)) throw new Error('That path is outside the workspace.');
         const label = mentionLabel(mention, store);

@@ -7,6 +7,7 @@ import websocket from '@fastify/websocket';
 import fs from 'node:fs';
 import { VERSION } from '@local-agent/shared';
 import { authenticate } from './auth.js';
+import { MEMBER_ROUTES, type Account } from './accounts.js';
 import { Bus } from './bus.js';
 import { seedCatalog } from './catalog.js';
 import { loadConfig } from './config.js';
@@ -102,6 +103,11 @@ export async function buildApp(options: {
     if (!req.url.startsWith('/api/')) return;
     const ok = await authenticate(store, req);
     if (!ok) return reply.code(401).send({ error: 'Sign in required.' });
+    // Members reach only their own corner of the API. Admin routes are owner-only.
+    const account = (req as { account?: Account }).account;
+    if (account?.role === 'member' && !MEMBER_ROUTES.has(`${req.method === 'HEAD' ? 'GET' : req.method} ${req.routeOptions?.url ?? pathOnly}`)) {
+      return reply.code(403).send({ error: 'Only the owner can do that.' });
+    }
     if (req.method !== 'GET' && req.method !== 'HEAD' && !req.headers.authorization?.startsWith('Bearer ')) {
       const origin = req.headers.origin;
       if (typeof origin === 'string') {

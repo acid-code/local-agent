@@ -2,27 +2,35 @@ import { createHash, randomBytes, scrypt as scryptCb, timingSafeEqual } from 'no
 import { promisify } from 'node:util';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { Store } from './db.js';
+import { OWNER_ID, getAccount, type Account } from './accounts.js';
 
 const scrypt = promisify(scryptCb);
 const loginFailures = new Map<string, { count: number; at: number }>();
 
-export async function authenticate(store: Store, req: FastifyRequest) {
+/** The signed-in account, or null. API tokens belong to the owner. A disabled member is signed out. */
+export async function authAccount(store: Store, req: FastifyRequest): Promise<Account | null> {
   const header = req.headers.authorization;
   if (header?.startsWith('Bearer ')) {
     const token = header.slice(7).trim();
     const hash = createHash('sha256').update(token).digest('hex');
     const id = store.findToken(hash);
-    if (!id) return false;
+    if (!id) return null;
     store.touchToken(id);
-    return true;
+    return getAccount(store, OWNER_ID);
   }
   const raw = req.cookies?.la_session;
-  if (!raw) return false;
+  if (!raw) return null;
   const unsigned = req.unsignCookie(raw);
-  if (!unsigned.valid || !unsigned.value) return false;
+  if (!unsigned.valid || !unsigned.value) return null;
   const session = store.getAuthSession(unsigned.value);
-  if (!session || Date.parse(session.expiresAt) < Date.now()) return false;
-  return true;
+  if (!session || Date.parse(session.expiresAt) < Date.now()) return null;
+  return getAccount(store, session.accountId);
+}
+
+export async function authenticate(store: Store, req: FastifyRequest) {
+  const account = await authAccount(store, req);
+  if (account) (req as { account?: Account }).account = account;
+  return Boolean(account);
 }
 
 export function rateLimit(ip: string) {
@@ -51,9 +59,9 @@ export async function verifyPassword(password: string, stored: string) {
   return expected.length === key.length && timingSafeEqual(expected, key);
 }
 
-export async function setSession(reply: FastifyReply, store: Store) {
+export async function setSession(reply: FastifyReply, store: Store, accountId = OWNER_ID) {
   const id = randomBytes(24).toString('hex');
   const expires = new Date(Date.now() + 30 * 86400_000).toISOString();
-  store.createAuthSession(id, expires);
+  store.createAuthSession(id, expires, accountId);
   reply.setCookie('la_session', id, { httpOnly: true, sameSite: 'lax', path: '/', signed: true, maxAge: 30 * 86400 });
 }

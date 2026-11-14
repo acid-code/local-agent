@@ -1,10 +1,11 @@
+import { CuteArt } from '../components/CuteArt';
 import { useEffect, useRef, useState } from 'react';
 import { AtSign, Brain, Check, ChevronDown, Copy, Download, Eye, FileText, Folder, ListTree, Menu, Mic, Paperclip, Pencil, Quote, RotateCcw, Send, Square, Trash2, Wrench, X } from 'lucide-react';
 import { CiteContext, type CiteHandlers } from '../components/Markdown';
 import { FileViewer, type QuotePick, type ViewerSource } from '../components/FileViewer';
 import { MentionPicker, type MentionPick } from '../components/MentionPicker';
 import { CONTEXT_MARK, citationsIn, fileMeta, humanSize, kindOf, quoteBlock, rawUrl, saveFile, uploadFile, type Cite, type FileMeta } from '../lib/files';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import { parseSources, toolSummary } from '@local-agent/shared';
 import { toast, errorText } from '../lib/toast';
 import { api, post } from '../lib/api';
@@ -105,11 +106,12 @@ export function Chat() {
     if (data.session.agentId) await post(`/api/agents/${data.session.agentId}/read`, {}).catch(() => undefined);
   }
 
+  const location = useLocation();
   useEffect(() => {
     api<{ models: ModelChoice[] }>('/api/models').then((data) => setModels(data.models)).catch(() => undefined);
-    const share = new URLSearchParams(window.location.search).get('share');
+    const share = new URLSearchParams(location.search).get('share');
     if (share) setDraft(share);
-    const persona = new URLSearchParams(window.location.search).get('persona');
+    const persona = new URLSearchParams(location.search).get('persona');
     refreshLists().then(async (rows) => {
       if (persona) {
         const existing = rows.find((session) => session.agentId === persona);
@@ -123,7 +125,7 @@ export function Chat() {
       }
       if (rows[0]) void openSession(rows[0].id);
     }).catch(() => undefined);
-  }, []);
+  }, [location.search]);
   useEffect(() => {
     if (pendingJump.current && messages.some((m) => m.id === pendingJump.current)) {
       const id = pendingJump.current; pendingJump.current = null;
@@ -211,18 +213,22 @@ export function Chat() {
     }
   }
 
-  async function createChat(nextMode: 'chat' | 'code') {
-    if (!agents[0]) return;
+  async function createChat(nextMode: 'chat' | 'code'): Promise<string | undefined> {
+    if (!agents[0]) return undefined;
     const created = await post<{ session: Session }>('/api/sessions', { agentId: agents[0].id, mode: nextMode, title: nextMode === 'code' ? 'Coding session' : 'New chat' });
     await refreshLists();
     await openSession(created.session.id);
+    return created.session.id;
   }
 
   async function send(event?: { preventDefault(): void }, override?: string) {
     event?.preventDefault();
     const typed = override ?? draft;
     const attaching = override === undefined && (quotes.length > 0 || mentions.length > 0);
-    if (!current || (!typed.trim() && !attaching)) return;
+    if (!typed.trim() && !attaching) return;
+    // Typing with no chat open starts one, instead of silently doing nothing.
+    const target = current || await createChat('chat').catch(() => undefined);
+    if (!target) { toast('Create a persona under Agents first.', 'info'); return; }
     if (active) { toast('A reply is still running. Press Stop (Esc) first.', 'info'); return; }
     const sentQuotes = override === undefined ? quotes : [];
     const sentMentions = override === undefined ? mentions : [];
@@ -233,10 +239,10 @@ export function Chat() {
     setRunError(null);
     setThinking('');
     setMessages((value) => [...value, { id: 'local', role: 'user', content }]);
-    const agentId = sessions.find((session) => session.id === current)?.agentId || agents[0]?.id;
+    const agentId = sessions.find((session) => session.id === target)?.agentId || agents[0]?.id;
     let result: { run: { id: string }; offers: Offer[] };
     try {
-      result = await post<{ run: { id: string }; offers: Offer[] }>(`/api/sessions/${current}/messages`, { content, agentId, mentions: payloadMentions.length ? payloadMentions : undefined });
+      result = await post<{ run: { id: string }; offers: Offer[] }>(`/api/sessions/${target}/messages`, { content, agentId, mentions: payloadMentions.length ? payloadMentions : undefined });
     } catch (error) {
       // A reply is still running (409) or the model choice was refused (400). Keep the draft.
       setMessages((value) => value.filter((message) => message.id !== 'local'));
@@ -463,11 +469,12 @@ export function Chat() {
             </div>
           )}
           {messages.length === 0 && (
-            <div className="card">
+            <div className="card empty-card">
+              <CuteArt />
               <h3>{current ? 'Say something to start.' : 'No chat open.'}</h3>
               <p className="muted">Ask a question, or try one of these. With no model connected, Rehearsal still streams and calls tools.</p>
               <div className="row">
-                {['list files', 'remember that this box has 48 GB', 'search local agents'].map((prompt) => (
+                {['list files', 'remember that this box has 48 GB', '/image a cosy reading nook, watercolor'].map((prompt) => (
                   <button key={prompt} className="btn" onClick={() => { setDraft(prompt); input.current?.focus(); }}>{prompt}</button>
                 ))}
               </div>
@@ -634,6 +641,18 @@ function FileCard({ id, onOpen }: { id: string; onOpen: () => void }) {
   useEffect(() => { void fileMeta(id).then(setMeta); }, [id]);
   if (meta === null) return <div className="file-card missing"><FileText size={18} /><span className="faint">File {id} is gone.</span></div>;
   const kind = meta ? kindOf(meta.name, meta.mime) : 'binary';
+  if (meta && kind === 'image') {
+    return (
+      <div className="file-card image-card">
+        <button className="file-card-main" onClick={onOpen} title="Preview"><img src={rawUrl(id)} alt={meta.name} className="file-preview" loading="lazy" /></button>
+        <div className="image-card-bar">
+          <span className="file-card-text"><strong className="ellipsis" dir="auto">{meta.name}</strong><span className="faint">{humanSize(meta.size)}</span></span>
+          <button className="icon-btn" aria-label="Preview" title="Preview" onClick={onOpen}><Eye size={16} /></button>
+          <button className="icon-btn" aria-label="Download" title="Download" onClick={() => saveFile(rawUrl(id), meta.name, meta.mime)}><Download size={16} /></button>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="file-card">
       <button className="file-card-main" onClick={onOpen} title="Preview">

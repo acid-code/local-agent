@@ -22,7 +22,7 @@ interface Skill { slug: string; name: string; enabled?: boolean }
 interface Workshop { id: string; name: string }
 
 const TOOLS = ['list_dir', 'read_file', 'write_file', 'shell', 'web_search', 'web_fetch', 'remember', 'recall', 'grep', 'glob', 'apply_patch', 'git', 'plan', 'consult_agent', 'repo_sync'];
-const ACCENTS = ['#e4b56a', '#e39486', '#9dccb4', '#9ec0e0', '#d7b4e8', '#f0e2b6'];
+const ACCENTS = ['#e4b56a', '#e39486', '#9dccb4', '#9ec0e0', '#d7b4e8', '#f0e2b6', '#e88aa8', '#b89cf0', '#7cc59a', '#ffb08a'];
 
 const empty = (): Agent => ({
   id: '', name: '', title: '', description: '', systemPrompt: 'You are a careful local agent.', modelId: null,
