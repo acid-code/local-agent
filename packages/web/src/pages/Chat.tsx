@@ -144,7 +144,17 @@ export function Chat() {
     setDraft('');
     setMessages((value) => [...value, { id: 'local', role: 'user', content }]);
     const agentId = sessions.find((session) => session.id === current)?.agentId || agents[0]?.id;
-    const result = await post<{ run: { id: string }; offers: Offer[] }>(`/api/sessions/${current}/messages`, { content, agentId });
+    let result: { run: { id: string }; offers: Offer[] };
+    try {
+      result = await post<{ run: { id: string }; offers: Offer[] }>(`/api/sessions/${current}/messages`, { content, agentId });
+    } catch (error) {
+      // A reply is still running (409) or the model choice was refused (400). Keep the draft.
+      setMessages((value) => value.filter((message) => message.id !== 'local'));
+      setDraft(content);
+      setVoiceNote(error instanceof Error ? error.message : 'Could not send.');
+      return;
+    }
+    setVoiceNote('');
     setOffers(result.offers || []);
     setRunId(result.run.id);
     setStatus('running');

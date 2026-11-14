@@ -66,6 +66,10 @@ export class Engine {
     const settings = this.store.getSettings();
     if (settings.killed) throw new Error('Kill switch is on. New runs are stopped until you clear it.');
     this.assertWithinLimits(agent.id);
+    if (input.content && !input.parentRunId && this.sessionBusy(session.id)) {
+      // Two turns at once on one chat read each other's messages. Refuse the second one.
+      throw Object.assign(new Error('A reply is still running in this chat. Wait for it or press Stop, then send again.'), { statusCode: 409 });
+    }
     const command = input.content ? readChatCommand(input.content) : null;
     let commandAck: string | undefined;
     let pinMiss: string | undefined;
@@ -144,6 +148,14 @@ export class Engine {
       this.inflight.delete(runId);
       this.bus.publish({ type: 'done', runId, run: this.store.getRun(runId) });
     }
+  }
+
+  /** True while a run on this chat is in flight in this process. */
+  sessionBusy(sessionId: string): boolean {
+    for (const runId of this.inflight.keys()) {
+      if (this.store.getRun(runId)?.sessionId === sessionId) return true;
+    }
+    return false;
   }
 
   pause(runId: string) {
