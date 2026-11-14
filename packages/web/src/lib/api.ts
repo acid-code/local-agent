@@ -16,8 +16,13 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     credentials: 'same-origin',
   });
   const text = await res.text();
-  const data = text ? JSON.parse(text) : {};
-  if (!res.ok) throw new ApiError(data.error || res.statusText, res.status);
+  let data: { error?: string } = {};
+  try { data = text ? JSON.parse(text) : {}; } catch {
+    // A proxy error page or a half-written body. Never surface it raw.
+    if (!res.ok) throw new ApiError(res.status === 502 || res.status === 504 ? 'The server is not answering right now.' : res.statusText || `Request failed (${res.status}).`, res.status);
+    throw new ApiError('The server sent something that was not JSON.', res.status);
+  }
+  if (!res.ok) throw new ApiError(data.error || res.statusText || `Request failed (${res.status}).`, res.status);
   return data as T;
 }
 

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, post } from '../lib/api';
+import { toast } from '../lib/toast';
 
 interface Secret { id: string; name: string; handle: string; scope: string; revokedAt: string | null }
 interface Audit { id: number; action: string; actor: string; createdAt: string }
@@ -30,14 +31,42 @@ export function Settings() {
     setAudit(data.audit);
     setClis(data.clis);
   }
-  useEffect(() => { void load(); }, []);
+  const [allAudit, setAllAudit] = useState(false);
+  const [checking, setChecking] = useState<string | null>(null);
+  async function refreshHealth() {
+    setChecking('all');
+    try { setHealth((await api<{ checks: typeof health }>('/api/debug/health')).checks); } finally { setChecking(null); }
+  }
+  useEffect(() => {
+    void load();
+    void refreshHealth().catch(() => undefined);
+    if (window.location.hash) setTimeout(() => document.querySelector(window.location.hash)?.scrollIntoView({ block: 'start' }), 300);
+  }, []);
 
   return (
     <div className="page">
       <h1>Settings</h1>
       <p className="lede">Secrets are encrypted with AES-256-GCM under a master key that lives in the data directory, mode 0600. Models receive handles. Traces are redacted. Reveal asks for your password again.</p>
+      <nav className="section-tabs" aria-label="Settings sections">
+        {[['health', 'Health'], ['policy', 'Policy'], ['vault', 'Vault'], ['audit', 'Audit'], ['backups', 'Backups'], ['debug', 'Debug'], ['remote', 'Remote']].map(([id, label]) => (
+          <a key={id} href={`#${id}`} onClick={(event) => { event.preventDefault(); document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' }); history.replaceState(null, '', `#${id}`); }}>{label}</a>
+        ))}
+      </nav>
+      <div className="card" id="health">
+        <div className="card-head"><h3>System health</h3><button className="btn" type="button" disabled={checking === 'all'} onClick={() => void refreshHealth()}>{checking === 'all' ? 'Checking…' : 'Refresh health'}</button></div>
+        {health.length === 0 && <p className="faint">{checking ? 'Checking Ollama, Docker, SearXNG and the rest…' : 'No results yet.'}</p>}
+        <ul className="health-list">
+          {health.map((check) => (
+            <li key={check.id}>
+              <span className={check.ok ? 'badge ok' : 'badge warn'}>{check.ok ? 'ok' : 'check'}</span>
+              <span className="health-detail"><strong>{check.id}</strong> <span className="muted">{check.detail}</span></span>
+              <button className="btn ghost small" type="button" disabled={checking === check.id} onClick={async () => { setChecking(check.id); try { const data = await post<{ check: typeof check }>(`/api/debug/health/${encodeURIComponent(check.id)}`); setHealth((items) => items.map((item) => item.id === data.check.id ? data.check : item)); } finally { setChecking(null); } }}>{checking === check.id ? 'Testing…' : 'Test'}</button>
+            </li>
+          ))}
+        </ul>
+      </div>
       {settings && (
-        <div className="card">
+        <div className="card" id="policy">
           <h3>Policy</h3>
           <label className="field"><span>Code edits</span>
             <select value={settings.codeApproval} onChange={async (event) => { await api('/api/settings', { method: 'PATCH', body: JSON.stringify({ codeApproval: event.target.value }) }); await load(); }}>
@@ -62,7 +91,7 @@ export function Settings() {
           </label>
         </div>
       )}
-      <form className="card" onSubmit={async (event) => { event.preventDefault(); await post('/api/vault', { name, value, scope: 'global' }); setValue(''); await load(); }}>
+      <form className="card" id="vault" onSubmit={async (event) => { event.preventDefault(); await post('/api/vault', { name, value, scope: 'global' }); setValue(''); await load(); }}>
         <h3>Vault</h3>
         <label className="field"><span>Name</span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
         <label className="field"><span>Value</span><input type="password" value={value} onChange={(event) => setValue(event.target.value)} /></label>
@@ -79,14 +108,18 @@ export function Settings() {
           {revealed && <p className="mono">{revealed}</p>}
         </article>
       ))}
-      <h3>Audit</h3>
-      {audit.map((row) => <p key={row.id} className="mono faint">{row.createdAt} · {row.action} · {row.actor}</p>)}
-      <div className="card">
+      <div className="card" id="audit">
+        <h3>Audit</h3>
+        {audit.length === 0 && <p className="faint">Nothing logged yet.</p>}
+        {(allAudit ? audit : audit.slice(0, 12)).map((row) => <p key={row.id} className="mono faint wrap">{row.createdAt} · {row.action} · {row.actor}</p>)}
+        {audit.length > 12 && <button className="btn ghost" onClick={() => setAllAudit((value) => !value)}>{allAudit ? 'Show fewer' : `Show all ${audit.length}`}</button>}
+      </div>
+      <div className="card" id="backups">
         <h3>Backups</h3>
         <p className="muted">A snapshot includes the database, the encrypted vault, its master key, and persona workspaces. Treat the file as private. Restore restarts the process.</p>
-        <button className="btn primary" onClick={async () => { const result = await post<{ backup: { id: string }; shipped: { detail: string } }>('/api/backups'); alert(`Saved ${result.backup.id}. ${result.shipped.detail}`); }}>Take a snapshot</button>
+        <button className="btn primary" onClick={async () => { const result = await post<{ backup: { id: string }; shipped: { detail: string } }>('/api/backups'); toast(`Saved ${result.backup.id}. ${result.shipped.detail}`, 'ok'); }}>Take a snapshot</button>
       </div>
-      <div className="card">
+      <div className="card" id="debug">
         <h3>Debug</h3>
         <p className="muted">Owner only. Logs stay on this machine, rotate when they grow past 2 MB, and exports are redacted. Nothing here is sent anywhere.</p>
         <label className="field"><span>Log level</span>
@@ -103,7 +136,7 @@ export function Settings() {
           <input aria-label="Search logs" value={query} placeholder="Search" onChange={(event) => setQuery(event.target.value)} />
           <button className="btn" type="button" onClick={async () => { const data = await api<{ logs: typeof logs; debugLevel: string }>(`/api/logs?component=${component}&q=${encodeURIComponent(query)}`); setLogs(data.logs); setDebugLevel(data.debugLevel); }}>Tail</button>
         </div>
-        {logs.slice(0, 40).map((row) => <p key={row.id} className="mono faint">{row.createdAt} · {row.level} · {row.component} · {row.message}</p>)}
+        {logs.slice(0, 40).map((row) => <p key={row.id} className="mono faint wrap">{row.createdAt} · {row.level} · {row.component} · {row.message}</p>)}
         <h3>Run inspector</h3>
         <div className="row">
           <input aria-label="Run id" value={runId} placeholder="run id" onChange={(event) => setRunId(event.target.value)} />
@@ -111,13 +144,6 @@ export function Settings() {
           <button className="btn" type="button" onClick={async () => { const data = await post<{ run: { id: string } }>(`/api/debug/runs/${runId}/replay`); setInspection(`Replayed as ${data.run.id}`); }}>Replay on rehearsal</button>
         </div>
         {inspection && <pre className="command">{inspection.slice(0, 8000)}</pre>}
-        <h3>System health</h3>
-        <button className="btn" type="button" onClick={async () => setHealth((await api<{ checks: typeof health }>('/api/debug/health')).checks)}>Refresh health</button>
-        {health.map((check) => (
-          <p key={check.id} className="row"><span className={check.ok ? 'badge' : 'badge warn'}>{check.ok ? 'ok' : 'check'}</span> {check.id}: {check.detail}
-            <button className="btn" type="button" onClick={async () => { const data = await post<{ check: typeof check }>(`/api/debug/health/${encodeURIComponent(check.id)}`); setHealth((items) => items.map((item) => item.id === data.check.id ? data.check : item)); }}>Test now</button>
-          </p>
-        ))}
         <h3>Tool test</h3>
         <button className="btn" type="button" onClick={async () => setToolTests((await post<{ results: typeof toolTests }>('/api/debug/tool-test', {})).results)}>Test web_search and kb_search</button>
         {toolTests.map((test) => (
@@ -129,7 +155,7 @@ export function Settings() {
         <p><a className="btn" href="/api/debug/bundle">Download redacted diagnostics</a></p>
         <p className="faint">Over SSH: <span className="mono">npm run doctor</span>. To recover a forgotten password: <span className="mono">npm run reset-owner</span>.</p>
       </div>
-      <div className="card">
+      <div className="card" id="remote">
         <h3>Remote access</h3>
         <p>Tailscale is the path to use from university. Install it on this box and on the phone, then open <span className="mono">http://&lt;tailscale-ip&gt;:8787</span>. The login still applies. Cloudflare Tunnel works too: <span className="mono">cloudflared tunnel --url http://127.0.0.1:8787</span>. Do not publish the port on the public internet without one of those and this login.</p>
         <p className="faint">Coding CLIs on PATH: {clis.length ? clis.join(', ') : 'none detected. Built-in edit tools still run.'}</p>

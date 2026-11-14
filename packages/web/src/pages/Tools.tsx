@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { toast, errorText } from '../lib/toast';
 import { api, post } from '../lib/api';
 
 interface Server { id: string; name: string; source: string | null; enabled: boolean; riskLevel: string | null; riskScore: number | null; lastError: string | null; execution: string; network: string }
@@ -78,7 +79,7 @@ export function Tools() {
             <p className="faint">{server.source} · {server.execution} · network {server.network} · risk {server.riskLevel || 'unvetted'}</p>
             {server.lastError && <p className="badge bad">{server.lastError}</p>}
             <div className="row">
-              <button className="btn" onClick={() => post(`/api/mcp/${server.id}/refresh`).then(load).catch((error) => alert(error.message))}>Connect</button>
+              <button className="btn" onClick={() => post(`/api/mcp/${server.id}/refresh`).then(load).catch((error) => toast(errorText(error), 'error'))}>Connect</button>
               <button className="btn danger" onClick={() => api(`/api/mcp/${server.id}`, { method: 'DELETE' }).then(load)}>Remove</button>
             </div>
           </article>
