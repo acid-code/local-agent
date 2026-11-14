@@ -44,6 +44,32 @@ const android = () => (window as unknown as { LocalAgentAndroid?: AndroidBridge 
 export const isAndroidApp = () => Boolean(android()?.download);
 export const isElectron = () => Boolean((window as unknown as { localAgent?: unknown }).localAgent) || /Electron/.test(navigator.userAgent);
 const absolute = (url: string) => new URL(url, window.location.href).toString();
+/** iPhone and iPad (iPadOS reports itself as a Mac with touch). */
+export const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+// iOS drops the tap's permission to open the share sheet if fetching the file takes too long.
+// The fetched file is kept so a second tap opens the sheet straight away.
+const ready = new Map<string, File>();
+
+/** iOS share sheet with the file itself, which offers Save to Files, Save Image, AirDrop and the rest. */
+async function iosShareSheet(url: string, name: string, mime: string) {
+  const nav = navigator as Navigator & { canShare?: (data: ShareData) => boolean };
+  let file = ready.get(url);
+  try {
+    if (!file) {
+      const blob = await (await fetch(url, { credentials: 'same-origin' })).blob();
+      file = new File([blob], name, { type: mime || blob.type });
+      ready.set(url, file);
+    }
+    if (!nav.canShare?.({ files: [file] })) throw new Error('no file share');
+    await nav.share({ files: [file], title: name });
+    ready.delete(url);
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') return;
+    if (error instanceof DOMException && error.name === 'NotAllowedError') { toast(`${name} is ready. Tap Save again to open the share sheet.`, 'info'); return; }
+    window.open(url, '_blank', 'noopener');
+  }
+}
 
 /** Save a file the way the platform expects: Android DownloadManager, Electron's save dialog, or a browser download. */
 export function saveFile(url: string, name: string, mime = 'application/octet-stream') {
@@ -53,6 +79,7 @@ export function saveFile(url: string, name: string, mime = 'application/octet-st
     toast(`Saving ${name} to Downloads…`, 'info');
     return;
   }
+  if (isIOS() && 'share' in navigator) { void iosShareSheet(url, name, mime); return; }
   const a = document.createElement('a');
   a.href = url.includes('download=1') ? url : `${url}${url.includes('?') ? '&' : '?'}download=1`;
   a.download = name;
@@ -73,6 +100,7 @@ export function openExternally(url: string, name: string, mime = 'application/oc
 export async function shareFile(url: string, name: string, mime = 'application/octet-stream') {
   const bridge = android();
   if (bridge?.share) { bridge.share(absolute(url), name, mime); return; }
+  if (isIOS() && 'share' in navigator) { await iosShareSheet(url, name, mime); return; }
   try {
     const nav = navigator as Navigator & { canShare?: (data: ShareData) => boolean };
     const blob = await (await fetch(url, { credentials: 'same-origin' })).blob();

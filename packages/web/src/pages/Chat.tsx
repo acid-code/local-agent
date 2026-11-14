@@ -1,3 +1,4 @@
+import { CuteArt } from '../components/CuteArt';
 import { useEffect, useRef, useState } from 'react';
 import { AtSign, Brain, Check, ChevronDown, Copy, Download, Eye, FileText, Folder, ListTree, Menu, Mic, Paperclip, Pencil, Quote, RotateCcw, Send, Square, Trash2, Wrench, X } from 'lucide-react';
 import { CiteContext, type CiteHandlers } from '../components/Markdown';
@@ -463,7 +464,8 @@ export function Chat() {
             </div>
           )}
           {messages.length === 0 && (
-            <div className="card">
+            <div className="card empty-card">
+              <CuteArt />
               <h3>{current ? 'Say something to start.' : 'No chat open.'}</h3>
               <p className="muted">Ask a question, or try one of these. With no model connected, Rehearsal still streams and calls tools.</p>
               <div className="row">

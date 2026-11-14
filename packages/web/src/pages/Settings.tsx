@@ -1,12 +1,29 @@
 import { useEffect, useState } from 'react';
 import { api, post } from '../lib/api';
 import { toast } from '../lib/toast';
+import { Appearance } from '../components/Appearance';
+import { AccountCard, People, QuotaCard } from '../components/People';
 
 interface Secret { id: string; name: string; handle: string; scope: string; revokedAt: string | null }
 interface Audit { id: number; action: string; actor: string; createdAt: string }
 interface SettingsShape { codeApproval: string; geminiTier: string; sandbox: string; autoResume: boolean; approvalForDestructive: boolean; readOnly?: boolean }
 
-export function Settings() {
+export function Settings({ role = 'owner' }: { role?: 'owner' | 'member' }) {
+  if (role === 'member') {
+    return (
+      <div className="page">
+        <h1>Settings</h1>
+        <p className="lede">Make it yours. Your look, chats, personas and files belong to your account only.</p>
+        <Appearance />
+        <QuotaCard />
+        <AccountCard />
+      </div>
+    );
+  }
+  return <OwnerSettings />;
+}
+
+function OwnerSettings() {
   const [secrets, setSecrets] = useState<Secret[]>([]);
   const [audit, setAudit] = useState<Audit[]>([]);
   const [settings, setSettings] = useState<SettingsShape | null>(null);
@@ -48,10 +65,12 @@ export function Settings() {
       <h1>Settings</h1>
       <p className="lede">Secrets are encrypted with AES-256-GCM under a master key that lives in the data directory, mode 0600. Models receive handles. Traces are redacted. Reveal asks for your password again.</p>
       <nav className="section-tabs" aria-label="Settings sections">
-        {[['health', 'Health'], ['policy', 'Policy'], ['vault', 'Vault'], ['audit', 'Audit'], ['backups', 'Backups'], ['debug', 'Debug'], ['remote', 'Remote']].map(([id, label]) => (
+        {[['appearance', 'Appearance'], ['people', 'People'], ['health', 'Health'], ['policy', 'Policy'], ['vault', 'Vault'], ['audit', 'Audit'], ['backups', 'Backups'], ['debug', 'Debug'], ['remote', 'Remote']].map(([id, label]) => (
           <a key={id} href={`#${id}`} onClick={(event) => { event.preventDefault(); document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' }); history.replaceState(null, '', `#${id}`); }}>{label}</a>
         ))}
       </nav>
+      <Appearance />
+      <People />
       <div className="card" id="health">
         <div className="card-head"><h3>System health</h3><button className="btn" type="button" disabled={checking === 'all'} onClick={() => void refreshHealth()}>{checking === 'all' ? 'Checking…' : 'Refresh health'}</button></div>
         {health.length === 0 && <p className="faint">{checking ? 'Checking Ollama, Docker, SearXNG and the rest…' : 'No results yet.'}</p>}

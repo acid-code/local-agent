@@ -9,18 +9,33 @@ function configPath() {
   return path.join(app.getPath('userData'), 'server.json');
 }
 
-function readUrl() {
+// Everything this laptop keeps lives in userData: server.json (server URL and window colour) plus
+// Chromium's own cookie jar (the sign-in session) and localStorage (a copy of the theme).
+function readConfig() {
   try {
     const parsed = JSON.parse(fs.readFileSync(configPath(), 'utf8'));
-    return validUrl(parsed && parsed.url) || '';
+    return parsed && typeof parsed === 'object' ? parsed : {};
   } catch {
-    return '';
+    return {};
   }
 }
 
-function writeUrl(url) {
+function readUrl() {
+  return validUrl(readConfig().url) || '';
+}
+
+function readBackground() {
+  const value = readConfig().background;
+  return /^#[0-9a-f]{6}$/i.test(String(value || '')) ? value : '#090a0c';
+}
+
+function writeConfig(patch) {
   fs.mkdirSync(path.dirname(configPath()), { recursive: true });
-  fs.writeFileSync(configPath(), JSON.stringify({ url }, null, 2));
+  fs.writeFileSync(configPath(), JSON.stringify({ ...readConfig(), ...patch }, null, 2));
+}
+
+function writeUrl(url) {
+  writeConfig({ url });
 }
 
 function validUrl(value) {
@@ -57,7 +72,7 @@ function createWindow() {
     minWidth: 720,
     minHeight: 560,
     title: 'local-agent',
-    backgroundColor: '#090a0c',
+    backgroundColor: readBackground(),
     autoHideMenuBar: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -76,7 +91,7 @@ function createWindow() {
     if (/^https?:\/\//i.test(url)) {
       // File previews (Open in new tab) get their own window so the console stays put.
       if (sameServer(url) && /\/api\/(files|git)\/[^?]*\/raw/.test(url)) {
-        return { action: 'allow', overrideBrowserWindowOptions: { width: 1000, height: 800, autoHideMenuBar: true, backgroundColor: '#090a0c', webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } } };
+        return { action: 'allow', overrideBrowserWindowOptions: { width: 1000, height: 800, autoHideMenuBar: true, backgroundColor: readBackground(), webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } } };
       }
       if (sameServer(url)) win.loadURL(url);
       else void shell.openExternal(url);
@@ -138,6 +153,16 @@ function createWindow() {
 }
 
 ipcMain.handle('get-url', () => readUrl());
+
+// The web app reports its theme background so the window opens in the right colour next time.
+ipcMain.handle('set-background', (event, value) => {
+  const color = String(value || '');
+  if (!/^#[0-9a-f]{6}$/i.test(color)) return { ok: false };
+  if (color !== readConfig().background) writeConfig({ background: color });
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (win) win.setBackgroundColor(color);
+  return { ok: true };
+});
 
 ipcMain.handle('set-url', (event, value) => {
   const url = validUrl(value);

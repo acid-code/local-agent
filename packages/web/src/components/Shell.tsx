@@ -5,6 +5,9 @@ import { Toaster } from './Toaster';
 import { api, post } from '../lib/api';
 import { Face, type FaceAgent } from './Face';
 
+/** Pages a member account can open. Everything else is owner admin and the server refuses it anyway. */
+const MEMBER_PAGES = new Set(['/', '/agents', '/workspace', '/runs', '/schedules', '/library', '/settings']);
+
 const LINKS = [
   ['/', 'Chats', MessageSquare],
   ['/agents', 'Agents', Users],
@@ -24,7 +27,8 @@ const LINKS = [
 
 interface Persona extends FaceAgent { id: string; title?: string; pinned?: boolean; hidden?: boolean; unread?: number }
 
-export function Shell({ username, onLogout, children }: { username: string; onLogout: () => void; children: ReactNode }) {
+export function Shell({ username, role = 'owner', onLogout, children }: { username: string; role?: 'owner' | 'member'; onLogout: () => void; children: ReactNode }) {
+  const links = role === 'owner' ? LINKS : LINKS.filter(([to]) => MEMBER_PAGES.has(to));
   const [open, setOpen] = useState(false);
   const [palette, setPalette] = useState(false);
   const [query, setQuery] = useState('');
@@ -64,6 +68,7 @@ export function Shell({ username, onLogout, children }: { username: string; onLo
   }, []);
 
   useEffect(() => {
+    if (role !== 'owner') return;
     const tick = () => api<{ approvals: unknown[]; requests?: unknown[] }>('/api/vault').then((data) => setPending((data.requests?.length || 0))).catch(() => undefined);
     tick();
     const id = setInterval(tick, 8000);
@@ -88,7 +93,7 @@ export function Shell({ username, onLogout, children }: { username: string; onLo
     await post('/api/agents/reorder', { ids: next.map((persona) => persona.id) });
   }
 
-  const actions = useMemo(() => LINKS.map(([to, label]) => ({ to, label })), []);
+  const actions = useMemo(() => links.map(([to, label]) => ({ to, label })), [role]);
   const filtered = actions.filter((item) => item.label.toLowerCase().includes(query.toLowerCase()));
 
   return (
@@ -96,12 +101,12 @@ export function Shell({ username, onLogout, children }: { username: string; onLo
       {open && <div className="scrim drawer-scrim" onClick={() => setOpen(false)} />}
       <aside id="main-sidebar" className={open ? 'sidebar open' : 'sidebar'} aria-label="Main menu">
         <div className="brand">
-          <svg className="mark" viewBox="0 0 64 64" aria-hidden><circle cx="32" cy="32" r="18" fill="none" stroke="#e4b56a" strokeWidth="4"/><circle cx="32" cy="32" r="5" fill="#e4b56a"/></svg>
+          <svg className="mark" viewBox="0 0 64 64" aria-hidden><circle cx="32" cy="32" r="18" fill="none" stroke="var(--brass)" strokeWidth="4"/><circle cx="32" cy="32" r="5" fill="var(--brass)"/></svg>
           <div className="word"><i>local</i><span>agent</span></div>
           <button className="icon-btn drawer-close" aria-label="Close menu" onClick={() => setOpen(false)}><X size={18} /></button>
         </div>
         <nav className="nav">
-          {LINKS.map(([to, label, Icon]) => (
+          {links.map(([to, label, Icon]) => (
             <NavLink key={to} to={to} end={to === '/'} title={collapsed ? label : undefined} aria-label={label} className={({ isActive }) => isActive ? 'active' : ''} onClick={() => setOpen(false)}>
               <Icon aria-hidden /> <span className="label">{label}</span>
             </NavLink>
@@ -115,7 +120,7 @@ export function Shell({ username, onLogout, children }: { username: string; onLo
         )}
         <div className="persona-list">
           {personas.map((persona, index) => (
-            <div key={persona.id} className="persona-row" style={{ ['--accent' as string]: persona.accent || '#e4b56a' }}>
+            <div key={persona.id} className="persona-row" style={{ ['--accent' as string]: persona.accent || 'var(--brass)' }}>
               <button className="persona-open" title={persona.name} onClick={() => { navigate(`/?persona=${persona.id}`); setOpen(false); }}>
                 <Face agent={persona} size={28} />
                 <span className="label">
@@ -134,7 +139,7 @@ export function Shell({ username, onLogout, children }: { username: string; onLo
           ))}
         </div>
         <div className="side-foot">
-          <span className="ellipsis" title={username}>{username}</span>
+          <span className="ellipsis" title={username}>{username}{role === 'member' && <small className="faint"> · member</small>}</span>
           <button className="btn ghost small" onClick={onLogout} aria-label="Sign out" title="Sign out"><LogOut size={15} aria-hidden /><span className="label">Sign out</span></button>
         </div>
       </aside>
@@ -150,7 +155,7 @@ export function Shell({ username, onLogout, children }: { username: string; onLo
         <nav className="bottom-nav" aria-label="Quick navigation">
           <NavLink to="/" end><MessageSquare size={18} /><span>Chat</span></NavLink>
           <NavLink to="/runs"><Activity size={18} /><span>Runs</span></NavLink>
-          <NavLink to="/setup"><ListChecks size={18} /><span>Setup</span></NavLink>
+          {role === 'owner' ? <NavLink to="/setup"><ListChecks size={18} /><span>Setup</span></NavLink> : <NavLink to="/agents"><Users size={18} /><span>Agents</span></NavLink>}
           <button type="button" className={open ? 'active' : ''} onClick={() => setOpen(true)}><MoreHorizontal size={18} /><span>More</span></button>
         </nav>
         <Toaster />

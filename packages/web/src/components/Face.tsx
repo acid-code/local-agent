@@ -1,3 +1,5 @@
+import { onColor } from '@local-agent/shared';
+
 export interface FaceAgent {
   id?: string;
   name: string;
@@ -27,7 +29,7 @@ export function Face({ agent, size = 32 }: { agent: FaceAgent; size?: number }) 
     return <Builtin id={agent.avatarRef} accent={accent} size={size} />;
   }
   const initials = agent.name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join('') || 'A';
-  return <span className="face initials" style={{ background: accent, width: size, height: size, fontSize: size * 0.38 }}>{initials}</span>;
+  return <span className="face initials" style={{ background: accent, color: /^#[0-9a-f]{6}$/i.test(accent) ? onColor(accent) : undefined, width: size, height: size, fontSize: size * 0.38 }}>{initials}</span>;
 }
 
 function Builtin({ id, accent, size }: { id: string; accent: string; size: number }) {

@@ -53,7 +53,7 @@ export function Resources() {
       )}
       {snap.flags.map((flag) => <p key={flag.text} className="badge warn">{flag.text}</p>)}
       <svg viewBox="0 0 240 48" width="100%" height="48" role="img" aria-label="Available memory trend">
-        <polyline fill="none" stroke="#e4b56a" strokeWidth="2" points={samples.map((sample, index) => `${(index / Math.max(samples.length - 1, 1)) * 240},${46 - ((sample.availableGiB || 0) / max) * 40}`).join(' ')} />
+        <polyline fill="none" stroke="var(--brass)" strokeWidth="2" points={samples.map((sample, index) => `${(index / Math.max(samples.length - 1, 1)) * 240},${46 - ((sample.availableGiB || 0) / max) * 40}`).join(' ')} />
       </svg>
       <div className="grid cards">
         {snap.agents.map((agent) => (
