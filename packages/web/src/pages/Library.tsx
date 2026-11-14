@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, post } from '../lib/api';
+import { EmptyState, PageHeader } from '../components/ui';
+import { Library as LibraryIcon, Plus } from 'lucide-react';
 
 interface KbFile { id: string; name: string; bytes: number }
 
@@ -26,6 +28,7 @@ export function Library() {
   const [hits, setHits] = useState<Hit[]>([]);
   const [note, setNote] = useState('');
   const [files, setFiles] = useState<KbFile[]>([]);
+  const [adding, setAdding] = useState(false);
 
   async function load() {
     setCollections((await api<{ collections: Collection[] }>('/api/kb/collections')).collections);
@@ -42,14 +45,14 @@ export function Library() {
 
   return (
     <div className="page">
-      <h1>Library</h1>
-      <p className="lede">Drop PDF, DOCX, Markdown, text, HTML, or code. Collections are shared, or kept to one persona. Search mixes a local embedding with BM25 and cites the passage.</p>
-      <form className="card" onSubmit={async (event) => {
+      <PageHeader title="Library" description="Documents your personas can search and cite: PDF, DOCX, Markdown, text, HTML or code. Collections are shared or kept to one persona." actions={<button className="btn primary" aria-expanded={adding} onClick={() => setAdding((v) => !v)}><Plus size={16} aria-hidden /> New collection</button>} />
+      {adding && (
+      <form className="card section" onSubmit={async (event) => {
         event.preventDefault();
         const created = await post<{ collection: Collection }>('/api/kb/collections', { name, agentId: agentId || null });
         setActive(created.collection.id);
         setName('Notes');
-        await load();
+        await load(); setAdding(false);
       }}>
         <label className="field"><span>Collection</span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
         <label className="field"><span>Scope</span>
@@ -60,6 +63,8 @@ export function Library() {
         </label>
         <button className="btn primary">Create collection</button>
       </form>
+      )}
+      {!adding && collections.length === 0 && <EmptyState icon={LibraryIcon} title="No collections yet" action={<button className="btn primary" onClick={() => setAdding(true)}>New collection</button>}>Create a collection, then drop files into it. Answers cite the passage they came from.</EmptyState>}
       {collections.map((collection) => (
         <article key={collection.id} className="card">
           <h3>{collection.name}</h3>

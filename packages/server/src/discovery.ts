@@ -185,7 +185,7 @@ export function checklist(report: DiscoveryReport | null, store: Store) {
     { id: 'gpu', title: 'GPU / GTT', ok: Boolean(report?.gpu), detail: report?.gpu?.note ?? 'No render node was visible.', optional: true },
     { id: 'searxng', title: 'SearXNG', ok: Boolean(report?.searxng || settings.searxngUrl), detail: report?.searxng || settings.searxngUrl || 'Optional. One click starts a container on port 8088.', optional: true },
     { id: 'tailscale', title: 'Tailscale', ok: Boolean(report?.tailscale), detail: report?.tailscale ? `Reach the UI at http://${report.tailscale}:${process.env.LA_PORT || 8787}` : 'Preferred remote path. Install Tailscale on the box and on your phone.', optional: true },
-    { id: 'quota', title: 'Gemini free tier', ok: true, detail: 'Flash Lite is the roomy default (500 requests/day). Hydrogen is the free reasoning model. Argon and Carbon are closed on this key.', optional: true },
+    { id: 'quota', title: 'Gemini free tier', ok: true, detail: process.env.GEMINI_API_KEY ? 'Gemini is connected. Usage counts only this install\'s calls, checked against the documented free-tier limits (Flash Lite: 500 requests/day).' : 'Optional. Gemini is not connected. Add a GEMINI_API_KEY in setup to use the free tier as a fallback.', optional: true },
     { id: 'embed', title: 'Local embeddings', ok: Boolean(report?.ollama?.models.some((model) => model.name.split(':')[0] === 'nomic-embed-text')), detail: report?.ollama?.models.some((model) => model.name.split(':')[0] === 'nomic-embed-text') ? 'nomic-embed-text is available for the knowledge base.' : 'Optional. Pull nomic-embed-text so collections use Ollama embeddings. Until then, search still runs on a local hash.', optional: true },
   ];
   return items;

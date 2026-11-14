@@ -29,6 +29,15 @@ function readBackground() {
   return /^#[0-9a-f]{6}$/i.test(String(value || '')) ? value : '#090a0c';
 }
 
+// Window controls drawn by the OS over our own header (Windows/Linux); symbols follow the theme.
+const TITLEBAR_HEIGHT = 40;
+function overlayFor(color) {
+  const hex = /^#[0-9a-f]{6}$/i.test(color) ? color : '#090a0c';
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  const light = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 > 0.6;
+  return { color: hex, symbolColor: light ? '#1f1f1f' : '#e8e8e8', height: TITLEBAR_HEIGHT };
+}
+
 function writeConfig(patch) {
   fs.mkdirSync(path.dirname(configPath()), { recursive: true });
   fs.writeFileSync(configPath(), JSON.stringify({ ...readConfig(), ...patch }, null, 2));
@@ -73,7 +82,10 @@ function createWindow() {
     minHeight: 560,
     title: 'local-agent',
     backgroundColor: readBackground(),
-    autoHideMenuBar: false,
+    // No OS title bar: the app header is the title bar (drag region set by the web app via data-desktop).
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
+    ...(process.platform === 'darwin' ? { trafficLightPosition: { x: 14, y: 13 } } : { titleBarOverlay: overlayFor(readBackground()) }),
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -144,7 +156,8 @@ function createWindow() {
         { role: 'resetZoom' },
         { type: 'separator' },
         { role: 'togglefullscreen' },
-        { role: 'toggleDevTools' },
+        // F12, so Ctrl+Shift+I stays free for the persona info pane.
+        { role: 'toggleDevTools', accelerator: 'F12' },
       ],
     },
   ]);
@@ -160,7 +173,10 @@ ipcMain.handle('set-background', (event, value) => {
   if (!/^#[0-9a-f]{6}$/i.test(color)) return { ok: false };
   if (color !== readConfig().background) writeConfig({ background: color });
   const win = BrowserWindow.fromWebContents(event.sender);
-  if (win) win.setBackgroundColor(color);
+  if (win) {
+    win.setBackgroundColor(color);
+    if (process.platform !== 'darwin' && typeof win.setTitleBarOverlay === 'function') { try { win.setTitleBarOverlay(overlayFor(color)); } catch { /* window without an overlay */ } }
+  }
   return { ok: true };
 });
 

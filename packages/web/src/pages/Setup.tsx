@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, post } from '../lib/api';
+import { PageHeader } from '../components/ui';
+import { RefreshCw } from 'lucide-react';
 
 interface Item { id: string; title: string; ok: boolean; detail: string; optional: boolean }
 interface Preview { command: string; detail: string }
@@ -26,9 +28,7 @@ export function Setup() {
 
   return (
     <div className="page">
-      <h1>Setup</h1>
-      <p className="lede">Nothing runs until you can read the exact command. Scan first, then pull a small model or start SearXNG if you want them.</p>
-      <button className="btn primary" disabled={scanning} onClick={() => void scan()}>{scanning ? 'Scanning…' : 'Scan again'}</button>
+      <PageHeader title="Setup" description="Nothing runs until you can read the exact command. Scan this machine, then pull a small model or start SearXNG if you want them." actions={<button className="btn primary" disabled={scanning} onClick={() => void scan()}><RefreshCw size={15} aria-hidden className={scanning ? 'spin' : undefined} /> {scanning ? 'Scanning…' : 'Scan again'}</button>} />
       <div className="checklist" style={{ marginTop: 16 }}>
         {items.map((item) => (
           <article key={item.id} className="card check">

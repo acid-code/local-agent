@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, post } from '../lib/api';
+import { EmptyState, PageHeader } from '../components/ui';
+import { Plus, Zap } from 'lucide-react';
 
 interface Agent { id: string; name: string }
 interface EventRow { id: string; status: string; summary: string; createdAt: string; runId: string | null }
@@ -21,6 +23,7 @@ export function Triggers() {
   const [userSecret, setUserSecret] = useState('IMAP_USER');
   const [passwordSecret, setPasswordSecret] = useState('IMAP_PASSWORD');
   const [created, setCreated] = useState<{ url: string | null; secret: string } | null>(null);
+  const [adding, setAdding] = useState(false);
 
   async function load() {
     setRows((await api<{ triggers: Trigger[] }>('/api/triggers')).triggers);
@@ -32,14 +35,14 @@ export function Triggers() {
 
   return (
     <div className="page">
-      <h1>Triggers</h1>
-      <p className="lede">A trigger starts a normal run. The event is the user message, and the run uses the same checkpoints as a chat. Webhook and GitHub URLs are on this box, so Tailscale can reach them. The inbox poll only examines the mailbox. It never sends mail.</p>
-      <form className="card" onSubmit={async (event) => {
+      <PageHeader title="Triggers" description="Start a run from an event: a webhook, a GitHub push, a file in a folder, or new mail. The event becomes the message." actions={<button className="btn primary" aria-expanded={adding} onClick={() => setAdding((v) => !v)}><Plus size={16} aria-hidden /> New trigger</button>} />
+      {adding && (
+      <form className="card section" onSubmit={async (event) => {
         event.preventDefault();
         const config = kind === 'folder' ? { path, debounceMs: 1500 } : kind === 'imap' ? { host, userSecret, passwordSecret, mailbox: 'INBOX' } : {};
         const result = await post<{ url: string | null; secret: string }>('/api/triggers', { name, kind, agentId, prompt, config });
         setCreated(result);
-        await load();
+        await load(); setAdding(false);
       }}>
         <label className="field"><span>Persona</span><select value={agentId} onChange={(event) => setAgentId(event.target.value)}>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label>
         <label className="field"><span>Name</span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
@@ -62,6 +65,8 @@ export function Triggers() {
         <label className="field"><span>Prompt</span><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} /></label>
         <button className="btn primary">Create trigger</button>
       </form>
+      )}
+      {!adding && rows.length === 0 && <EmptyState icon={Zap} title="No triggers yet" action={<button className="btn primary" onClick={() => setAdding(true)}>New trigger</button>}>A trigger turns an outside event into a normal run with checkpoints, like a webhook from CI.</EmptyState>}
       {created && (
         <article className="card">
           <p>Secret, shown once: <span className="mono">{created.secret}</span></p>

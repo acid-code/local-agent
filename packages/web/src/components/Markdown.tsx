@@ -4,7 +4,7 @@ import rehypeHighlight from 'rehype-highlight';
 import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
-import { AtSign, CornerUpLeft, FileText, Quote } from 'lucide-react';
+import { AtSign, Check, Copy, CornerUpLeft, FileText, Quote } from 'lucide-react';
 import { fileMeta, linkCitations, parseCiteHref, type Cite } from '../lib/files';
 
 /** How citation chips and code-block quotes reach the chat. */
@@ -55,19 +55,29 @@ export function Markdown({ text, streaming = false, sourceId }: { text: string; 
               if (cite) return <CiteChip cite={cite}>{children}</CiteChip>;
               return <a href={href} target="_blank" rel="noreferrer">{children}</a>;
             },
-            pre: ({ children }) => (
-              <div className="code-block">
-                <pre>{children}</pre>
-                {handlers?.quoteCode && sourceId && !streaming && (
-                  <button type="button" className="code-quote" title="Quote this code" aria-label="Quote this code" onClick={() => handlers.quoteCode?.(textOf(children), sourceId)}><Quote size={13} /> Quote</button>
-                )}
-              </div>
-            ),
+            pre: ({ children }) => <CodeBlock sourceId={streaming ? undefined : sourceId} onQuote={handlers?.quoteCode}>{children}</CodeBlock>,
           }}
         >
           {linkCitations(body) || (streaming ? '' : '…')}
         </ReactMarkdown>
       </div>
+    </div>
+  );
+}
+
+function CodeBlock({ children, sourceId, onQuote }: { children: ReactNode; sourceId?: string; onQuote?: (code: string, sourceId: string) => void }) {
+  const [copied, setCopied] = useState(false);
+  const child = (Array.isArray(children) ? children[0] : children) as { props?: { className?: string } } | undefined;
+  const lang = /language-([\w+#-]+)/.exec(child?.props?.className || '')?.[1] || 'text';
+  return (
+    <div className="code-block">
+      <div className="code-head">
+        <span className="code-lang">{lang}</span>
+        <span className="spacer" />
+        {onQuote && sourceId && <button type="button" className="code-btn" title="Quote this code in your reply" onClick={() => onQuote(textOf(children), sourceId)}><Quote size={13} aria-hidden /> Quote</button>}
+        <button type="button" className="code-btn" title="Copy code" onClick={() => { void navigator.clipboard?.writeText(textOf(children)).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }); }}>{copied ? <Check size={13} aria-hidden /> : <Copy size={13} aria-hidden />} {copied ? 'Copied' : 'Copy'}</button>
+      </div>
+      <pre>{children}</pre>
     </div>
   );
 }

@@ -20,6 +20,7 @@ export function applyTheme(choice: ThemeChoice) {
   for (const [name, value] of Object.entries(vars)) root.style.setProperty(name, value);
   root.dataset.scheme = scheme;
   root.dataset.theme = preset.id;
+  root.dataset.flat = preset.cute ? 'off' : 'on';
   root.dataset.density = choice.density || 'cozy';
   root.dataset.bubbles = choice.bubbles || 'classic';
   root.dataset.decor = decor ? 'on' : 'off';

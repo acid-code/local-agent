@@ -122,6 +122,11 @@ else
 fi
 
 if [[ "$WITH_OLLAMA" -eq 1 ]] && ! command -v ollama >/dev/null 2>&1; then
+  # The Ollama installer unpacks a .tar.zst and fails without zstd.
+  if ! command -v zstd >/dev/null 2>&1; then
+    run apt-get update
+    run apt-get install -y zstd
+  fi
   run bash -lc 'curl -fsSL https://ollama.com/install.sh | sh'
 fi
 if [[ "$WITH_TAILSCALE" -eq 1 ]] && ! command -v tailscale >/dev/null 2>&1; then
@@ -129,9 +134,22 @@ if [[ "$WITH_TAILSCALE" -eq 1 ]] && ! command -v tailscale >/dev/null 2>&1; then
   echo "After install, run: tailscale up"
 fi
 
-if [[ "$MODE" == "native" ]] && ! command -v node >/dev/null 2>&1; then
+# The server needs Node 22.13 or newer (node:sqlite without a flag). Upgrade an older Node in place.
+node_ok() {
+  command -v node >/dev/null 2>&1 || return 1
+  local version major minor
+  version="$(node -p 'process.versions.node' 2>/dev/null)" || return 1
+  major="${version%%.*}"; minor="${version#*.}"; minor="${minor%%.*}"
+  (( major > 22 || (major == 22 && minor >= 13) ))
+}
+if [[ "$MODE" == "native" ]] && ! node_ok; then
+  if command -v node >/dev/null 2>&1; then echo "Node $(node -v) is older than 22.13. Upgrading to Node 22 from NodeSource."; fi
   run bash -lc 'curl -fsSL https://deb.nodesource.com/setup_22.x | bash -'
   run apt-get install -y nodejs
+  if [[ "$DRY_RUN" -eq 0 ]] && ! node_ok; then
+    echo "Node is still $(node -v 2>/dev/null || echo missing). Remove the distro nodejs package (apt-get remove nodejs) and re-run." >&2
+    exit 1
+  fi
 fi
 
 run mkdir -p "$INSTALL_ROOT"

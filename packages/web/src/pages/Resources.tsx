@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, post } from '../lib/api';
+import { EmptyState, PageHeader } from '../components/ui';
+import { Cpu, RefreshCw } from 'lucide-react';
 
 interface Snapshot {
   memory: { totalGiB: number; availableGiB: number };
@@ -24,19 +26,18 @@ export function Resources() {
     setSamples((await api<{ samples: { availableGiB?: number }[] }>('/api/resources/trends?hours=24')).samples);
   }
   useEffect(() => { void load(); }, []);
-  if (!snap) return <div className="page">Measuring…</div>;
+  if (!snap) return <div className="page"><PageHeader title="Resources" description="Measuring memory and disk…" /><div className="skeleton-lines"><span /><span /><span /></div></div>;
   const max = Math.max(...samples.map((sample) => sample.availableGiB || 0), 1);
 
   return (
     <div className="page">
-      <h1>Resources</h1>
-      <p className="lede">RAM, disk, and per-agent weight. Prune actions show what they will free before anything is removed. Archiving history is reversible. Deleting an image is not.</p>
+      <PageHeader title="Resources" description="Memory, disk and what each persona weighs. Prune actions show what they free before anything is removed. Archiving history is reversible; deleting an image is not." actions={<button className="btn" onClick={() => void load()}><RefreshCw size={15} aria-hidden /> Refresh</button>} />
       <div className="grid cards">
         <article className="card"><h3>Memory</h3><p>{snap.memory.availableGiB.toFixed(1)} GiB free of {snap.memory.totalGiB.toFixed(1)}</p><div className="meter"><span style={{ width: `${100 - (snap.memory.availableGiB / Math.max(snap.memory.totalGiB, 1)) * 100}%` }} /></div></article>
         <article className="card"><h3>Disk</h3><p>{gb(snap.disk.freeBytes)} free of {gb(snap.disk.totalBytes)}</p><p className="faint">Data directory {gb(snap.dataBytes)}</p></article>
         <article className="card"><h3>GPU / GTT</h3><p>{snap.gpu ? snap.gpu.name : 'Not visible'}</p><p className="muted">{snap.gpu?.note}</p></article>
         <article className="card"><h3>Loaded models</h3>
-          {(snap.loadedModels ?? []).length === 0 && <p className="muted">No model is loaded in Ollama.</p>}
+          {(snap.loadedModels ?? []).length === 0 && <EmptyState icon={Cpu} title="No model loaded">Ollama loads a model on the first message and frees it when idle.</EmptyState>}
           {(snap.loadedModels ?? []).map((model) => (
             <p key={model.name} className="mono">{model.name} · context {model.contextLength ?? 'not reported'}{model.sizeBytes ? ` · ${(model.sizeBytes / 1024 ** 3).toFixed(1)} GB` : ''}</p>
           ))}
