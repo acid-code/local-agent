@@ -6,7 +6,7 @@ import { buildApp } from '../src/app.js';
 import { splitThinking } from '../src/engine.js';
 import { providerFor, type ModelProvider, type ProviderEvent } from '../src/providers.js';
 import type { Store } from '../src/db.js';
-import { decideAuto, likelyNeedsTools, nextAutoTier, DEFAULT_AUTO_MAP } from '@local-agent/shared';
+import { decideAuto, foldCandidates, likelyNeedsTools, nextAutoTier, DEFAULT_AUTO_MAP } from '@local-agent/shared';
 import { doctorChecks, geminiStateOf } from '../src/debug.js';
 
 const dirs: string[] = [];
@@ -262,5 +262,32 @@ describe('Gemini off', () => {
     expect(check.ok).toBe(true);
     expect(check.detail).toMatch(/Gemini is off/);
     expect(doctorChecks({ ...base, geminiOpen: false }).find((item) => item.id === 'gemini')!.detail).toMatch(/quota/);
+  });
+});
+
+describe('long messages', () => {
+  it('says what was cut from a long message, and folds early near the budget', async () => {
+    const dir = tmp();
+    const provider: ModelProvider = {
+      async *complete() {
+        yield { type: 'token', text: 'read it' };
+        yield { type: 'done', finishReason: 'stop', usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+    };
+    const { app, store, engine } = await buildApp({ dataDir: dir, startScheduler: false, serveWeb: false, providerOverride: () => provider });
+    addLocal(store, 'main', 'qwen3:0.6b', 'large', 32768);
+    const agent = store.createAgent({ name: 'House', systemPrompt: 'Be brief.', toolAllowlist: [], workspacePath: dir });
+    const session = store.createSession({ agentId: agent.id, title: 'Long' });
+    const run = await engine.startTurn({ sessionId: session.id, agentId: agent.id, content: `Please review this. ${'lorem ipsum '.repeat(2500)}`, wait: true });
+    expect(run.status).toBe('completed');
+    const answer = store.listMessages(session.id).at(-1)!;
+    expect(answer.routingNote).toMatch(/Cut [\d,]+ characters from the middle of a long message/);
+    expect(store.listSteps(run.id).some((step) => step.kind === 'context' && step.name === 'excerpt')).toBe(true);
+    await app.close();
+
+    const big = 'x '.repeat(2000);
+    const messages = [{ id: 'a', role: 'user' as const, content: big }, { id: 'b', role: 'assistant' as const, content: big }, { id: 'c', role: 'user' as const, content: big }];
+    expect(foldCandidates(messages, new Set(), 'approx', 1800)).toBeNull();
+    expect(foldCandidates(messages, new Set(), 'approx', 1800, 2000)).toEqual(['a']);
   });
 });

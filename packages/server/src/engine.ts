@@ -464,7 +464,7 @@ export class Engine {
         : `${model.name} returned an empty answer twice. Try again or pick another model.`;
     }
     const cost = ((usage.inputTokens * (model.priceIn ?? 0)) + (usage.outputTokens * (model.priceOut ?? 0))) / 1_000_000;
-    const note = current.cursor.switched ? current.cursor.routingReason ?? null : null;
+    const note = [current.cursor.switched ? current.cursor.routingReason : '', built.cutNote].filter(Boolean).join(' ') || null;
     text = this.vault.redact(text);
     const assistant = this.store.insertMessage({
       sessionId: run.sessionId, role: 'assistant', content: text, toolCalls: toolCalls?.length ? toolCalls : null,
@@ -806,6 +806,16 @@ export class Engine {
     for (const piece of plan.excerpted) {
       if (piece.omitted.length > 80) indexText(this.store, this.vectors, { sessionId: run.sessionId, agentId: agent.id, text: piece.omitted.slice(0, 4000) });
     }
+    const cut = plan.excerpted.filter((piece) => piece.omitted.length > 0 && recentRole(messages, piece.id) !== 'tool');
+    const cutNote = cut.length
+      ? `Cut ${cut.reduce((sum, piece) => sum + piece.omitted.length, 0).toLocaleString('en-US')} characters from the middle of ${cut.length === 1 ? 'a long message' : `${cut.length} long messages`} to fit ${model.name}. The start and end were kept.`
+      : '';
+    if (cutNote && run.cursor.turn === 0) {
+      this.store.addStep({
+        runId: run.id, kind: 'context', name: 'excerpt', status: 'completed', input: { excerpted: cut.map((piece) => ({ id: piece.id, omittedChars: piece.omitted.length })) },
+        output: cutNote, toolCallId: null, turn: run.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now(),
+      });
+    }
     this.bus.publish({ type: 'context', runId: run.id, used: plan.estimatedTokens, budget: plan.budgetTokens });
     const recent = new Map(messages.map((message) => [message.id, message]));
     const chat: ChatMessage[] = [{ role: 'system', content: plan.preamble }];
@@ -818,7 +828,7 @@ export class Engine {
         name: message.toolName ?? undefined, toolCalls: (message.toolCalls as ToolCall[] | null) ?? undefined, imageUrl: message.imageUrl ?? undefined,
       });
     }
-    return { plan, messages: chat };
+    return { plan, messages: chat, cutNote };
   }
 
   private async maybeFold(sessionId: string, agent: Agent, model: ModelRow) {
@@ -826,7 +836,7 @@ export class Engine {
     const messages = this.store.listMessages(sessionId);
     const summaries = this.store.listSummaries(sessionId);
     const covered = new Set(summaries.flatMap((summary) => summary.covers));
-    const ids = foldCandidates(messages.map((message) => ({ id: message.id, role: message.role as 'user', content: message.content })), covered, model.tokenizer as 'approx', summaryTriggerFor(model, settings.summaryTriggerTokens));
+    const ids = foldCandidates(messages.map((message) => ({ id: message.id, role: message.role as 'user', content: message.content })), covered, model.tokenizer as 'approx', summaryTriggerFor(model, settings.summaryTriggerTokens), Math.min(model.contextWindow, model.practicalBudget) - settings.outputReserveTokens);
     if (!ids) return;
     const slice = messages.filter((message) => ids.includes(message.id));
     const transcript = slice.map((message) => `${message.role}: ${message.content}`).join('\n').slice(0, 12_000);
@@ -1234,6 +1244,10 @@ export function splitThinking(text: string): { answer: string; reasoning: string
     answer = answer.slice(0, open.index);
   }
   return { answer: parts.length ? answer.trim() : answer, reasoning: parts.filter(Boolean).join('\n') };
+}
+
+function recentRole(messages: { id: string; role: string }[], id: string) {
+  return messages.find((message) => message.id === id)?.role;
 }
 
 function isProviderOutage(message: string): boolean {
