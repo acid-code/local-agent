@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { api, post } from '../lib/api';
 
+interface KbFile { id: string; name: string; bytes: number }
+
 interface Collection { id: string; name: string; agentId: string | null; rootPath: string | null; embedder: string; documents: number; bytes: number; chunks: number }
 interface Agent { id: string; name: string }
 interface Hit { collection: string; document: string; path: string | null; heading: string; text: string; score: number }
@@ -23,12 +25,20 @@ export function Library() {
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState<Hit[]>([]);
   const [note, setNote] = useState('');
+  const [files, setFiles] = useState<KbFile[]>([]);
 
   async function load() {
     setCollections((await api<{ collections: Collection[] }>('/api/kb/collections')).collections);
     setAgents((await api<{ agents: Agent[] }>('/api/agents')).agents);
   }
   useEffect(() => { void load(); }, []);
+  async function loadFiles(id = active) {
+    setFiles(id ? (await api<{ files: KbFile[] }>(`/api/kb/collections/${id}/files`)).files : []);
+  }
+  useEffect(() => { void loadFiles(); }, [active]);
+  async function run(action: () => Promise<void>) {
+    try { await action(); } catch (error) { setNote(error instanceof Error ? error.message : 'Failed.'); }
+  }
 
   return (
     <div className="page">
@@ -57,7 +67,19 @@ export function Library() {
           <div className="row">
             <button className="btn" onClick={() => setActive(collection.id)}>{active === collection.id ? 'Selected' : 'Use this one'}</button>
             {collection.rootPath && <button className="btn" onClick={async () => { await post(`/api/kb/collections/${collection.id}/reindex`, {}); setNote('Re-indexed.'); await load(); }}>Re-index folder</button>}
+            <button className="btn" onClick={() => run(async () => {
+              if (!window.confirm(`Delete ${collection.name} and its ${collection.documents} files from the index?`)) return;
+              await api(`/api/kb/collections/${collection.id}`, { method: 'DELETE' });
+              if (active === collection.id) setActive('');
+              setNote(`Deleted ${collection.name}.`);
+              await load();
+            })}>Delete</button>
           </div>
+          {active === collection.id && files.map((file) => (
+            <p key={file.id} className="row faint">{file.name} · {file.bytes} bytes
+              <button className="btn" onClick={() => run(async () => { await api(`/api/kb/collections/${collection.id}/files/${file.id}`, { method: 'DELETE' }); setNote(`Removed ${file.name}.`); await load(); await loadFiles(); })}>Remove</button>
+            </p>
+          ))}
         </article>
       ))}
       {active && (
@@ -66,9 +88,12 @@ export function Library() {
           const input = (event.currentTarget.elements.namedItem('files') as HTMLInputElement).files;
           if (!input?.length) return;
           const files = await Promise.all([...input].map(async (file) => ({ name: file.name, contentBase64: await toBase64(file) })));
-          const result = await post<{ results: { name: string; skipped: boolean; chunks: number }[] }>(`/api/kb/collections/${active}/files`, { files });
-          setNote(result.results.map((file) => `${file.name}: ${file.skipped ? 'unchanged' : `${file.chunks} chunks`}`).join(' · '));
+          await run(async () => {
+            const result = await post<{ results: { name: string; skipped?: boolean; chunks?: number; error?: string }[] }>(`/api/kb/collections/${active}/files`, { files });
+            setNote(result.results.map((file) => `${file.name}: ${file.error || (file.skipped ? 'unchanged' : `${file.chunks} chunks`)}`).join(' · '));
+          });
           await load();
+          await loadFiles();
         }}>
           <h3>Drop files</h3>
           <input name="files" type="file" multiple accept=".pdf,.docx,.md,.txt,.html,.htm,.ts,.tsx,.js,.py,.go,.rs,.json,.yml,.yaml" />

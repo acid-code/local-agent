@@ -60,10 +60,29 @@ jobs:
         run: |
           set -euo pipefail
           short="${GITHUB_SHA::7}"
+          tag="main-${short}"
           apk="$(find apps/mobile/android/app/build/outputs/apk/release -name '*.apk' -print -quit)"
           test -n "$apk"
           cp "$apk" "local-agent-${short}.apk"
-          gh release create "main-${short}" "local-agent-${short}.apk" \
-            --title "local-agent ${short}" \
-            --latest \
-            --notes "Android shell for the web console. ${APK_NOTE}."
+          note="Android shell for the web console. ${APK_NOTE}."
+          # The Windows workflow publishes the same tag. Create the release, or upload if it already exists.
+          for attempt in 1 2 3 4 5 6; do
+            if gh release view "$tag" >/dev/null 2>&1; then
+              gh release upload "$tag" "local-agent-${short}.apk" --clobber
+              body="$(gh release view "$tag" --json body --jq .body)"
+              case "$body" in
+                *"$note"*) ;;
+                *) gh release edit "$tag" --notes "${body}"$'\n\n'"${note}" ;;
+              esac
+              exit 0
+            fi
+            if gh release create "$tag" "local-agent-${short}.apk" \
+              --title "local-agent ${short}" \
+              --latest \
+              --notes "$note"; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Could not publish ${tag}" >&2
+          exit 1

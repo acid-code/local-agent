@@ -8,6 +8,8 @@ export interface Usage {
 
 export type ProviderEvent =
   | { type: 'token'; text: string }
+  /** Reasoning text from thinking models. Never part of the answer. */
+  | { type: 'thinking'; text: string }
   | { type: 'done'; finishReason: string; toolCalls?: ToolCall[]; usage?: Usage };
 
 export interface ModelProvider {
@@ -21,6 +23,8 @@ export interface ModelProvider {
     numCtx?: number;
     keepAlive?: string | number;
     think?: boolean;
+    /** Send think:false explicitly. Used to retry a thinking model that gave no answer. */
+    noThink?: boolean;
   }): AsyncIterable<ProviderEvent>;
 }
 
@@ -68,7 +72,7 @@ export function providerFor(model: ModelRow, provider: ProviderRow, fetchImpl: t
 class OllamaProvider implements ModelProvider {
   constructor(private readonly root: string, private readonly fetchImpl: typeof fetch) {}
 
-  async *complete(req: { model: string; messages: ChatMessage[]; tools?: ToolDefinition[]; signal?: AbortSignal; numCtx?: number; keepAlive?: string | number; think?: boolean }): AsyncIterable<ProviderEvent> {
+  async *complete(req: { model: string; messages: ChatMessage[]; tools?: ToolDefinition[]; signal?: AbortSignal; numCtx?: number; keepAlive?: string | number; think?: boolean; noThink?: boolean }): AsyncIterable<ProviderEvent> {
     const response = await this.fetchImpl(`${this.root}/api/chat`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -78,7 +82,7 @@ class OllamaProvider implements ModelProvider {
         stream: true,
         messages: req.messages.map(toOllama),
         tools: req.tools?.length ? req.tools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.parameters } })) : undefined,
-        think: req.think || undefined,
+        think: req.noThink ? false : req.think || undefined,
         keep_alive: req.keepAlive ?? '30m',
         options: { num_ctx: req.numCtx ?? 32768 },
       }),
@@ -267,7 +271,7 @@ interface OllamaChunk {
   done?: boolean;
   prompt_eval_count?: number;
   eval_count?: number;
-  message?: { content?: string; tool_calls?: { function?: { name?: string; arguments?: unknown } }[] };
+  message?: { content?: string; thinking?: string; tool_calls?: { function?: { name?: string; arguments?: unknown } }[] };
 }
 
 async function* readOllama(response: Response): AsyncIterable<ProviderEvent> {
@@ -282,6 +286,14 @@ async function* readOllama(response: Response): AsyncIterable<ProviderEvent> {
     if (json.message?.content) return json.message.content;
     return '';
   };
+  const collectTools = (json: OllamaChunk) => {
+    for (const tool of json.message?.tool_calls ?? []) {
+      const name = tool.function?.name || '';
+      if (!name) continue;
+      const args = tool.function?.arguments;
+      toolCalls.push({ id: `ollama_${name}_${toolCalls.length}`, name, arguments: typeof args === 'string' ? args : JSON.stringify(args ?? {}) });
+    }
+  };
   while (true) {
     const chunk = await reader.read();
     if (chunk.done) break;
@@ -293,22 +305,19 @@ async function* readOllama(response: Response): AsyncIterable<ProviderEvent> {
       if (!data.startsWith('{')) continue;
       const json = JSON.parse(data) as OllamaChunk;
       const text = take(json);
+      if (json.message?.thinking) yield { type: 'thinking', text: json.message.thinking };
       if (text) yield { type: 'token', text };
-      if (json.done) {
-        for (const tool of json.message?.tool_calls ?? []) {
-          const name = tool.function?.name || '';
-          if (!name) continue;
-          const args = tool.function?.arguments;
-          toolCalls.push({ id: `ollama_${name}_${toolCalls.length}`, name, arguments: typeof args === 'string' ? args : JSON.stringify(args ?? {}) });
-        }
-        usage = { inputTokens: json.prompt_eval_count ?? 0, outputTokens: json.eval_count ?? 0 };
-      }
+      // Newer Ollama streams tool calls in a chunk before the final done chunk.
+      collectTools(json);
+      if (json.done) usage = { inputTokens: json.prompt_eval_count ?? 0, outputTokens: json.eval_count ?? 0 };
     }
   }
   if (buffer.trim().startsWith('{')) {
     const json = JSON.parse(buffer) as OllamaChunk;
     const text = take(json);
+    if (json.message?.thinking) yield { type: 'thinking', text: json.message.thinking };
     if (text) yield { type: 'token', text };
+    collectTools(json);
     if (json.done) usage = { inputTokens: json.prompt_eval_count ?? usage?.inputTokens ?? 0, outputTokens: json.eval_count ?? usage?.outputTokens ?? 0 };
   }
   yield { type: 'done', finishReason: toolCalls.length ? 'tool_calls' : 'stop', toolCalls, usage };

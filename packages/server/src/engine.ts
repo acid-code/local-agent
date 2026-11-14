@@ -7,6 +7,8 @@ import {
   freeTierByApiName,
   geminiQuotaDay,
   isContextOverflowError,
+  likelyNeedsTools,
+  nextAutoTier,
   planContext,
   shrinkBudget,
   quotaAvailability,
@@ -26,11 +28,14 @@ import { indexText, retrieve, type VectorIndex } from './embeddings.js';
 import { countGeminiTokens, ollamaNumCtx, providerFor, type ModelProvider } from './providers.js';
 import type { Settings } from './settings.js';
 import { CODING_TOOLS } from './coding.js';
+import { formatCitations, searchKnowledge } from './kb.js';
 import { kbSearchTool, loadSkillTool, toolsFor, type Tool, type ToolContext } from './tools.js';
 import { runSkillScript, skillCatalog } from './skills.js';
 import { getWorkshop, workshopBrief } from './workshops.js';
 import { checkOrRepair, contractForAgent, pickAutoRole, toolArgumentsSchema, toolParameters } from './contracts.js';
 import { addProjectNote, changesSince, ensureTaskBranch, isSmallEdit, listSharedRepos, matchRepos, refreshRepo, releaseRepoLocks, repoSyncTool, sharedRepoBrief, taskBranchName, tryLockRepo, type GitIdentity } from './repos.js';
+import { isMissingModelError, isToolUnsupportedError, ollamaCapabilities } from './ollama.js';
+import { scanMachine } from './discovery.js';
 import { CrashError, InterruptedToolError, StopError, clampText, now } from './util.js';
 import type { Vault } from './vault.js';
 
@@ -62,6 +67,10 @@ export class Engine {
     const settings = this.store.getSettings();
     if (settings.killed) throw new Error('Kill switch is on. New runs are stopped until you clear it.');
     this.assertWithinLimits(agent.id);
+    if (input.content && !input.parentRunId && this.sessionBusy(session.id)) {
+      // Two turns at once on one chat read each other's messages. Refuse the second one.
+      throw Object.assign(new Error('A reply is still running in this chat. Wait for it or press Stop, then send again.'), { statusCode: 409 });
+    }
     const command = input.content ? readChatCommand(input.content) : null;
     let commandAck: string | undefined;
     let pinMiss: string | undefined;
@@ -76,6 +85,7 @@ export class Engine {
     }
     if (command?.unpin && !command.rest) commandAck = 'Back on Auto.';
     if (command?.smart && !command.rest && !command.pinName) commandAck = 'Add the question after /smart. The next ordinary message goes back to the main model.';
+    let userMessageId: string | undefined;
     if (input.content) {
       const message = this.store.insertMessage({
         sessionId: session.id, role: 'user', content: input.content, toolCallId: null, toolName: null, toolCalls: null,
@@ -84,9 +94,9 @@ export class Engine {
       if (session.title === 'New chat') {
         this.store.updateSession(session.id, { title: input.content.slice(0, 72) });
       }
-      void message;
+      userMessageId = message.id;
     }
-    const cursor: RunCursor = { phase: 'route', turn: 0, messageModelId: input.modelId, depth: input.depth ?? 0, configVersion: this.store.getSettings().version, agentUpdatedAt: agent.updatedAt, commandAck, pinMiss };
+    const cursor: RunCursor = { phase: 'route', turn: 0, userMessageId, messageModelId: input.modelId, depth: input.depth ?? 0, configVersion: this.store.getSettings().version, agentUpdatedAt: agent.updatedAt, commandAck, pinMiss };
     const run = this.store.createRun({ sessionId: session.id, agentId: agent.id, parentRunId: input.parentRunId, configVersion: cursor.configVersion ?? 1, cursor });
     const task = this.execute(run.id);
     if (input.wait) await task;
@@ -139,6 +149,14 @@ export class Engine {
       this.inflight.delete(runId);
       this.bus.publish({ type: 'done', runId, run: this.store.getRun(runId) });
     }
+  }
+
+  /** True while a run on this chat is in flight in this process. */
+  sessionBusy(sessionId: string): boolean {
+    for (const runId of this.inflight.keys()) {
+      if (this.store.getRun(runId)?.sessionId === sessionId) return true;
+    }
+    return false;
   }
 
   pause(runId: string) {
@@ -243,6 +261,7 @@ export class Engine {
     const stage = stageFor(this.store, run);
     const prepared = await prepareRepos(this.store, run, stage);
     const staged = { ...run, cursor: { ...run.cursor, stage: prepared.stage, syncNote: prepared.syncNote, branched: prepared.branched } };
+    await this.probeToolSupport();
     const decision = this.choose(agent, staged);
     let reason = prepared.lockedOut || decision.reason;
     let switched = prepared.lockedOut ? true : decision.switched;
@@ -319,7 +338,7 @@ export class Engine {
     let built = await this.buildMessages(current, agent, model);
     if (!this.reserveGemini(model, built.plan.estimatedTokens)) {
       const fallback = this.candidates(settings).find((item) => item.local && item.providerKind !== 'rehearsal');
-      if (!fallback) throw new Error('Gemini quota is exhausted and no local model is available.');
+      if (!fallback) throw new Error('Gemini quota is used up and no local model is available.');
       model = this.store.getModel(fallback.id)!;
       current = this.store.updateRun(run.id, {
         modelId: model.id,
@@ -331,7 +350,8 @@ export class Engine {
       this.bus.publish({ type: 'quota', runId: run.id, exhausted: true });
     }
     const provider = this.provider(model);
-    const tools = this.tools(agent, this.store.getSession(run.sessionId)?.mode, current.cursor.stage).map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
+    const toolless = Boolean(current.cursor.noTools) || this.toolSupportOf(model) === false;
+    const tools = toolless ? [] : this.tools(agent, this.store.getSession(run.sessionId)?.mode, current.cursor.stage).map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
     if (model.local && model.sizeClass === 'large') {
       await this.waitForLarge(run.id, model.name);
       await this.loadLarge(run.id, model);
@@ -343,6 +363,7 @@ export class Engine {
     this.bus.publish({ type: 'step', runId: run.id, step });
     const started = Date.now();
     let text = '';
+    let reasoningText = '';
     let toolCalls: ToolCall[] | undefined;
     let usage = { inputTokens: built.plan.estimatedTokens, outputTokens: 0 };
     try {
@@ -351,12 +372,16 @@ export class Engine {
         paceMs: model.profileId === 'rehearsal' && process.env.NODE_ENV !== 'test' ? 10 : 0,
         numCtx: model.local ? ollamaNumCtx(current.cursor.budgetOverride || model.practicalBudget, settings.outputReserveTokens, model.contextWindow) : undefined,
         keepAlive: model.local ? (model.sizeClass === 'large' ? '30m' : '5m') : undefined,
-        think: Boolean(current.cursor.reasoning),
+        think: Boolean(current.cursor.reasoning) && !current.cursor.noThink,
+        noThink: Boolean(current.cursor.noThink),
       })) {
         if (signal.aborted) throw new StopError();
         if (event.type === 'token') {
           text += event.text;
           this.bus.publish({ type: 'token', runId: run.id, text: event.text });
+        } else if (event.type === 'thinking') {
+          reasoningText += event.text;
+          this.bus.publish({ type: 'thinking', runId: run.id, text: event.text });
         } else {
           toolCalls = event.toolCalls;
           if (event.usage) usage = event.usage;
@@ -365,6 +390,36 @@ export class Engine {
     } catch (error) {
       if (error instanceof StopError) throw error;
       const message = error instanceof Error ? error.message : String(error);
+      if (isToolUnsupportedError(message)) {
+        this.recordToolSupport(model.apiName, false);
+        this.store.updateStep(step.id, { status: 'failed', error: message, endedAt: now(), latencyMs: Date.now() - started });
+        const version = this.store.getSettings().version;
+        const next = current.cursor.toolRetry ? undefined : this.nextTier(current, model, true);
+        if (next) {
+          const reason = `Switched to ${next.name} — ${model.name} cannot use tools.`;
+          this.store.addLog('warn', reason, undefined, 'router');
+          this.store.updateRun(run.id, { cursor: { ...current.cursor, modelId: next.id, toolRetry: true, phase: 'model', switched: true, routingReason: reason, configVersion: version }, modelId: next.id, switched: true, routingNote: reason });
+          return;
+        }
+        if (!current.cursor.noTools) {
+          this.store.addLog('warn', `${model.name} cannot use tools. Retrying without tools.`, undefined, 'router');
+          this.store.updateRun(run.id, { cursor: { ...current.cursor, noTools: true, toolRetry: true, phase: 'model', configVersion: version } });
+          return;
+        }
+      }
+      if (model.local && isMissingModelError(message)) {
+        this.store.updateModel(model.id, { enabled: false });
+        this.store.addLog('warn', `${model.name} is not installed in Ollama anymore. Marked it missing.`, undefined, 'router');
+        this.store.updateStep(step.id, { status: 'failed', error: message, endedAt: now(), latencyMs: Date.now() - started });
+        void this.refreshModels();
+        const next = current.cursor.missingRetry ? undefined : this.nextTier(current, model, false);
+        if (next) {
+          const reason = `Switched to ${next.name} — ${model.name} is not installed anymore.`;
+          this.store.updateRun(run.id, { cursor: { ...current.cursor, modelId: next.id, missingRetry: true, phase: 'model', switched: true, routingReason: reason }, modelId: next.id, switched: true, routingNote: reason });
+          return;
+        }
+        throw new Error(`${model.name} is not installed in Ollama. Pull it again or choose another model in Setup.`);
+      }
       if (isContextOverflowError(message) && !current.cursor.budgetOverride) {
         const shrunk = shrinkBudget(model.practicalBudget);
         this.store.addLog('warn', `Context overflow from ${model.name}. Retrying at ${shrunk} tokens.`, undefined, 'context');
@@ -394,8 +449,23 @@ export class Engine {
       this.store.updateStep(step.id, { status: 'failed', error: message, endedAt: now(), latencyMs: Date.now() - started });
       throw error;
     }
+    const split = splitThinking(text);
+    text = split.answer;
+    reasoningText = [reasoningText, split.reasoning].filter(Boolean).join('\n');
+    if (!text.trim() && !toolCalls?.length) {
+      if (!current.cursor.emptyRetry) {
+        const why = reasoningText ? `${model.name} thought but gave no answer. Retrying once with thinking off.` : `${model.name} returned an empty answer. Retrying once.`;
+        this.store.updateStep(step.id, { status: 'failed', error: why, output: reasoningText ? { reasoning: reasoningText.slice(0, 4000) } : null, endedAt: now(), latencyMs: Date.now() - started });
+        this.store.addLog('warn', why, undefined, 'providers');
+        this.store.updateRun(run.id, { cursor: { ...current.cursor, emptyRetry: true, noThink: true, phase: 'model' } });
+        return;
+      }
+      text = reasoningText
+        ? `${model.name} only produced reasoning and no answer, twice. Try again, rephrase, or pick a bigger model.`
+        : `${model.name} returned an empty answer twice. Try again or pick another model.`;
+    }
     const cost = ((usage.inputTokens * (model.priceIn ?? 0)) + (usage.outputTokens * (model.priceOut ?? 0))) / 1_000_000;
-    const note = current.cursor.switched ? current.cursor.routingReason ?? null : null;
+    const note = [current.cursor.switched ? current.cursor.routingReason : '', built.cutNote].filter(Boolean).join(' ') || null;
     text = this.vault.redact(text);
     const assistant = this.store.insertMessage({
       sessionId: run.sessionId, role: 'assistant', content: text, toolCalls: toolCalls?.length ? toolCalls : null,
@@ -404,7 +474,7 @@ export class Engine {
     const cursor: RunCursor = toolCalls?.length
       ? { ...current.cursor, phase: 'tools', toolCalls, completedToolIds: [], approvalId: undefined }
       : { ...current.cursor, phase: 'summarize', toolCalls: undefined };
-    this.store.updateStep(step.id, { status: 'completed', output: { text, toolCalls }, tokensIn: usage.inputTokens, tokensOut: usage.outputTokens, costUsd: cost, latencyMs: Date.now() - started, endedAt: now() });
+    this.store.updateStep(step.id, { status: 'completed', output: { text, toolCalls, ...(reasoningText ? { reasoning: reasoningText.slice(0, 4000) } : {}) }, tokensIn: usage.inputTokens, tokensOut: usage.outputTokens, costUsd: cost, latencyMs: Date.now() - started, endedAt: now() });
     const fresh = this.store.getRun(run.id)!;
     this.store.updateRun(run.id, {
       cursor,
@@ -582,7 +652,8 @@ export class Engine {
     const settings = this.store.getSettings();
     const session = this.store.getSession(run.sessionId);
     const messages = this.store.listMessages(run.sessionId);
-    const user = [...messages].reverse().find((message) => message.role === 'user');
+    const user = (run.cursor.userMessageId && messages.find((message) => message.id === run.cursor.userMessageId))
+      || [...messages].reverse().find((message) => message.role === 'user');
     const text = user?.content ?? '';
     const pinnedPersona = agent.routing === 'pinned' && agent.modelId && !session?.modelPin && !run.cursor.messageModelId;
     const decision = pinnedPersona
@@ -622,15 +693,21 @@ export class Engine {
     return picked;
   }
 
-  private autoDecision(text: string, run: RunRow, settings: Settings): RouteDecision {
-    const session = this.store.getSession(run.sessionId);
-    const models: AutoCandidate[] = this.candidates(settings).map((model) => ({
+  private autoCandidates(settings: Settings): AutoCandidate[] {
+    return this.candidates(settings).map((model) => ({
       id: model.id, name: model.name, apiName: model.apiName, local: model.local, embedding: false,
       sizeClass: model.sizeClass, providerKind: model.providerKind, quotaOpen: model.quotaOpen,
       practicalBudget: model.practicalBudget, enabled: model.enabled,
     }));
+  }
+
+  private autoDecision(text: string, run: RunRow, settings: Settings): RouteDecision {
+    const session = this.store.getSession(run.sessionId);
+    const models = this.autoCandidates(settings);
     const unsupported = new Set(Object.entries(settings.toolSupport).filter(([, ok]) => ok === false).map(([name]) => name));
-    const capable = models.filter((model) => !unsupported.has(model.apiName) && !unsupported.has(model.name));
+    // A model without tool calls still answers chat. Skip it only when this turn probably needs a tool.
+    const needsTools = likelyNeedsTools(text, { kb: this.hasKnowledge(run.agentId), code: session?.mode === 'code' || Boolean(run.cursor.stage) });
+    const capable = needsTools ? models.filter((model) => !unsupported.has(model.apiName) && !unsupported.has(model.name)) : models;
     const pool = capable.length ? capable : models;
     const auto = decideAuto({
       text, stage: run.cursor.stage, failures: this.localFailureCount(run.agentId), map: settings.autoModels, models: pool,
@@ -652,6 +729,8 @@ export class Engine {
     return this.store.listModels().filter((model) => model.enabled && !model.embedding).flatMap((model) => {
       const provider = providers.get(model.providerId);
       if (!provider?.enabled) return [];
+      // Gemini without a key is off, not out of quota.
+      if (provider.kind === 'gemini' && !this.providerOverride && !process.env[provider.apiKeyEnv || 'GEMINI_API_KEY']) return [];
       let quotaOpen: boolean | undefined;
       let rpdRemaining: number | null | undefined;
       if (provider.kind === 'gemini') {
@@ -690,7 +769,8 @@ export class Engine {
       id: summary.id, level: summary.level, content: summary.content, covers: summary.covers, foldedInto: summary.foldedInto,
     }));
     const messages = this.store.listMessages(run.sessionId);
-    const user = [...messages].reverse().find((message) => message.role === 'user');
+    const user = (run.cursor.userMessageId && messages.find((message) => message.id === run.cursor.userMessageId))
+      || [...messages].reverse().find((message) => message.role === 'user');
     const retrieved = strategy === 'retrieval' || strategy === 'hierarchical+retrieval' ? retrieve(this.store, this.vectors, run.sessionId, user?.content ?? '', 4) : [];
     let budget = Math.min(model.contextWindow, model.practicalBudget);
     const session = this.store.getSession(run.sessionId);
@@ -702,7 +782,10 @@ export class Engine {
         ? '\n\nThe plan is saved. Implement it in the shared repos. Commit when the checks pass. Push only after the owner approves.'
         : '';
     const skillNote = skillCatalog(this.store, agent.id, user?.content ?? '');
-    const system = `${agent.systemPrompt}${sharedRepoBrief(this.store)}${stageNote}${roleNote}`;
+    const hasKb = this.hasKnowledge(agent.id);
+    const kbHint = hasKb ? '\n\nA knowledge base of the owner\'s documents is attached. When a question could be answered from it, call kb_search first and cite the numbered sources.' : '';
+    const kbNote = hasKb ? await this.knowledgeNote(agent.id, user?.content ?? '') : '';
+    const system = `${agent.systemPrompt}${sharedRepoBrief(this.store)}${stageNote}${roleNote}${kbHint}`;
     const preambleGuess = `${system}\n${notes.map((note) => note.content).join('\n')}`;
     if (model.providerId === 'prov_gemini' && estimateTokens(preambleGuess, 'gemini') > budget * 0.75) {
       const key = process.env.GEMINI_API_KEY;
@@ -713,7 +796,7 @@ export class Engine {
     }
     const plan = planContext({
       strategy, contextWindow: model.contextWindow, practicalBudget: run.cursor.budgetOverride || budget, outputReserve: settings.outputReserveTokens,
-      system, optional: [{ label: 'workshop brief', text: workshopNote }, { label: 'skills catalog', text: skillNote }].filter((part) => part.text.trim()),
+      system, optional: [{ label: 'knowledge base passages', text: kbNote }, { label: 'workshop brief', text: workshopNote }, { label: 'skills catalog', text: skillNote }].filter((part) => part.text.trim()),
       pinned: notes.filter((note) => note.pinned).map((note) => note.content),
       summaries, retrieved, tokenizer: model.tokenizer as 'gemma4',
       messages: messages.map((message) => ({ id: message.id, role: message.role as 'user', content: message.content })),
@@ -728,6 +811,16 @@ export class Engine {
     for (const piece of plan.excerpted) {
       if (piece.omitted.length > 80) indexText(this.store, this.vectors, { sessionId: run.sessionId, agentId: agent.id, text: piece.omitted.slice(0, 4000) });
     }
+    const cut = plan.excerpted.filter((piece) => piece.omitted.length > 0 && recentRole(messages, piece.id) !== 'tool');
+    const cutNote = cut.length
+      ? `Cut ${cut.reduce((sum, piece) => sum + piece.omitted.length, 0).toLocaleString('en-US')} characters from the middle of ${cut.length === 1 ? 'a long message' : `${cut.length} long messages`} to fit ${model.name}. The start and end were kept.`
+      : '';
+    if (cutNote && run.cursor.turn === 0) {
+      this.store.addStep({
+        runId: run.id, kind: 'context', name: 'excerpt', status: 'completed', input: { excerpted: cut.map((piece) => ({ id: piece.id, omittedChars: piece.omitted.length })) },
+        output: cutNote, toolCallId: null, turn: run.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now(),
+      });
+    }
     this.bus.publish({ type: 'context', runId: run.id, used: plan.estimatedTokens, budget: plan.budgetTokens });
     const recent = new Map(messages.map((message) => [message.id, message]));
     const chat: ChatMessage[] = [{ role: 'system', content: plan.preamble }];
@@ -740,7 +833,7 @@ export class Engine {
         name: message.toolName ?? undefined, toolCalls: (message.toolCalls as ToolCall[] | null) ?? undefined, imageUrl: message.imageUrl ?? undefined,
       });
     }
-    return { plan, messages: chat };
+    return { plan, messages: chat, cutNote };
   }
 
   private async maybeFold(sessionId: string, agent: Agent, model: ModelRow) {
@@ -748,7 +841,7 @@ export class Engine {
     const messages = this.store.listMessages(sessionId);
     const summaries = this.store.listSummaries(sessionId);
     const covered = new Set(summaries.flatMap((summary) => summary.covers));
-    const ids = foldCandidates(messages.map((message) => ({ id: message.id, role: message.role as 'user', content: message.content })), covered, model.tokenizer as 'approx', summaryTriggerFor(model, settings.summaryTriggerTokens));
+    const ids = foldCandidates(messages.map((message) => ({ id: message.id, role: message.role as 'user', content: message.content })), covered, model.tokenizer as 'approx', summaryTriggerFor(model, settings.summaryTriggerTokens), Math.min(model.contextWindow, model.practicalBudget) - settings.outputReserveTokens);
     if (!ids) return;
     const slice = messages.filter((message) => ids.includes(message.id));
     const transcript = slice.map((message) => `${message.role}: ${message.content}`).join('\n').slice(0, 12_000);
@@ -805,6 +898,79 @@ export class Engine {
     } catch {
       return prompt.slice(0, 800);
     }
+  }
+
+  /** Tool support from Ollama capabilities or a rejected request. undefined when not known yet. */
+  private toolSupportOf(model: { apiName: string; name: string }): boolean | undefined {
+    const map = this.store.getSettings().toolSupport;
+    return map[model.apiName] ?? map[model.name];
+  }
+
+  private recordToolSupport(apiName: string, ok: boolean) {
+    const current = this.store.getSettings();
+    if (current.toolSupport[apiName] === ok) return;
+    const toolSupport = { ...current.toolSupport, [apiName]: ok };
+    this.store.saveSettings({ ...current, toolSupport }, ok ? `${apiName} supports tool calls` : `${apiName} does not support tool calls`, { toolSupport });
+  }
+
+  private ollamaRootFor(model: ModelRow): string | null {
+    const provider = this.store.getProvider(model.providerId);
+    if (!provider || provider.kind === 'openrouter' || provider.kind === 'gemini' || provider.kind === 'rehearsal') return null;
+    const base = (provider.baseUrl || 'http://127.0.0.1:11434/v1').replace(/\/$/, '');
+    if (provider.id === 'prov_ollama' || provider.name === 'Ollama' || /:11434(\/|$)/.test(base)) return base.replace(/\/v1$/, '');
+    return null;
+  }
+
+  /** Ask Ollama once per model whether it takes tools. Cached in settings.toolSupport. */
+  private async probeToolSupport() {
+    if (this.providerOverride) return;
+    const unknown = this.store.listModels().filter((model) => model.enabled && model.local && !model.embedding && this.toolSupportOf(model) === undefined);
+    await Promise.all(unknown.map(async (model) => {
+      const root = this.ollamaRootFor(model);
+      if (!root) return;
+      const found = await ollamaCapabilities(this.fetchImpl, model.apiName, root);
+      if (found.capabilities) this.recordToolSupport(model.apiName, found.capabilities.includes('tools'));
+    }));
+  }
+
+  /** The next Auto tier after `model`, for a retry. */
+  private nextTier(run: RunRow, model: ModelRow, needTools: boolean): ModelRow | undefined {
+    const settings = this.store.getSettings();
+    const models = this.autoCandidates(settings);
+    const exclude = new Set<string>();
+    if (needTools) for (const item of models) if (this.toolSupportOf(item) === false) exclude.add(item.id);
+    const pick = nextAutoTier({ role: run.cursor.autoRole, map: settings.autoModels, models, currentId: model.id, exclude });
+    return pick ? this.store.getModel(pick.id) ?? undefined : undefined;
+  }
+
+  private hasKnowledge(agentId: string): boolean {
+    try {
+      const row = this.store.db.prepare('SELECT COUNT(*) AS n FROM kb_documents d JOIN kb_collections c ON c.id = d.collection_id WHERE c.agent_id IS NULL OR c.agent_id = ?').get(agentId) as { n: number } | undefined;
+      return Number(row?.n ?? 0) > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Top knowledge-base passages for a question, so small models that skip kb_search still see them. */
+  private async knowledgeNote(agentId: string, text: string): Promise<string> {
+    if (!text.trim() || !likelyNeedsTools(text, { kb: true })) return '';
+    try {
+      const hits = await searchKnowledge(this.store, readChatCommand(text).rest || text, { agentId, k: 3 });
+      return hits.length ? `Knowledge base passages that may answer the latest question. Cite them by number:\n${formatCitations(hits)}` : '';
+    } catch {
+      return '';
+    }
+  }
+
+  private refreshing: Promise<unknown> | null = null;
+  private refreshModels() {
+    if (this.providerOverride || this.refreshing) return this.refreshing;
+    this.refreshing = scanMachine(this.fetchImpl, this.docker, this.store)
+      .then((scan) => { this.residentLarge = scan.resident; })
+      .catch(() => undefined)
+      .finally(() => { this.refreshing = null; });
+    return this.refreshing;
   }
 
   private tools(agent: Agent, sessionMode?: string, stage?: 'plan' | 'implement') {
@@ -1082,6 +1248,22 @@ function stageFor(store: Store, run: RunRow): 'plan' | 'implement' | undefined {
   if (!relevant) return undefined;
   if (isSmallEdit(text)) return 'implement';
   return 'plan';
+}
+
+/** Pulls inline <think> blocks out of an answer. Reasoning is kept apart and never shown as the answer. */
+export function splitThinking(text: string): { answer: string; reasoning: string } {
+  const parts: string[] = [];
+  let answer = text.replace(/<think>([\s\S]*?)<\/think>/gi, (_all, inner: string) => { parts.push(inner.trim()); return ''; });
+  const open = answer.match(/<think>([\s\S]*)$/i);
+  if (open) {
+    parts.push(open[1]!.trim());
+    answer = answer.slice(0, open.index);
+  }
+  return { answer: parts.length ? answer.trim() : answer, reasoning: parts.filter(Boolean).join('\n') };
+}
+
+function recentRole(messages: { id: string; role: string }[], id: string) {
+  return messages.find((message) => message.id === id)?.role;
 }
 
 function isProviderOutage(message: string): boolean {

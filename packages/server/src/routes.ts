@@ -18,12 +18,12 @@ import type { Notifier } from './notify.js';
 import { createBackup, listBackups, shipBackup, stageRestore } from './ops.js';
 import { telegramQueue } from './notify.js';
 import { ollamaLoaded } from './ollama.js';
-import { doctorChecks, redactValue, searchLogs, zipStore, LOG_COMPONENTS, type LogComponent } from './debug.js';
+import { doctorChecks, geminiStateOf, missingRoleModels, redactValue, searchLogs, zipStore, LOG_COMPONENTS, type LogComponent } from './debug.js';
 import { previewPrune, runPrune, snapshotResources } from './resources.js';
 import { speak, transcribe, voiceStatus, KOKORO_COMMAND, WHISPER_COMMAND } from './voice.js';
-import { listWorkspace, readWorkspaceFile } from './tools.js';
+import { formatSearch, listWorkspace, readWorkspaceFile, searxngHealth, searxngQuery } from './tools.js';
 import {
-  createCollection, ingestBuffer, ingestFolder, kbUsage, listCollections, ollamaEmbedder, searchKnowledge,
+  KbInputError, createCollection, deleteCollection, deleteDocument, embedRoleWarning, listDocuments, formatCitations, ingestBuffer, ingestFolder, kbUsage, listCollections, ollamaEmbedder, searchKnowledge,
 } from './kb.js';
 import {
   exportSkill, importSkill, listSkills, parseSkillMd, saveSkill, setSkillEnabled, skillFit, skillVersions,
@@ -145,6 +145,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       outputReserveTokens: z.number().int().min(128).max(32000).optional(),
       summaryTriggerTokens: z.number().int().min(200).max(20000).optional(),
       searxngUrl: z.string().optional(),
+      searchHits: z.number().int().min(1).max(20).optional(),
       approvalForDestructive: z.boolean().optional(),
       mcpAllowHost: z.boolean().optional(),
       geminiTier: z.enum(['free', 'paid']).optional(),
@@ -335,7 +336,10 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     store.updateSession(session.id, { mode: 'code', workshopId: workshop.id });
     return { workshop, session: store.getSession(session.id) };
   });
-  app.get('/api/sessions', async () => ({ sessions: store.listSessions() }));
+  app.get('/api/sessions', async (req) => {
+    const query = parse(z.object({ limit: z.coerce.number().int().min(1).max(500).optional(), cursor: z.string().optional() }), req.query);
+    return store.pageSessions({ limit: query.limit ?? 100, cursor: query.cursor || null });
+  });
   app.post('/api/sessions', async (req) => {
     const body = parse(z.object({ agentId: z.string().optional(), roomId: z.string().optional(), title: z.string().optional(), mode: z.enum(['chat', 'code']).optional() }), req.body);
     const session = store.createSession(body);
@@ -351,6 +355,8 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   });
   app.patch('/api/sessions/:id', async (req) => {
     const body = parse(z.object({ title: z.string().optional(), mode: z.enum(['chat', 'code']).optional(), modelPin: z.string().nullable().optional() }), req.body);
+    if (!store.getSession((req.params as { id: string }).id)) throw http(404, 'Chat not found.');
+    if (body.modelPin) body.modelPin = chatModelId(store, body.modelPin);
     return { session: store.updateSession((req.params as { id: string }).id, body) };
   });
   app.post('/api/sessions/:id/messages', async (req) => {
@@ -358,10 +364,13 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const session = store.getSession(id);
     if (!session) throw http(404, 'Chat not found.');
     const body = parse(z.object({ content: z.string().min(1), agentId: z.string().optional(), modelId: z.string().optional(), imageUrl: z.string().optional() }), req.body);
-    const offers = vault.capture(null, body.content);
+    const modelId = body.modelId ? chatModelId(store, body.modelId) : undefined;
+    if (!body.content.trim()) throw http(400, 'Type a message first.');
     const agentId = body.agentId || session.agentId;
     if (!agentId) throw http(400, 'Choose a persona.');
-    const run = await engine.startTurn({ sessionId: id, agentId, content: vault.redact(body.content), imageUrl: body.imageUrl, modelId: body.modelId });
+    if (engine.sessionBusy(id)) throw http(409, 'A reply is still running in this chat. Wait for it or press Stop, then send again.');
+    const offers = vault.capture(null, body.content);
+    const run = await engine.startTurn({ sessionId: id, agentId, content: vault.redact(body.content), imageUrl: body.imageUrl, modelId });
     return { run, offers };
   });
   app.get('/api/sessions/:id/plan', async (req) => ({ plan: readPlan(store, (req.params as { id: string }).id) }));
@@ -661,6 +670,26 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     if (!check) throw http(404, 'No check with that name.');
     return { check };
   });
+  // Runs the real tools once, so a broken search or knowledge base shows up before a chat does.
+  app.post('/api/debug/tool-test', async (req) => {
+    const body = parse(z.object({ tool: z.enum(['web_search', 'kb_search']).optional(), query: z.string().optional() }), req.body);
+    const tools = body.tool ? [body.tool] : ['web_search', 'kb_search'] as const;
+    const settings = store.getSettings();
+    const results = [];
+    for (const tool of tools) {
+      const query = body.query?.trim() || (tool === 'web_search' ? 'Ollama latest release' : 'test');
+      const started = Date.now();
+      try {
+        const output = tool === 'web_search'
+          ? formatSearch(query, await searxngQuery(settings.searxngUrl || process.env.SEARXNG_URL || '', query, fetchImpl, undefined, settings.searchHits))
+          : formatCitations(await searchKnowledge(store, query, { k: 3 }));
+        results.push({ tool, query, ok: !/^No (results|knowledge-base passages)/.test(output), ms: Date.now() - started, output: output.slice(0, 2000) });
+      } catch (error) {
+        results.push({ tool, query, ok: false, ms: Date.now() - started, output: '', error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    return { results };
+  });
   app.get('/api/debug/bundle', async (_req, reply) => {
     const checks = await healthChecks(store, docker, fetchImpl, config.dataDir);
     const runs = store.listRuns(8).map((run) => redactValue({ run, steps: store.listSteps(run.id) }));
@@ -701,6 +730,20 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   registerLibrary(app, ctx);
 }
 
+/** Resolves a chat model by id, API name, or name. Unknown or disabled models are a 400 that lists the valid ones. */
+function chatModelId(store: Store, wanted: string): string {
+  const usable = (providerId: string) => {
+    const provider = store.getProvider(providerId);
+    if (!provider?.enabled) return false;
+    return provider.kind !== 'gemini' || Boolean(process.env[provider.apiKeyEnv || 'GEMINI_API_KEY']);
+  };
+  const models = store.listModels().filter((model) => model.enabled && !model.embedding && usable(model.providerId));
+  const match = models.find((model) => model.id === wanted) ?? models.find((model) => model.apiName === wanted || model.name === wanted);
+  if (match) return match.id;
+  const valid = models.filter((model) => model.profileId !== 'rehearsal').map((model) => `${model.id} (${model.apiName})`);
+  throw http(400, `Unknown or disabled model "${wanted}". Valid models: ${valid.join(', ') || 'none — scan Local models in Setup'}.`);
+}
+
 function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   const result = schema.safeParse(value ?? {});
   if (!result.success) throw http(400, result.error.issues[0]?.message || 'Invalid input.');
@@ -718,18 +761,25 @@ async function healthChecks(store: Store, docker: DockerCtl, fetchImpl: typeof f
   const backups = listBackups(dataDir);
   const mcp = store.listMcp();
   const settings = store.getSettings();
-  let searx = false;
-  if (settings.searxngUrl) {
-    try { searx = (await fetchImpl(`${settings.searxngUrl.replace(/\/$/, '')}/search?q=ping&format=json`, { signal: AbortSignal.timeout(1500) })).ok; } catch { searx = false; }
-  }
+  const searx = await searxngHealth(settings.searxngUrl || process.env.SEARXNG_URL || '', fetchImpl);
   const dbFile = path.join(dataDir, 'local-agent.db');
   const dbBytes = fs.existsSync(dbFile) ? fs.statSync(dbFile).size : 0;
-  return doctorChecks({
-    ollamaOk, loaded, dockerOk: docker.available(), mcpCount: mcp.length, mcpErrors: mcp.filter((item) => item.lastError).length,
-    searxngOk: searx, telegramQueued: telegramQueue(dataDir).length, dbBytes,
+  const embedWarning = ollamaOk ? await embedRoleWarning(store, fetchImpl) : null;
+  let installed: string[] | null = null;
+  if (ollamaOk) {
+    try {
+      const tags = await fetchImpl(`${(process.env.OLLAMA_HOST || 'http://127.0.0.1:11434').replace(/\/$/, '')}/api/tags`, { signal: AbortSignal.timeout(1500) });
+      if (tags.ok) installed = ((await tags.json()) as { models?: { name: string }[] }).models?.map((model) => model.name) ?? [];
+    } catch { installed = null; }
+  }
+  const missingRoles = installed ? missingRoleModels(settings.autoModels as unknown as Record<string, string>, installed) : [];
+  return [...doctorChecks({
+    ollamaOk, loaded, dockerOk: await docker.ping(), mcpCount: mcp.length, mcpErrors: mcp.filter((item) => item.lastError).length,
+    searxngOk: searx.ok, searxngDetail: searx.detail, telegramQueued: telegramQueue(dataDir).length, dbBytes,
     diskFreeBytes: snap.disk.freeBytes, memAvailableGiB: snap.memory.availableGiB,
-    geminiOpen: settings.geminiTier === 'paid' ? true : null, lastBackupAt: backups[0]?.createdAt ?? null, tailscaleOk: await tailscaleUp(),
-  });
+    geminiOpen: settings.geminiTier === 'paid' ? true : null, geminiState: geminiStateOf(store.getProvider('prov_gemini')) === 'off' ? 'off' : undefined, lastBackupAt: backups[0]?.createdAt ?? null, tailscaleOk: await tailscaleUp(),
+  }), { id: 'embed', ok: !embedWarning, detail: embedWarning || (ollamaOk ? 'The embed role is an embedding model.' : 'Ollama is down, so the embed role was not checked.') },
+  { id: 'roles', ok: missingRoles.length === 0, detail: installed === null ? 'Ollama is down, so the Auto roles were not checked.' : missingRoles.length ? `Auto roles point at models Ollama does not have: ${missingRoles.join(', ')}. Pull them or change Defaults in Setup.` : 'Every Auto role points at an installed model.' }];
 }
 
 function tailscaleUp(): Promise<boolean> {
@@ -757,12 +807,33 @@ function registerLibrary(app: FastifyInstance, ctx: Ctx) {
     const body = parse(z.object({
       files: z.array(z.object({ name: z.string().min(1), contentBase64: z.string().min(1) })).min(1),
     }), req.body);
-    const results = [];
+    const id = (req.params as { id: string }).id;
+    if (!store.db.prepare('SELECT id FROM kb_collections WHERE id = ?').get(id)) throw http(404, 'Collection not found.');
+    const results: Array<{ name: string; error?: string } & Partial<Awaited<ReturnType<typeof ingestBuffer>>>> = [];
     for (const file of body.files) {
       const bytes = Buffer.from(file.contentBase64, 'base64');
-      results.push({ name: file.name, ...(await ingestBuffer(store, (req.params as { id: string }).id, { name: file.name, bytes }, embed())) });
+      try {
+        results.push({ name: file.name, ...(await ingestBuffer(store, id, { name: file.name, bytes }, embed())) });
+      } catch (error) {
+        if (!(error instanceof KbInputError)) throw error;
+        results.push({ name: file.name, error: error.message });
+      }
+    }
+    if (results.every((item) => item.error)) {
+      const error = http(400, results.map((item) => item.error).join(' ')) as Error & { results?: unknown };
+      throw error;
     }
     return { results, usage: kbUsage(store) };
+  });
+  app.get('/api/kb/collections/:id/files', async (req) => ({ files: listDocuments(store, (req.params as { id: string }).id) }));
+  app.delete('/api/kb/collections/:id/files/:docId', async (req) => {
+    const params = req.params as { id: string; docId: string };
+    if (!deleteDocument(store, params.id, params.docId)) throw http(404, 'File not found in that collection.');
+    return { ok: true, usage: kbUsage(store) };
+  });
+  app.delete('/api/kb/collections/:id', async (req) => {
+    if (!deleteCollection(store, (req.params as { id: string }).id)) throw http(404, 'Collection not found.');
+    return { ok: true, usage: kbUsage(store) };
   });
   app.post('/api/kb/collections/:id/folder', async (req) => {
     const body = parse(z.object({ path: z.string().min(1) }), req.body);
@@ -878,6 +949,30 @@ function registerLibrary(app: FastifyInstance, ctx: Ctx) {
   });
 }
 
+/** SearXNG settings with JSON on and the limiter off. The secret is generated once and kept in the data dir. */
+export function searxngConfig(dataDir: string): { yaml: string; secret: string; path: string } {
+  const dir = path.join(dataDir, 'searxng');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const file = path.join(dir, 'settings.yml');
+  const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  const secret = existing.match(/secret_key:\s*"([a-f0-9]{32,})"/)?.[1] || randomBytes(32).toString('hex');
+  const yaml = [
+    '# Written by local-agent. JSON must stay on: web_search calls /search?format=json.',
+    'use_default_settings: true',
+    'server:',
+    `  secret_key: "${secret}"`,
+    '  limiter: false',
+    '  image_proxy: false',
+    'search:',
+    '  formats:',
+    '    - html',
+    '    - json',
+    '',
+  ].join('\n');
+  fs.writeFileSync(file, yaml, { mode: 0o600 });
+  return { yaml, secret, path: file };
+}
+
 function hookUrl(id: string, kind: TriggerKind) {
   return kind === 'github' ? `/api/hooks/github/${id}` : kind === 'webhook' ? `/api/hooks/${id}` : null;
 }
@@ -898,15 +993,28 @@ async function runSetup(action: string, model: string | undefined, jobId: string
         store.appendJob(jobId, decoder.decode(chunk.value));
       }
     } else if (action === 'start-searxng') {
-      if (!docker.available()) throw new Error('Docker is not available.');
+      if (!(await docker.ping())) throw new Error(`Docker is not available at ${docker.describe()}.`);
+      const config = searxngConfig(ctx.config.dataDir);
+      store.appendJob(jobId, 'pulling docker.io/searxng/searxng:latest\n');
+      await docker.pull('docker.io/searxng/searxng:latest').catch(() => store.appendJob(jobId, 'pull failed; using the local image if there is one\n'));
+      // The stock settings only allow HTML, so format=json is a 403. Ship our own into a writable volume.
       const id = await docker.startDetached({
         Image: 'docker.io/searxng/searxng:latest',
         name: 'local-agent-searxng',
+        replace: true,
         Labels: { 'local-agent.role': 'searxng' },
+        Env: [`SEARXNG_SECRET=${config.secret}`, 'SEARXNG_BASE_URL=http://127.0.0.1:8088/'],
         ExposedPorts: { '8080/tcp': {} },
-        HostConfig: { PortBindings: { '8080/tcp': [{ HostPort: '8088' }] }, RestartPolicy: { Name: 'unless-stopped' } },
+        HostConfig: {
+          PortBindings: { '8080/tcp': [{ HostPort: '8088' }] },
+          RestartPolicy: { Name: 'unless-stopped' },
+          Binds: ['local-agent-searxng-config:/etc/searxng'],
+        },
+        files: [{ dir: '/etc/searxng', name: 'settings.yml', content: config.yaml, mode: 0o644 }],
       });
-      store.appendJob(jobId, `started ${id}\n`);
+      store.appendJob(jobId, `started ${id.slice(0, 12)} with JSON output on\n`);
+      const current = store.getSettings();
+      if (!current.searxngUrl) store.saveSettings({ ...current, searxngUrl: 'http://127.0.0.1:8088' }, 'SearXNG started', { searxngUrl: 'http://127.0.0.1:8088' });
     } else if (action === 'start-whisper' || action === 'start-kokoro') {
       if (!docker.available()) throw new Error('Docker is not available.');
       const whisper = action === 'start-whisper';

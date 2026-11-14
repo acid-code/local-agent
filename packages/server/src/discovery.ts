@@ -72,8 +72,8 @@ export async function scanMachine(fetchImpl: typeof fetch, docker: DockerCtl, st
   }
   if (ollama) rememberOllama(store, ollama);
   const gpu = readGpu();
-  const dockerOk = docker.available();
-  probes.push({ id: 'docker', kind: 'docker', ok: dockerOk, detail: dockerOk ? 'Docker socket is present.' : 'Docker socket was not found.' });
+  const dockerOk = docker.available() && await docker.ping();
+  probes.push({ id: 'docker', kind: 'docker', ok: dockerOk, detail: dockerOk ? `Docker answered at ${docker.describe()}.` : `Docker did not answer at ${docker.describe()}. Set DOCKER_HOST if it listens elsewhere.` });
   const tailscale = await tailscaleIp();
   const cloudflared = await commandOnPath('cloudflared');
   const searxng = await findSearxng(fetchImpl, process.env.SEARXNG_URL);
@@ -102,6 +102,12 @@ function rememberOllama(store: Store, ollama: NonNullable<DiscoveryReport['ollam
       typicalQ4GiB: profile.typicalQ4GiB ?? (model.size ? model.size / 1024 ** 3 : null), priceIn: 0, priceOut: 0, notes: profile.notes,
       parameterSize: model.parameterSize ?? null, family: model.family ?? profile.family, source: 'discovered', embedding: false, freeTier: null, enabled: true,
     });
+  }
+  // A model removed from Ollama stays listed otherwise, and chats fail on it.
+  const installed = new Set(ollama.models.map((model) => model.name));
+  for (const row of store.listModels()) {
+    if (row.providerId !== provider.id || row.source !== 'discovered' || !row.enabled) continue;
+    if (!installed.has(row.apiName) && !installed.has(`${row.apiName}:latest`)) store.updateModel(row.id, { enabled: false });
   }
 }
 
@@ -195,7 +201,7 @@ export function setupPreview(action: string, model?: string) {
     return { command: `ollama pull ${name}`, detail: `POST /api/pull {"name":"${name}"} on the detected Ollama. Same result as the CLI command.` };
   }
   if (action === 'start-searxng') {
-    return { command: 'docker run -d --name local-agent-searxng --restart unless-stopped -p 8088:8080 docker.io/searxng/searxng:latest', detail: 'Starts SearXNG bound to port 8088. Nothing runs until you confirm.' };
+    return { command: 'docker run -d --name local-agent-searxng --restart unless-stopped -p 8088:8080 -v local-agent-searxng-config:/etc/searxng docker.io/searxng/searxng:latest  # plus settings.yml with JSON on', detail: 'Starts SearXNG on port 8088 with JSON output on and the limiter off. Replaces an older local-agent-searxng container. Nothing runs until you confirm.' };
   }
   if (action === 'pull-sandbox') {
     return { command: 'docker pull alpine:3.20', detail: 'Image used for shell sandboxes and per-agent containers.' };

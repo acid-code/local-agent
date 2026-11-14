@@ -79,4 +79,15 @@ export interface RunCursor {
   providerFallback?: boolean;
   contextUsed?: number;
   contextBudget?: number;
+  /** The user message this run answers. Routing and context stop at it. */
+  userMessageId?: string;
+  /** One retry after an empty answer, with thinking turned off. */
+  emptyRetry?: boolean;
+  noThink?: boolean;
+  /** One retry on the next Auto tier after a model rejected tools. */
+  toolRetry?: boolean;
+  /** Send no tools on this turn. */
+  noTools?: boolean;
+  /** One retry on the next Auto tier after the model was missing from Ollama. */
+  missingRetry?: boolean;
 }

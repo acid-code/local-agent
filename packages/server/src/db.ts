@@ -555,7 +555,20 @@ export class Store {
   }
 
   listSessions(): Session[] {
-    return this.many<Raw>('SELECT * FROM chat_sessions WHERE archived = 0 ORDER BY updated_at DESC LIMIT 200').map(mapSession);
+    return this.pageSessions({ limit: 200 }).sessions;
+  }
+
+  /** Newest first. `cursor` is the nextCursor of the previous page. */
+  pageSessions(opts: { limit?: number; cursor?: string | null } = {}): { sessions: Session[]; nextCursor: string | null } {
+    const limit = Math.max(1, Math.min(500, Math.floor(opts.limit ?? 50)));
+    const [updatedAt, id] = opts.cursor ? String(opts.cursor).split('|') : [];
+    const rows = updatedAt && id
+      ? this.many<Raw>('SELECT * FROM chat_sessions WHERE archived = 0 AND (updated_at < ? OR (updated_at = ? AND id < ?)) ORDER BY updated_at DESC, id DESC LIMIT ?', updatedAt, updatedAt, id, limit + 1)
+      : this.many<Raw>('SELECT * FROM chat_sessions WHERE archived = 0 ORDER BY updated_at DESC, id DESC LIMIT ?', limit + 1);
+    const more = rows.length > limit;
+    const page = rows.slice(0, limit);
+    const last = page.at(-1);
+    return { sessions: page.map(mapSession), nextCursor: more && last ? `${String(last.updated_at)}|${String(last.id)}` : null };
   }
 
   getSession(id: string): Session | null {

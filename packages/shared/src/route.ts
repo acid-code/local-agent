@@ -170,7 +170,9 @@ export function decideRoute(input: RouteInput): RouteDecision {
   } else if (escalate && localPick) {
     pick = localPick;
     trace = 'quota fallback';
-    reason = `Staying on ${localPick.name} — Gemini quota is used up.`;
+    reason = models.some((model) => !model.local && model.providerKind === 'gemini')
+      ? `Staying on ${localPick.name} — Gemini quota is used up.`
+      : `Staying on ${localPick.name} — Gemini is off or has no API key.`;
   } else if (!localPick && cloudPick) {
     pick = cloudPick;
     trace = input.busyLocalLarge ? 'single large local' : 'no local candidate';

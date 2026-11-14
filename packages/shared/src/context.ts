@@ -223,8 +223,14 @@ export function foldCandidates(
   coveredIds: Set<string>,
   tokenizer: TokenizerId,
   triggerTokens: number,
+  /** When set, fold early once the open messages near this budget, whatever their count. */
+  budgetTokens?: number,
 ): string[] | null {
   const uncovered = messages.filter((message) => !coveredIds.has(message.id));
+  if (budgetTokens && uncovered.length > 2) {
+    const total = uncovered.reduce((sum, message) => sum + tokens(message.content, tokenizer) + 4, 0);
+    if (total >= budgetTokens * 0.8) return uncovered.slice(0, -2).map((message) => message.id);
+  }
   if (uncovered.length <= 8) return null;
   const older = uncovered.slice(0, uncovered.length - 6);
   const cost = older.reduce((sum, message) => sum + tokens(message.content, tokenizer) + 4, 0);

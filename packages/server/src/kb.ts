@@ -7,6 +7,7 @@ import { hashEmbed } from '@local-agent/shared';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Store } from './db.js';
 import { nid, now } from './util.js';
+import { ollamaCapabilities } from './ollama.js';
 
 const CODE_EXT = new Set(['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'py', 'go', 'rs', 'java', 'c', 'h', 'hpp', 'cpp', 'cs', 'rb', 'php', 'sh', 'css', 'json', 'yml', 'yaml', 'toml', 'sql', 'xml']);
 const TEXT_EXT = new Set(['md', 'txt', 'html', 'htm', ...CODE_EXT]);
@@ -189,16 +190,24 @@ export function hybridRank(
   return [...fused.entries()].map(([id, score]) => ({ id, score })).sort((a, b) => b.score - a.score).slice(0, k);
 }
 
+/** A problem with the upload itself. The API answers 400 (or 404) with this message instead of a 500. */
+export class KbInputError extends Error {
+  constructor(message: string, readonly statusCode = 400) {
+    super(message);
+  }
+}
+
 export function extractText(name: string, bytes: Buffer): { kind: 'markdown' | 'code' | 'prose'; text: string } {
   const ext = path.extname(name).slice(1).toLowerCase();
   if (ext === 'pdf') return { kind: 'prose', text: extractPdfText(bytes) };
   if (ext === 'docx') return { kind: 'prose', text: extractDocxText(bytes) };
+  if (bytes.subarray(0, 8000).includes(0)) throw new KbInputError(`${name} looks like a binary file. Use PDF, DOCX, MD, TXT, HTML, or source code.`);
   const raw = bytes.toString('utf8');
   if (ext === 'html' || ext === 'htm') return { kind: 'prose', text: raw.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() };
   if (ext === 'md') return { kind: 'markdown', text: raw };
   if (CODE_EXT.has(ext)) return { kind: 'code', text: raw };
   if (TEXT_EXT.has(ext) || ext === 'txt' || ext === '') return { kind: 'prose', text: raw };
-  throw new Error(`Unsupported file type .${ext || 'bin'}. Use PDF, DOCX, MD, TXT, HTML, or source code.`);
+  throw new KbInputError(`Unsupported file type .${ext || 'bin'}. Use PDF, DOCX, MD, TXT, HTML, or source code.`);
 }
 
 export function extractPdfText(bytes: Buffer): string {
@@ -211,7 +220,7 @@ export function extractPdfText(bytes: Buffer): string {
     for (const piece of match[1].matchAll(/\((?:\\.|[^\\)])*\)/g)) parts.push(unescapePdf(piece[0].slice(1, -1)));
   }
   const text = parts.join(' ').replace(/\s+/g, ' ').trim();
-  if (!text) throw new Error('This PDF has no extractable text. Scanned pages need OCR, which this version does not run.');
+  if (!text) throw new KbInputError('This PDF has no extractable text. Scanned pages need OCR, which this version does not run.');
   return text;
 }
 
@@ -364,16 +373,18 @@ export async function ingestBuffer(
   embed: EmbedFn,
 ): Promise<{ id: string; status: string; chunks: number; skipped: boolean }> {
   const collection = store.db.prepare('SELECT id FROM kb_collections WHERE id = ?').get(collectionId);
-  if (!collection) throw new Error('Collection not found.');
-  if (file.bytes.length > 8_000_000) throw new Error(`${file.name} is over 8 MB.`);
+  if (!collection) throw new KbInputError('Collection not found.', 404);
+  if (file.bytes.length > 8_000_000) throw new KbInputError(`${file.name} is over 8 MB.`);
+  if (!file.bytes.length) throw new KbInputError(`${file.name} is empty.`);
   const sha = createHash('sha256').update(file.bytes).digest('hex');
   const existing = store.db.prepare('SELECT id, sha256 FROM kb_documents WHERE collection_id = ? AND name = ? AND IFNULL(path, \'\') = ?').get(
     collectionId, file.name, file.path ?? '',
   ) as { id: string; sha256: string } | undefined;
   if (existing && existing.sha256 === sha) return { id: existing.id, status: 'indexed', chunks: 0, skipped: true };
   const extracted = extractText(file.name, file.bytes);
+  if (!extracted.text.trim()) throw new KbInputError(`${file.name} has no text to index. It is empty or only whitespace.`);
   const pieces = chunkDocument(extracted.text, extracted.kind);
-  if (!pieces.length) throw new Error(`${file.name} had no text to index.`);
+  if (!pieces.length) throw new KbInputError(`${file.name} has no text to index.`);
   const embedded = await embed(pieces.map((piece) => piece.text));
   const index = vectorsFor(store);
   const ts = now();
@@ -457,7 +468,7 @@ export async function searchKnowledge(store: Store, query: string, opts: { agent
     FROM kb_chunks c JOIN kb_documents d ON d.id = c.document_id
     WHERE c.collection_id IN (${placeholders})`).all(...ids) as Record<string, unknown>[];
   const embedderName = String(rows[0]?.embedder ?? 'hash');
-  const embed = opts.embed ?? (embedderName === 'hash' ? hashEmbedder() : ollamaEmbedder(fetch));
+  const embed = opts.embed ?? (embedderName === 'hash' ? hashEmbedder() : ollamaEmbedder(fetch, embedderName));
   const queryEmbedded = await embed([query]);
   const queryVector = queryEmbedded.vectors[0] ?? hashEmbed(query);
   const docs = rows.map((row) => {
@@ -490,4 +501,48 @@ export function formatCitations(hits: KbHit[]): string {
     const where = [hit.collection, hit.path || hit.document, hit.heading].filter(Boolean).join(' · ');
     return `[${index + 1}] ${where}\n${hit.text}`;
   }).join('\n\n');
+}
+
+/** A warning when the embed role is not a usable embedding model, so knowledge search silently uses keyword hashing. */
+export async function embedRoleWarning(store: Store, fetchImpl: typeof fetch): Promise<string | null> {
+  const name = store.getSettings().autoModels.embed || 'nomic-embed-text';
+  const hashed = Number((store.db.prepare("SELECT COUNT(*) AS n FROM kb_collections WHERE embedder = 'hash'").get() as { n: number } | undefined)?.n ?? 0);
+  const tail = hashed ? ` ${hashed} collection${hashed === 1 ? ' was' : 's were'} indexed with that fallback. Re-index after fixing it.` : '';
+  const found = await ollamaCapabilities(fetchImpl, name);
+  if (found.missing) return `The embed role "${name}" is not installed in Ollama, so knowledge search falls back to keyword hashing. Run: ollama pull ${name}.${tail}`;
+  if (found.capabilities && !found.capabilities.includes('embedding')) return `The embed role "${name}" is not an embedding model, so knowledge search falls back to keyword hashing. Choose one such as nomic-embed-text.${tail}`;
+  if (hashed) return `Knowledge search used the keyword-hash fallback.${tail}`;
+  return null;
+}
+
+/** Removes one document, its chunks, and their vectors. */
+export function deleteDocument(store: Store, collectionId: string, documentId: string): boolean {
+  const doc = store.db.prepare('SELECT id FROM kb_documents WHERE id = ? AND collection_id = ?').get(documentId, collectionId);
+  if (!doc) return false;
+  dropChunks(store, 'document_id', documentId);
+  store.db.prepare('DELETE FROM kb_documents WHERE id = ?').run(documentId);
+  store.db.prepare('UPDATE kb_collections SET updated_at = ? WHERE id = ?').run(now(), collectionId);
+  return true;
+}
+
+/** Removes a collection with every document, chunk, and vector in it. */
+export function deleteCollection(store: Store, collectionId: string): boolean {
+  const row = store.db.prepare('SELECT id FROM kb_collections WHERE id = ?').get(collectionId);
+  if (!row) return false;
+  dropChunks(store, 'collection_id', collectionId);
+  store.db.prepare('DELETE FROM kb_documents WHERE collection_id = ?').run(collectionId);
+  store.db.prepare('DELETE FROM kb_collections WHERE id = ?').run(collectionId);
+  return true;
+}
+
+export function listDocuments(store: Store, collectionId: string) {
+  return (store.db.prepare('SELECT id, name, path, bytes, status, updated_at FROM kb_documents WHERE collection_id = ? ORDER BY name').all(collectionId) as Record<string, unknown>[])
+    .map((row) => ({ id: String(row.id), name: String(row.name), path: row.path ? String(row.path) : null, bytes: Number(row.bytes), status: String(row.status), updatedAt: String(row.updated_at) }));
+}
+
+function dropChunks(store: Store, column: 'document_id' | 'collection_id', id: string) {
+  const old = store.db.prepare(`SELECT rowid, dim FROM kb_chunks WHERE ${column} = ?`).all(id) as { rowid: number; dim: number }[];
+  const index = vectorsFor(store);
+  for (const dim of new Set(old.map((item) => item.dim))) index.remove(dim, old.filter((item) => item.dim === dim).map((item) => Number(item.rowid)));
+  store.db.prepare(`DELETE FROM kb_chunks WHERE ${column} = ?`).run(id);
 }

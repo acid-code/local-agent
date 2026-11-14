@@ -1,0 +1,65 @@
+name: windows
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: write
+jobs:
+  exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Build the portable exe and the installer
+        working-directory: apps/desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+        run: |
+          npm ci
+          npx electron-builder --win portable nsis
+      - uses: actions/upload-artifact@v4
+        with:
+          name: local-agent-windows
+          path: apps/desktop/release/*.exe
+          if-no-files-found: error
+      - name: Publish the GitHub release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          short="${GITHUB_SHA::7}"
+          tag="main-${short}"
+          portable="$(find apps/desktop/release -name 'local-agent-portable.exe' -print -quit)"
+          setup="$(find apps/desktop/release -name 'local-agent-setup.exe' -print -quit)"
+          test -n "$portable"
+          test -n "$setup"
+          cp "$portable" "local-agent-${short}-portable.exe"
+          cp "$setup" "local-agent-${short}-setup.exe"
+          note="Windows shell for the web console. Unsigned. SmartScreen: More info, then Run anyway."
+          for attempt in 1 2 3 4 5 6; do
+            if gh release view "$tag" >/dev/null 2>&1; then
+              gh release upload "$tag" "local-agent-${short}-portable.exe" "local-agent-${short}-setup.exe" --clobber
+              body="$(gh release view "$tag" --json body --jq .body)"
+              case "$body" in
+                *"$note"*) ;;
+                *) gh release edit "$tag" --notes "${body}"$'\n\n'"${note}" ;;
+              esac
+              exit 0
+            fi
+            if gh release create "$tag" "local-agent-${short}-portable.exe" "local-agent-${short}-setup.exe" \
+              --title "local-agent ${short}" \
+              --latest \
+              --notes "$note"; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Could not publish ${tag}" >&2
+          exit 1

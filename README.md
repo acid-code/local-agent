@@ -35,7 +35,7 @@ npm run dev
 
 The API is `http://127.0.0.1:8787`. The UI is `http://127.0.0.1:5173`.
 
-On the mini PC, `sudo bash scripts/install-server.sh --dry-run` prints every command, and the same script without `--dry-run` installs Docker, Compose, Mesa Vulkan for the Radeon 780M, the systemd unit, and the app. `--with-ollama` and `--with-tailscale` are optional. `scripts/uninstall-server.sh` removes the unit and keeps the data unless you pass `--purge`. The Windows laptop script is `scripts/setup-client.ps1`. The phone app is the Capacitor shell in `apps/mobile`. Details, including the Android signing secrets, are in [SETUP.md](SETUP.md).
+On the mini PC, `sudo bash scripts/install-server.sh --dry-run` prints every command, and the same script without `--dry-run` installs Docker, Compose, Mesa Vulkan for the Radeon 780M, the systemd unit, and the app. `--with-ollama` and `--with-tailscale` are optional. `scripts/uninstall-server.sh` removes the unit and keeps the data unless you pass `--purge`. The Windows laptop script is `scripts/setup-client.ps1`. The phone app is the Capacitor shell in `apps/mobile`. The Windows shell is `apps/desktop`. A laptop-sized WSL2 path, with one small Ollama model, is in [docs/wsl-quickstart.md](docs/wsl-quickstart.md). Details, including the Android signing secrets and the unsigned Windows exe, are in [SETUP.md](SETUP.md).
 
 ```bash
 sudo cp deploy/local-agent.service /etc/systemd/system/
@@ -120,6 +120,8 @@ A switch is announced once, in one line. Staying on the current model is silent,
 packages/shared   types, routing, context budgets, token estimates
 packages/server   Fastify, SQLite, the run loop, tools, MCP, vault
 packages/web      React UI
+apps/mobile       Capacitor Android shell
+apps/desktop      Electron Windows shell
 deploy/           systemd unit
 ```
 

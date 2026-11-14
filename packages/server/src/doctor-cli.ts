@@ -3,7 +3,9 @@ import path from 'node:path';
 import { geminiQuotaDay } from '@local-agent/shared';
 import { loadConfig } from './config.js';
 import { Store } from './db.js';
-import { doctorChecks } from './debug.js';
+import { DockerCtl } from './docker.js';
+import { searxngHealth } from './tools.js';
+import { doctorChecks, geminiStateOf } from './debug.js';
 import { ollamaLoaded } from './ollama.js';
 import { snapshotResources } from './resources.js';
 import { listBackups } from './ops.js';
@@ -22,21 +24,24 @@ if (process.argv.includes('--reset-owner')) {
 }
 
 const loaded = await ollamaLoaded(fetch);
+const searx = await searxngHealth(store.getSettings().searxngUrl || process.env.SEARXNG_URL || '', fetch);
 const snap = snapshotResources(store, config.dataDir);
 const dbFile = path.join(config.dataDir, 'local-agent.db');
 const checks = doctorChecks({
   ollamaOk: loaded.length >= 0 && await ollamaUp(),
   loaded,
-  dockerOk: fs.existsSync('/var/run/docker.sock'),
+  dockerOk: await new DockerCtl().ping(),
   mcpCount: store.listMcp().length,
   mcpErrors: store.listMcp().filter((item) => item.lastError).length,
-  searxngOk: Boolean(store.getSettings().searxngUrl),
+  searxngOk: searx.ok,
+  searxngDetail: searx.detail,
   tailscaleOk: false,
   telegramQueued: 0,
   dbBytes: fs.existsSync(dbFile) ? fs.statSync(dbFile).size : 0,
   diskFreeBytes: snap.disk.freeBytes,
   memAvailableGiB: snap.memory.availableGiB,
   geminiOpen: null,
+  geminiState: geminiStateOf(store.getProvider('prov_gemini')) === 'off' ? 'off' : 'unknown',
   lastBackupAt: listBackups(config.dataDir)[0]?.createdAt ?? null,
 });
 console.log(`local-agent doctor  quota day ${geminiQuotaDay()} (UTC)`);
