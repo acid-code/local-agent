@@ -1174,3 +1174,8 @@ table.limits tbody th { color: var(--text); font-weight: 500; }
 :root[data-desktop] .brand { -webkit-app-region: drag; min-height: 28px; }
 :root[data-desktop] .brand button { -webkit-app-region: no-drag; }
 :root[data-desktop="mac"] .sidebar { padding-top: 44px; }
+/* Overlay panes start under the title bar so they never sit beneath the OS window controls. */
+:root[data-desktop="win"] .chat.with-panel .side-panel, :root[data-desktop="linux"] .chat.with-panel .side-panel { top: 40px; }
+:root:not([data-flat="off"]) .chat.with-panel .side-panel { box-shadow: none; }
+.pane-section .link-btn.pane-more { color: var(--text); text-decoration: none; padding: 0; background: none; border: 0; }
+.pane-section a.pane-more { color: var(--text); text-decoration: none; }
