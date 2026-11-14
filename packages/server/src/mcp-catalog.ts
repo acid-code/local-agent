@@ -64,10 +64,10 @@ export async function dockerCatalog(fetchImpl: typeof fetch, dataDir: string): P
 /** The official MCP registry (registry.modelcontextprotocol.io): npm and OCI packages are installable. */
 export async function officialCatalog(query: string, fetchImpl: typeof fetch): Promise<CatalogEntry[]> {
   try {
-    const response = await fetchImpl(`https://registry.modelcontextprotocol.io/v0.1/servers?search=${encodeURIComponent(query)}&version=latest&limit=30`, { signal: AbortSignal.timeout(10_000) });
+    const response = await fetchImpl(`https://registry.modelcontextprotocol.io/v0.1/servers?${query ? `search=${encodeURIComponent(query)}&` : ''}version=latest&limit=60`, { signal: AbortSignal.timeout(10_000) });
     if (!response.ok) return [];
     const json = await response.json() as { servers?: { server?: { name?: string; title?: string; description?: string; version?: string; repository?: { url?: string }; packages?: { registryType?: string; identifier?: string; version?: string; environmentVariables?: { name?: string; description?: string; isSecret?: boolean }[] }[] } }[] };
-    return (json.servers ?? []).map((row) => {
+    const entries = (json.servers ?? []).map((row) => {
       const server = row.server ?? {};
       const pkg = server.packages?.find((item) => item.registryType === 'npm' || item.registryType === 'oci');
       const image = pkg?.registryType === 'oci' ? `${pkg.identifier}${pkg.version && !String(pkg.identifier).includes(':') ? `:${pkg.version}` : ''}` : undefined;
@@ -79,6 +79,8 @@ export async function officialCatalog(query: string, fetchImpl: typeof fetch): P
         env: [], installable: Boolean(pkg), note: pkg ? undefined : 'Remote-only server; not supported here yet.',
       };
     });
+    // Installable (npm or OCI) first; remote-only ones stay listed but greyed out.
+    return [...entries.filter((row) => row.installable), ...entries.filter((row) => !row.installable)];
   } catch { return []; }
 }
 

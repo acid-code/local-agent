@@ -72,8 +72,10 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
   const [activePersona, setActivePersona] = useState<string | null>(null);
   useEffect(() => {
     const onActive = (event: Event) => setActivePersona((event as CustomEvent<string | null>).detail ?? null);
+    const onOpen = () => setOpen(true);
     window.addEventListener('la:active-persona', onActive);
-    return () => window.removeEventListener('la:active-persona', onActive);
+    window.addEventListener('la:open-sidebar', onOpen);
+    return () => { window.removeEventListener('la:active-persona', onActive); window.removeEventListener('la:open-sidebar', onOpen); };
   }, []);
 
   async function loadPersonas() {

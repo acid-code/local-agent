@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Menu as DropMenu } from '../components/ui';
 import { ModelPicker, useUsableModels } from '../lib/models';
 import { browserDictationSupported, startDictation } from '../lib/dictation';
-import { AtSign, Info, Layers, Brain, Check, ChevronDown, Code2, Copy, Download, Eye, FileText, Folder, FolderGit2, GitBranch, ListTree, Menu, MessageSquarePlus, Pin, PinOff, Plus, Search, Mic, PanelRight, Paperclip, Pencil, Quote, RotateCcw, Send, Share, Square, Trash2, Volume2, Wrench, X } from 'lucide-react';
+import { AtSign, Info, Layers, Brain, Check, ChevronDown, Code2, Copy, Download, Eye, FileText, Folder, FolderGit2, GitBranch, ListTree, Menu, MessageSquare, MessageSquarePlus, Pin, PinOff, Plus, Search, Mic, PanelRight, Paperclip, Pencil, Quote, RotateCcw, Send, Share, Square, Trash2, Volume2, Wrench, X } from 'lucide-react';
 import { CiteContext, type CiteHandlers } from '../components/Markdown';
 import { FileViewer, type QuotePick, type ViewerSource } from '../components/FileViewer';
 import { MentionPicker, type MentionPick } from '../components/MentionPicker';
@@ -662,7 +662,7 @@ export function Chat() {
       </aside>
       <section className="thread">
         <div className="thread-head">
-          <button className="icon-btn round chats-btn" aria-label="Show chats" title="Chats" onClick={() => setRail(true)}><Menu size={17} /></button>
+          <button className="icon-btn round chats-btn" aria-label="Show chats" title="Chats" onClick={() => { if (window.matchMedia('(max-width: 980px)').matches) window.dispatchEvent(new Event('la:open-sidebar')); else setRail(true); }}><Menu size={17} /></button>
           <span className="head-spacer" />
           {persona && <button className="persona-name head-pill" title={`${currentSession?.title || 'New chat'} · persona info (Ctrl+Shift+I)`} aria-label={`${persona.name}, open persona info`} aria-expanded={panel === 'persona' || panel === 'settings'} onClick={() => setPanel(panel === 'persona' || panel === 'settings' ? null : 'persona')}>
             <Face agent={persona} size={22} /><span className="persona-label ellipsis" dir="auto">{persona.name}{(persona as { title?: string }).title ? ` · ${(persona as { title?: string }).title}` : ''}</span>
@@ -676,6 +676,8 @@ export function Chat() {
             {currentSession && <button className="icon-btn round" aria-label="Export chat" title="Export this chat as Markdown" onClick={exportChat}><Share size={17} /></button>}
             {persona && <button className={showState ? 'icon-btn round on' : 'icon-btn round'} aria-pressed={showState} aria-label="Status" title={`${persona.name}: coding, upcoming, computer, voice`} onClick={toggleState}><PanelRight size={17} /></button>}
             {currentSession && <DropMenu label="Chat options" items={[
+              { label: 'Chats with this persona', icon: MessageSquare, onSelect: () => setRail(true) },
+              { label: 'Export chat', icon: Share, onSelect: exportChat },
               { label: 'Helpers, timers and files', icon: Layers, onSelect: () => setPanel(panel === 'context' ? null : 'context') },
               { label: trace ? 'Hide trace' : 'Show trace', icon: ListTree, onSelect: () => setTrace((value) => !value) },
               { label: 'Rename chat', icon: Pencil, onSelect: () => { setRail(true); setRenaming(currentSession.id); setTitleDraft(currentSession.title); } },

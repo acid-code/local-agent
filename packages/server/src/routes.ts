@@ -1013,7 +1013,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   app.get('/api/mcp/catalog', async (req) => {
     const query = req.query as { source?: string; q?: string };
     const q = String(query.q || '').trim().toLowerCase();
-    if (query.source === 'official') return { source: 'official', entries: await officialCatalog(q || 'mcp', fetchImpl) };
+    if (query.source === 'official') return { source: 'official', entries: await officialCatalog(q, fetchImpl) };
     const entries = (await dockerCatalog(fetchImpl, config.dataDir)).filter((entry) => !q || `${entry.id} ${entry.title} ${entry.description}`.toLowerCase().includes(q));
     return { source: 'docker', total: entries.length, entries: entries.slice(0, 60) };
   });
