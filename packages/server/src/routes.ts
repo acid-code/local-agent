@@ -47,6 +47,8 @@ import type { Vault } from './vault.js';
 import { MEMBER_DENIED_TOOLS, OWNER_ID, accountOf, foreignPath, mustOwn, ownerOf, workspaceFor } from './accounts.js';
 import { memberByUsername } from './accounts.js';
 import { registerAccounts } from './members.js';
+import { registerMedia } from './media.js';
+import { localStatus } from './images.js';
 
 type Ctx = {
   store: Store;
@@ -67,6 +69,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
 
   app.get('/api/health', async () => ({ ok: true, version: VERSION }));
   registerAccounts(app, { store, config });
+  registerMedia(app, { store, dataDir: config.dataDir, vault, fetchImpl });
 
   app.get('/api/auth/me', async (req) => {
     const owner = store.getOwner();
@@ -186,8 +189,23 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       backupTransport: z.enum(['none', 'rsync', 'rclone', 's3']).optional(),
       backupTarget: z.string().optional(),
       agentLimits: z.record(z.object({ maxTokensPerDay: z.number().optional(), maxSpendUsd: z.number().optional(), maxRunMs: z.number().optional(), readOnly: z.boolean().optional() })).optional(),
+      imageGen: z.object({
+        mode: z.enum(['auto', 'local', 'gemini', 'off']).optional(),
+        backend: z.enum(['sdcpp', 'http']).optional(),
+        sdBinary: z.string().max(500).optional(),
+        localModel: z.string().max(80).optional(),
+        httpUrl: z.string().max(500).refine((value) => !value || /^https?:\/\//.test(value), 'The image server URL must start with http:// or https://.').optional(),
+        geminiModel: z.string().max(80).optional(),
+        size: z.number().int().min(256).max(1024).optional(),
+        extraModels: z.array(z.object({
+          id: z.string().regex(/^[a-z0-9._-]{2,40}$/), name: z.string().max(60), blurb: z.string().max(200), speed: z.enum(['fast', 'medium', 'slow']),
+          files: z.array(z.object({ role: z.enum(['model', 'diffusion', 'vae', 'clip_l', 't5xxl']), repo: z.string().regex(/^[\w.-]+\/[\w.-]+$/), file: z.string().regex(/^[\w./-]+$/).refine((value) => !value.includes('..')), bytes: z.number().int().nonnegative(), gated: z.boolean().optional() })).min(1).max(6),
+          steps: z.number().int().min(1).max(50), cfg: z.number().min(0).max(20), size: z.number().int().min(256).max(1024), sampler: z.string().regex(/^[a-z0-9_+]+$/), ramGiB: z.number().min(0).max(256), licence: z.string().max(80),
+        })).max(20).optional(),
+      }).optional(),
     }), req.body);
-    const next = { ...store.getSettings(), ...body };
+    const current = store.getSettings();
+    const next = { ...current, ...body, imageGen: { ...current.imageGen, ...(body.imageGen ?? {}) } };
     const saved = store.saveSettings(next, 'Settings updated', { settings: next, agents: store.listAgents() });
     return { settings: saved };
   });
@@ -1054,7 +1072,17 @@ async function healthChecks(store: Store, docker: DockerCtl, fetchImpl: typeof f
     diskFreeBytes: snap.disk.freeBytes, memAvailableGiB: snap.memory.availableGiB,
     geminiOpen: settings.geminiTier === 'paid' ? true : null, geminiState: geminiStateOf(store.getProvider('prov_gemini')) === 'off' ? 'off' : undefined, lastBackupAt: backups[0]?.createdAt ?? null, tailscaleOk: await tailscaleUp(),
   }), { id: 'embed', ok: !embedWarning, detail: embedWarning || (ollamaOk ? 'The embed role is an embedding model.' : 'Ollama is down, so the embed role was not checked.') },
+  await imageCheck(store, dataDir, fetchImpl),
   { id: 'roles', ok: missingRoles.length === 0, detail: installed === null ? 'Ollama is down, so the Auto roles were not checked.' : missingRoles.length ? `Auto roles point at models Ollama does not have: ${missingRoles.join(', ')}. Pull them or change Defaults in Setup.` : 'Every Auto role points at an installed model.' }];
+}
+
+async function imageCheck(store: Store, dataDir: string, fetchImpl: typeof fetch) {
+  const cfg = store.getSettings().imageGen;
+  if (cfg.mode === 'off') return { id: 'image', ok: true, detail: 'Image generation is off.' };
+  const local = await localStatus(dataDir, cfg, fetchImpl);
+  if (local.ready) return { id: 'image', ok: true, detail: local.detail };
+  const gemini = Boolean(process.env.GEMINI_API_KEY);
+  return { id: 'image', ok: cfg.mode !== 'local' && gemini, detail: `${local.detail}${gemini && cfg.mode !== 'local' ? ' Gemini covers image requests meanwhile.' : ''}` };
 }
 
 function tailscaleUp(): Promise<boolean> {

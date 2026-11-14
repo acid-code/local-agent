@@ -6,6 +6,7 @@ import {
   OWNER_ID, accountDir, accountOf, createMember, deleteMember, getTheme, listMembers, setTheme, updateMember, workspaceFor, type Account,
 } from './accounts.js';
 import type { Store } from './db.js';
+import { imageQuota } from './images.js';
 import fs from 'node:fs';
 
 const http = (statusCode: number, message: string) => Object.assign(new Error(message), { statusCode });
@@ -28,6 +29,12 @@ const themeSchema = z.object({
   bubbles: z.enum(['classic', 'soft', 'minimal']).optional(),
   font: z.string().max(40).optional(),
   decor: z.boolean().optional(),
+  wallpaper: z.string().regex(/^[a-z0-9-]{1,40}$/).optional(),
+  wallpaperMode: z.enum(['pattern', 'scene']).optional(),
+  wallpaperOpacity: z.number().min(0).max(1).optional(),
+  wallpaperBlur: z.number().min(0).max(30).optional(),
+  wallpaperDim: z.number().min(0).max(0.95).optional(),
+  wallpaperVersion: z.number().int().nonnegative().optional(),
 }).strict();
 
 const limitsSchema = z.object({ cloud: z.boolean().optional(), maxAgents: z.number().int().min(1).max(100).optional() }).strict();
@@ -74,7 +81,8 @@ export function registerAccounts(app: FastifyInstance, ctx: { store: Store; conf
       const availability = quotaAvailability(limited, { rpm: used.rpmWindow === minute ? used.rpm : 0, tpm: used.tpmWindow === minute ? used.tpm : 0, rpd: used.rpd });
       return { name: row.displayName, apiName: row.apiName, rpdLimit: limited.rpd.limit, rpdRemaining: availability.rpdRemaining, open: availability.open };
     }).filter((row) => row.rpdLimit);
-    return { cloudAllowed: account.role === 'owner' || account.limits.cloud, keyed, tier: settings.geminiTier, models };
+    const image = imageQuota(store, settings);
+    return { cloudAllowed: account.role === 'owner' || account.limits.cloud, keyed, tier: settings.geminiTier, models, image: { model: image.apiName, remaining: image.remaining, limit: image.limit } };
   });
 
   // People: the owner manages member accounts. Members never reach these routes.

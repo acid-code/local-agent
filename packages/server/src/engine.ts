@@ -39,6 +39,7 @@ import { scanMachine } from './discovery.js';
 import { CrashError, InterruptedToolError, StopError, clampText, now } from './util.js';
 import type { Vault } from './vault.js';
 import { CITE_HINT, findContextTool, shareFileTool } from './files.js';
+import { generateImage, imageTool, localStatus } from './images.js';
 import { MEMBER_DENIED_TOOLS, OWNER_ID, foreignPath, getAccount } from './accounts.js';
 
 export class Engine {
@@ -87,6 +88,7 @@ export class Engine {
       else pinMiss = command.pinName;
     }
     if (command?.unpin && !command.rest) commandAck = 'Back on Auto.';
+    const imageCommand = input.content ? /^\/(?:image|img|draw)\s+([\s\S]+)/i.exec(input.content.trim()) : null;
     if (command?.smart && !command.rest && !command.pinName) commandAck = 'Add the question after /smart. The next ordinary message goes back to the main model.';
     let userMessageId: string | undefined;
     if (input.content) {
@@ -99,7 +101,7 @@ export class Engine {
       }
       userMessageId = message.id;
     }
-    const cursor: RunCursor = { phase: 'route', turn: 0, userMessageId, messageModelId: input.modelId, depth: input.depth ?? 0, configVersion: this.store.getSettings().version, agentUpdatedAt: agent.updatedAt, commandAck, pinMiss };
+    const cursor: RunCursor = { phase: 'route', turn: 0, userMessageId, messageModelId: input.modelId, depth: input.depth ?? 0, configVersion: this.store.getSettings().version, agentUpdatedAt: agent.updatedAt, commandAck, pinMiss, imagePrompt: imageCommand?.[1]?.trim() || undefined };
     const run = this.store.createRun({ sessionId: session.id, agentId: agent.id, parentRunId: input.parentRunId, configVersion: cursor.configVersion ?? 1, cursor });
     const task = this.execute(run.id);
     if (input.wait) await task;
@@ -247,7 +249,36 @@ export class Engine {
     }
   }
 
+  /** /image <prompt>: one picture, saved to the user's files, shown as a preview in the chat. */
+  private async stepImage(run: RunRow, prompt: string) {
+    const agent = this.store.getAgent(run.agentId);
+    const ownerId = agent?.ownerId || OWNER_ID;
+    const cfg = this.store.getSettings().imageGen;
+    const local = await localStatus(this.libraryDir, cfg, this.fetchImpl);
+    if (cfg.mode !== 'off' && cfg.mode !== 'gemini' && local.ready) this.bus.publish({ type: 'thinking', runId: run.id, text: local.kind === 'mock' ? 'Drawing…' : 'Drawing on this machine with Stable Diffusion. On a CPU this usually takes 20-90 seconds…' });
+    let content: string;
+    let note: string;
+    try {
+      const result = await generateImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl }, { prompt, ownerId, sessionId: run.sessionId, agentId: run.agentId });
+      note = `Image · ${result.detail} · ${Math.max(1, Math.round(result.ms / 1000))} s`;
+      content = `Here it is: [file:${result.file.id}]`;
+    } catch (error) {
+      note = 'Image failed';
+      content = `I could not make that image. ${error instanceof Error ? error.message : String(error)}`;
+    }
+    const assistant = this.store.insertMessage({
+      sessionId: run.sessionId, role: 'assistant', content, toolCalls: null,
+      agentId: agent?.id ?? null, runId: run.id, toolCallId: null, toolName: null, imageUrl: null, routingNote: note,
+    });
+    this.store.updateRun(run.id, { cursor: { ...run.cursor, phase: 'done' as const }, status: 'completed', endedAt: now(), routingNote: note, switched: false });
+    this.bus.publish({ type: 'message', runId: run.id, message: assistant });
+  }
+
   private async stepRoute(run: RunRow) {
+    if (run.cursor.imagePrompt) {
+      await this.stepImage(run, run.cursor.imagePrompt);
+      return;
+    }
     if (run.cursor.commandAck) {
       const agent = this.store.getAgent(run.agentId);
       const assistant = this.store.insertMessage({
@@ -995,12 +1026,13 @@ export class Engine {
     names.add('repo_sync');
     names.add('find_context');
     names.add('share_file');
+    if (this.store.getSettings().imageGen.mode !== 'off') names.add('generate_image');
     if (stage === 'plan') {
       for (const name of ['web_search', 'web_fetch', 'read_file', 'list_dir', 'grep', 'glob', 'plan', 'recall', 'consult_agent']) names.add(name);
     }
     if (stage === 'implement' || sessionMode === 'code') for (const tool of CODING_TOOLS) names.add(tool.name);
     if (agent.ownerId !== OWNER_ID) for (const name of MEMBER_DENIED_TOOLS) names.delete(name);
-    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), ...this.extraTools];
+    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl }), ...this.extraTools];
     const seen = new Set<string>();
     return catalog.filter((tool) => {
       if (!names.has(tool.name) || seen.has(tool.name)) return false;

@@ -51,6 +51,8 @@ export type RunStatus =
 
 export interface RunCursor {
   phase: RunPhase;
+  /** Set by the /image chat command: generate a picture instead of calling a chat model. */
+  imagePrompt?: string;
   turn: number;
   modelId?: string;
   messageModelId?: string;

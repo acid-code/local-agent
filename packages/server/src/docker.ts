@@ -135,6 +135,28 @@ export class DockerCtl {
     });
   }
 
+  /** Run a container to completion and copy one file out of it (used to build a native binary without a local compiler). */
+  async runAndCopyOut(spec: RunSpec, filePath: string, timeoutMs = 30 * 60_000): Promise<{ code: number; output: string; file: Buffer | null }> {
+    await this.pull(spec.Image).catch(() => undefined);
+    const container = await this.api().createContainer({ Image: spec.Image, Cmd: spec.Cmd, Env: spec.Env, Labels: spec.Labels, name: spec.name });
+    try {
+      await container.start();
+      const result = await Promise.race([
+        container.wait(),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Container timed out.')), timeoutMs)),
+      ]);
+      const raw = await container.logs({ stdout: true, stderr: true, tail: 40 });
+      const output = demux(Buffer.isBuffer(raw) ? raw : Buffer.from(raw)).slice(-4000);
+      if ((result.StatusCode ?? 1) !== 0) return { code: result.StatusCode ?? 1, output, file: null };
+      const stream = await container.getArchive({ path: filePath });
+      const chunks: Buffer[] = [];
+      for await (const chunk of stream as AsyncIterable<Buffer>) chunks.push(chunk);
+      return { code: 0, output, file: untarFirst(Buffer.concat(chunks)) };
+    } finally {
+      try { await container.remove({ force: true }); } catch { /* already removed */ }
+    }
+  }
+
   async runCollect(spec: RunSpec, timeoutMs = 30_000): Promise<{ output: string; code: number }> {
     const container = await this.api().createContainer({
       Image: spec.Image,
@@ -301,4 +323,18 @@ export function tarFile(name: string, content: Buffer, mode = 0o644): Buffer {
   put(sum.toString(8).padStart(6, '0') + '\0 ', 148, 8);
   const pad = Buffer.alloc((512 - (content.length % 512)) % 512, 0);
   return Buffer.concat([header, content, pad, Buffer.alloc(1024, 0)]);
+}
+
+/** The first regular file in a tar archive. */
+export function untarFirst(tar: Buffer): Buffer | null {
+  let offset = 0;
+  while (offset + 512 <= tar.length) {
+    const header = tar.subarray(offset, offset + 512);
+    if (header.every((byte) => byte === 0)) return null;
+    const size = parseInt(header.subarray(124, 136).toString('ascii').replace(/\0.*$/, '').trim() || '0', 8);
+    const type = String.fromCharCode(header[156] || 48);
+    if (type === '0' || type === '\0') return tar.subarray(offset + 512, offset + 512 + size);
+    offset += 512 + Math.ceil(size / 512) * 512;
+  }
+  return null;
 }

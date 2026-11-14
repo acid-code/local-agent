@@ -197,7 +197,7 @@ export const MEMBER_DENIED_TOOLS = new Set([
  * Each listed route still checks that the row belongs to the caller.
  */
 export const MEMBER_ROUTES = new Set([
-  'GET /api/auth/me', 'POST /api/auth/logout', 'POST /api/account/password', 'GET /api/me', 'GET /api/me/theme', 'PUT /api/me/theme', 'GET /api/me/quota',
+  'GET /api/auth/me', 'POST /api/auth/logout', 'POST /api/account/password', 'GET /api/me', 'GET /api/me/theme', 'PUT /api/me/theme', 'GET /api/me/quota', 'POST /api/me/wallpaper', 'GET /api/me/wallpaper', 'DELETE /api/me/wallpaper', 'GET /api/images/status', 'POST /api/images/generate',
   'GET /api/agents', 'POST /api/agents', 'POST /api/agents/reorder', 'GET /api/agents/:id', 'PATCH /api/agents/:id', 'DELETE /api/agents/:id',
   'POST /api/agents/:id/read', 'POST /api/agents/:id/avatar', 'GET /api/agents/:id/avatar', 'GET /api/agents/:id/files', 'GET /api/agents/:id/file',
   'GET /api/rooms', 'POST /api/rooms',
