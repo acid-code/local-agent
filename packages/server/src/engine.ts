@@ -343,6 +343,7 @@ export class Engine {
     this.bus.publish({ type: 'step', runId: run.id, step });
     const started = Date.now();
     let text = '';
+    let reasoningText = '';
     let toolCalls: ToolCall[] | undefined;
     let usage = { inputTokens: built.plan.estimatedTokens, outputTokens: 0 };
     try {
@@ -351,12 +352,16 @@ export class Engine {
         paceMs: model.profileId === 'rehearsal' && process.env.NODE_ENV !== 'test' ? 10 : 0,
         numCtx: model.local ? ollamaNumCtx(current.cursor.budgetOverride || model.practicalBudget, settings.outputReserveTokens, model.contextWindow) : undefined,
         keepAlive: model.local ? (model.sizeClass === 'large' ? '30m' : '5m') : undefined,
-        think: Boolean(current.cursor.reasoning),
+        think: Boolean(current.cursor.reasoning) && !current.cursor.noThink,
+        noThink: Boolean(current.cursor.noThink),
       })) {
         if (signal.aborted) throw new StopError();
         if (event.type === 'token') {
           text += event.text;
           this.bus.publish({ type: 'token', runId: run.id, text: event.text });
+        } else if (event.type === 'thinking') {
+          reasoningText += event.text;
+          this.bus.publish({ type: 'thinking', runId: run.id, text: event.text });
         } else {
           toolCalls = event.toolCalls;
           if (event.usage) usage = event.usage;
@@ -394,6 +399,21 @@ export class Engine {
       this.store.updateStep(step.id, { status: 'failed', error: message, endedAt: now(), latencyMs: Date.now() - started });
       throw error;
     }
+    const split = splitThinking(text);
+    text = split.answer;
+    reasoningText = [reasoningText, split.reasoning].filter(Boolean).join('\n');
+    if (!text.trim() && !toolCalls?.length) {
+      if (!current.cursor.emptyRetry) {
+        const why = reasoningText ? `${model.name} thought but gave no answer. Retrying once with thinking off.` : `${model.name} returned an empty answer. Retrying once.`;
+        this.store.updateStep(step.id, { status: 'failed', error: why, output: reasoningText ? { reasoning: reasoningText.slice(0, 4000) } : null, endedAt: now(), latencyMs: Date.now() - started });
+        this.store.addLog('warn', why, undefined, 'providers');
+        this.store.updateRun(run.id, { cursor: { ...current.cursor, emptyRetry: true, noThink: true, phase: 'model' } });
+        return;
+      }
+      text = reasoningText
+        ? `${model.name} only produced reasoning and no answer, twice. Try again, rephrase, or pick a bigger model.`
+        : `${model.name} returned an empty answer twice. Try again or pick another model.`;
+    }
     const cost = ((usage.inputTokens * (model.priceIn ?? 0)) + (usage.outputTokens * (model.priceOut ?? 0))) / 1_000_000;
     const note = current.cursor.switched ? current.cursor.routingReason ?? null : null;
     text = this.vault.redact(text);
@@ -404,7 +424,7 @@ export class Engine {
     const cursor: RunCursor = toolCalls?.length
       ? { ...current.cursor, phase: 'tools', toolCalls, completedToolIds: [], approvalId: undefined }
       : { ...current.cursor, phase: 'summarize', toolCalls: undefined };
-    this.store.updateStep(step.id, { status: 'completed', output: { text, toolCalls }, tokensIn: usage.inputTokens, tokensOut: usage.outputTokens, costUsd: cost, latencyMs: Date.now() - started, endedAt: now() });
+    this.store.updateStep(step.id, { status: 'completed', output: { text, toolCalls, ...(reasoningText ? { reasoning: reasoningText.slice(0, 4000) } : {}) }, tokensIn: usage.inputTokens, tokensOut: usage.outputTokens, costUsd: cost, latencyMs: Date.now() - started, endedAt: now() });
     const fresh = this.store.getRun(run.id)!;
     this.store.updateRun(run.id, {
       cursor,
@@ -1082,6 +1102,18 @@ function stageFor(store: Store, run: RunRow): 'plan' | 'implement' | undefined {
   if (!relevant) return undefined;
   if (isSmallEdit(text)) return 'implement';
   return 'plan';
+}
+
+/** Pulls inline <think> blocks out of an answer. Reasoning is kept apart and never shown as the answer. */
+export function splitThinking(text: string): { answer: string; reasoning: string } {
+  const parts: string[] = [];
+  let answer = text.replace(/<think>([\s\S]*?)<\/think>/gi, (_all, inner: string) => { parts.push(inner.trim()); return ''; });
+  const open = answer.match(/<think>([\s\S]*)$/i);
+  if (open) {
+    parts.push(open[1]!.trim());
+    answer = answer.slice(0, open.index);
+  }
+  return { answer: parts.length ? answer.trim() : answer, reasoning: parts.filter(Boolean).join('\n') };
 }
 
 function isProviderOutage(message: string): boolean {
