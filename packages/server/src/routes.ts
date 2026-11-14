@@ -23,7 +23,7 @@ import { previewPrune, runPrune, snapshotResources } from './resources.js';
 import { speak, transcribe, voiceStatus, KOKORO_COMMAND, WHISPER_COMMAND } from './voice.js';
 import { formatSearch, listWorkspace, readWorkspaceFile, searxngHealth, searxngQuery } from './tools.js';
 import {
-  createCollection, embedRoleWarning, formatCitations, ingestBuffer, ingestFolder, kbUsage, listCollections, ollamaEmbedder, searchKnowledge,
+  KbInputError, createCollection, deleteCollection, deleteDocument, embedRoleWarning, listDocuments, formatCitations, ingestBuffer, ingestFolder, kbUsage, listCollections, ollamaEmbedder, searchKnowledge,
 } from './kb.js';
 import {
   exportSkill, importSkill, listSkills, parseSkillMd, saveSkill, setSkillEnabled, skillFit, skillVersions,
@@ -790,12 +790,33 @@ function registerLibrary(app: FastifyInstance, ctx: Ctx) {
     const body = parse(z.object({
       files: z.array(z.object({ name: z.string().min(1), contentBase64: z.string().min(1) })).min(1),
     }), req.body);
-    const results = [];
+    const id = (req.params as { id: string }).id;
+    if (!store.db.prepare('SELECT id FROM kb_collections WHERE id = ?').get(id)) throw http(404, 'Collection not found.');
+    const results: Array<{ name: string; error?: string } & Partial<Awaited<ReturnType<typeof ingestBuffer>>>> = [];
     for (const file of body.files) {
       const bytes = Buffer.from(file.contentBase64, 'base64');
-      results.push({ name: file.name, ...(await ingestBuffer(store, (req.params as { id: string }).id, { name: file.name, bytes }, embed())) });
+      try {
+        results.push({ name: file.name, ...(await ingestBuffer(store, id, { name: file.name, bytes }, embed())) });
+      } catch (error) {
+        if (!(error instanceof KbInputError)) throw error;
+        results.push({ name: file.name, error: error.message });
+      }
+    }
+    if (results.every((item) => item.error)) {
+      const error = http(400, results.map((item) => item.error).join(' ')) as Error & { results?: unknown };
+      throw error;
     }
     return { results, usage: kbUsage(store) };
+  });
+  app.get('/api/kb/collections/:id/files', async (req) => ({ files: listDocuments(store, (req.params as { id: string }).id) }));
+  app.delete('/api/kb/collections/:id/files/:docId', async (req) => {
+    const params = req.params as { id: string; docId: string };
+    if (!deleteDocument(store, params.id, params.docId)) throw http(404, 'File not found in that collection.');
+    return { ok: true, usage: kbUsage(store) };
+  });
+  app.delete('/api/kb/collections/:id', async (req) => {
+    if (!deleteCollection(store, (req.params as { id: string }).id)) throw http(404, 'Collection not found.');
+    return { ok: true, usage: kbUsage(store) };
   });
   app.post('/api/kb/collections/:id/folder', async (req) => {
     const body = parse(z.object({ path: z.string().min(1) }), req.body);

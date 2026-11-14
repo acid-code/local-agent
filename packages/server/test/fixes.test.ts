@@ -412,3 +412,39 @@ describe('web_search', () => {
     await app.close();
   });
 });
+
+describe('knowledge base uploads', () => {
+  it('answers 400 with the reason for bad files, and deletes files and collections with their chunks', async () => {
+    const dir = tmp();
+    const { app, store } = await buildApp({ dataDir: dir, startScheduler: false, serveWeb: false, fetchImpl: (async () => new Response('{}', { status: 500 })) as typeof fetch });
+    const cookies = await login(app);
+    const created = await app.inject({ method: 'POST', url: '/api/kb/collections', cookies, payload: { name: 'Notes' } });
+    const id = created.json().collection.id;
+    const b64 = (value: string | Buffer) => Buffer.from(value).toString('base64');
+    const blank = await app.inject({ method: 'POST', url: `/api/kb/collections/${id}/files`, cookies, payload: { files: [{ name: 'blank.txt', contentBase64: b64('   \n\t  ') }] } });
+    expect(blank.statusCode).toBe(400);
+    expect(blank.json().error).toMatch(/blank.txt has no text to index/);
+    const png = await app.inject({ method: 'POST', url: `/api/kb/collections/${id}/files`, cookies, payload: { files: [{ name: 'pic.png', contentBase64: b64(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 1])) }] } });
+    expect(png.statusCode).toBe(400);
+    expect(png.json().error).toMatch(/binary file|Unsupported file type \.png/);
+    const mixed = await app.inject({ method: 'POST', url: `/api/kb/collections/${id}/files`, cookies, payload: { files: [{ name: 'ok.txt', contentBase64: b64('The secret bird name is BLUE HERON.') }, { name: 'pic.png', contentBase64: b64('x') }] } });
+    expect(mixed.statusCode).toBe(200);
+    expect(mixed.json().results[1].error).toMatch(/Unsupported file type \.png/);
+    const missing = await app.inject({ method: 'POST', url: '/api/kb/collections/nope/files', cookies, payload: { files: [{ name: 'a.txt', contentBase64: b64('hi') }] } });
+    expect(missing.statusCode).toBe(404);
+
+    const files = (await app.inject({ method: 'GET', url: `/api/kb/collections/${id}/files`, cookies })).json().files;
+    expect(files.map((f: { name: string }) => f.name)).toEqual(['ok.txt']);
+    const chunks = () => Number((store.db.prepare('SELECT COUNT(*) AS n FROM kb_chunks').get() as { n: number }).n);
+    expect(chunks()).toBeGreaterThan(0);
+    expect((await app.inject({ method: 'DELETE', url: `/api/kb/collections/${id}/files/${files[0].id}`, cookies })).statusCode).toBe(200);
+    expect(chunks()).toBe(0);
+    expect((await app.inject({ method: 'DELETE', url: `/api/kb/collections/${id}/files/${files[0].id}`, cookies })).statusCode).toBe(404);
+    await app.inject({ method: 'POST', url: `/api/kb/collections/${id}/files`, cookies, payload: { files: [{ name: 'ok.txt', contentBase64: b64('Again BLUE HERON.') }] } });
+    expect((await app.inject({ method: 'DELETE', url: `/api/kb/collections/${id}`, cookies })).statusCode).toBe(200);
+    expect(chunks()).toBe(0);
+    expect(Number((store.db.prepare('SELECT COUNT(*) AS n FROM kb_documents').get() as { n: number }).n)).toBe(0);
+    expect((await app.inject({ method: 'DELETE', url: `/api/kb/collections/${id}`, cookies })).statusCode).toBe(404);
+    await app.close();
+  });
+});
