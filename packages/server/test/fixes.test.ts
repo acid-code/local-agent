@@ -6,7 +6,8 @@ import { buildApp } from '../src/app.js';
 import { splitThinking } from '../src/engine.js';
 import { providerFor, type ModelProvider, type ProviderEvent } from '../src/providers.js';
 import type { Store } from '../src/db.js';
-import { likelyNeedsTools, nextAutoTier, DEFAULT_AUTO_MAP } from '@local-agent/shared';
+import { decideAuto, likelyNeedsTools, nextAutoTier, DEFAULT_AUTO_MAP } from '@local-agent/shared';
+import { doctorChecks, geminiStateOf } from '../src/debug.js';
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
@@ -242,5 +243,24 @@ describe('chat API guards', () => {
     expect(answers.at(-1)).toBe('answer to third question about the workshop');
     expect(store.listMessages(session.id).filter((m) => m.role === 'user')).toHaveLength(2);
     await app.close();
+  });
+});
+
+describe('Gemini off', () => {
+  it('says Gemini is off instead of out of quota, in routing and health', () => {
+    const local = { id: 'big', name: 'big', apiName: 'big', local: true, embedding: false, sizeClass: 'large' as const, providerKind: 'openai_compat', practicalBudget: 8192, enabled: true };
+    const off = decideAuto({ text: '/smart explain the plan in detail please', map: { ...DEFAULT_AUTO_MAP, main: 'big' }, models: [local] });
+    expect(off.reason).toMatch(/Gemini is off or has no API key/);
+    const gemini = { ...local, id: 'g', name: 'Gemini Flash', apiName: 'gemini-flash', local: false, providerKind: 'gemini', quotaOpen: false };
+    const spent = decideAuto({ text: '/smart explain the plan in detail please', map: { ...DEFAULT_AUTO_MAP, main: 'big' }, models: [local, gemini] });
+    expect(spent.reason).toMatch(/quota is used up/);
+    expect(geminiStateOf({ enabled: true, apiKeyEnv: 'GEMINI_API_KEY' }, {})).toBe('off');
+    expect(geminiStateOf({ enabled: false, apiKeyEnv: 'GEMINI_API_KEY' }, { GEMINI_API_KEY: 'x' })).toBe('off');
+    expect(geminiStateOf({ enabled: true, apiKeyEnv: 'GEMINI_API_KEY' }, { GEMINI_API_KEY: 'x' })).toBe('open');
+    const base = { ollamaOk: true, loaded: [], dockerOk: true, mcpErrors: 0, mcpCount: 0, searxngOk: true, tailscaleOk: true, telegramQueued: 0, dbBytes: 1, diskFreeBytes: 10 * 1024 ** 3, memAvailableGiB: 8, geminiOpen: null, lastBackupAt: null };
+    const check = doctorChecks({ ...base, geminiState: 'off' }).find((item) => item.id === 'gemini')!;
+    expect(check.ok).toBe(true);
+    expect(check.detail).toMatch(/Gemini is off/);
+    expect(doctorChecks({ ...base, geminiOpen: false }).find((item) => item.id === 'gemini')!.detail).toMatch(/quota/);
   });
 });

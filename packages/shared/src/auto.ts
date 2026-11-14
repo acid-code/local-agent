@@ -102,7 +102,7 @@ function fallbackModel(models: AutoCandidate[]): AutoCandidate {
   return model;
 }
 
-function resolveRole(role: AutoRole, map: AutoMap, models: AutoCandidate[]): { model: AutoCandidate; reasoning: boolean; quotaFallback: boolean } {
+function resolveRole(role: AutoRole, map: AutoMap, models: AutoCandidate[]): { model: AutoCandidate; reasoning: boolean; quotaFallback: false | 'quota' | 'off' } {
   const fallback = fallbackModel(models);
   const main = (map.main && matchAutoModel(models, map.main)) || detectMain(models) || fallback;
   if (role === 'fast') {
@@ -124,7 +124,8 @@ function resolveRole(role: AutoRole, map: AutoMap, models: AutoCandidate[]): { m
     const gemini = models.filter((model) => model.enabled && !model.local && model.providerKind === 'gemini' && model.quotaOpen !== false)
       .sort((a, b) => b.practicalBudget - a.practicalBudget)[0];
     if (gemini) return { model: gemini, reasoning: false, quotaFallback: false };
-    return { model: main, reasoning: false, quotaFallback: true };
+    const anyGemini = models.some((model) => model.enabled && !model.local && model.providerKind === 'gemini');
+    return { model: main, reasoning: false, quotaFallback: anyGemini ? 'quota' : 'off' };
   }
   return { model: main, reasoning: false, quotaFallback: false };
 }
@@ -186,7 +187,8 @@ export function decideAuto(input: {
   const switched = why !== 'task' || resolved.model.id !== main.id || resolved.reasoning;
   const escalated = why !== 'task';
   let reason = `Staying on ${resolved.model.name}.`;
-  if (resolved.quotaFallback) reason = `Staying on ${resolved.model.name} — Gemini quota is used up.`;
+  if (resolved.quotaFallback === 'quota') reason = `Staying on ${resolved.model.name} — Gemini quota is used up.`;
+  else if (resolved.quotaFallback === 'off') reason = `Staying on ${resolved.model.name} — Gemini is off or has no API key.`;
   else if (why === 'smart') reason = `Switched to ${resolved.model.name} — you asked for the smart model.`;
   else if (why === 'think') reason = `Switched to ${resolved.model.name}${resolved.reasoning ? ' with reasoning on' : ''} — you asked to think harder.`;
   else if (why === 'failures') reason = `Switched to ${resolved.model.name} after two failed attempts.`;

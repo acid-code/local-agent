@@ -337,7 +337,7 @@ export class Engine {
     let built = await this.buildMessages(current, agent, model);
     if (!this.reserveGemini(model, built.plan.estimatedTokens)) {
       const fallback = this.candidates(settings).find((item) => item.local && item.providerKind !== 'rehearsal');
-      if (!fallback) throw new Error('Gemini quota is exhausted and no local model is available.');
+      if (!fallback) throw new Error('Gemini quota is used up and no local model is available.');
       model = this.store.getModel(fallback.id)!;
       current = this.store.updateRun(run.id, {
         modelId: model.id,
@@ -728,6 +728,8 @@ export class Engine {
     return this.store.listModels().filter((model) => model.enabled && !model.embedding).flatMap((model) => {
       const provider = providers.get(model.providerId);
       if (!provider?.enabled) return [];
+      // Gemini without a key is off, not out of quota.
+      if (provider.kind === 'gemini' && !this.providerOverride && !process.env[provider.apiKeyEnv || 'GEMINI_API_KEY']) return [];
       let quotaOpen: boolean | undefined;
       let rpdRemaining: number | null | undefined;
       if (provider.kind === 'gemini') {

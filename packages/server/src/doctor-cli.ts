@@ -3,7 +3,7 @@ import path from 'node:path';
 import { geminiQuotaDay } from '@local-agent/shared';
 import { loadConfig } from './config.js';
 import { Store } from './db.js';
-import { doctorChecks } from './debug.js';
+import { doctorChecks, geminiStateOf } from './debug.js';
 import { ollamaLoaded } from './ollama.js';
 import { snapshotResources } from './resources.js';
 import { listBackups } from './ops.js';
@@ -37,6 +37,7 @@ const checks = doctorChecks({
   diskFreeBytes: snap.disk.freeBytes,
   memAvailableGiB: snap.memory.availableGiB,
   geminiOpen: null,
+  geminiState: geminiStateOf(store.getProvider('prov_gemini')) === 'off' ? 'off' : 'unknown',
   lastBackupAt: listBackups(config.dataDir)[0]?.createdAt ?? null,
 });
 console.log(`local-agent doctor  quota day ${geminiQuotaDay()} (UTC)`);

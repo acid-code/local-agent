@@ -18,7 +18,7 @@ import type { Notifier } from './notify.js';
 import { createBackup, listBackups, shipBackup, stageRestore } from './ops.js';
 import { telegramQueue } from './notify.js';
 import { ollamaLoaded } from './ollama.js';
-import { doctorChecks, redactValue, searchLogs, zipStore, LOG_COMPONENTS, type LogComponent } from './debug.js';
+import { doctorChecks, geminiStateOf, redactValue, searchLogs, zipStore, LOG_COMPONENTS, type LogComponent } from './debug.js';
 import { previewPrune, runPrune, snapshotResources } from './resources.js';
 import { speak, transcribe, voiceStatus, KOKORO_COMMAND, WHISPER_COMMAND } from './voice.js';
 import { listWorkspace, readWorkspaceFile } from './tools.js';
@@ -742,7 +742,7 @@ async function healthChecks(store: Store, docker: DockerCtl, fetchImpl: typeof f
     ollamaOk, loaded, dockerOk: docker.available(), mcpCount: mcp.length, mcpErrors: mcp.filter((item) => item.lastError).length,
     searxngOk: searx, telegramQueued: telegramQueue(dataDir).length, dbBytes,
     diskFreeBytes: snap.disk.freeBytes, memAvailableGiB: snap.memory.availableGiB,
-    geminiOpen: settings.geminiTier === 'paid' ? true : null, lastBackupAt: backups[0]?.createdAt ?? null, tailscaleOk: await tailscaleUp(),
+    geminiOpen: settings.geminiTier === 'paid' ? true : null, geminiState: geminiStateOf(store.getProvider('prov_gemini')) === 'off' ? 'off' : undefined, lastBackupAt: backups[0]?.createdAt ?? null, tailscaleOk: await tailscaleUp(),
   });
 }
 

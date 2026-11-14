@@ -71,6 +71,8 @@ export interface DoctorInput {
   diskFreeBytes: number;
   memAvailableGiB: number;
   geminiOpen: boolean | null;
+  /** off: the provider is disabled or has no API key. */
+  geminiState?: 'open' | 'quota' | 'off' | 'unknown';
   lastBackupAt: string | null;
 }
 
@@ -86,9 +88,22 @@ export function doctorChecks(input: DoctorInput): { id: string; ok: boolean; det
     { id: 'db', ok: input.dbBytes < 2 * 1024 ** 3, detail: `Database is ${input.dbBytes} bytes.` },
     { id: 'disk', ok: input.diskFreeBytes > 5 * 1024 ** 3, detail: input.diskFreeBytes > 5 * 1024 ** 3 ? 'Disk has room.' : 'Less than 5 GB free. A model pull will fail.' },
     { id: 'ram', ok: input.memAvailableGiB >= 4, detail: `${input.memAvailableGiB.toFixed(1)} GiB available.` },
-    { id: 'gemini', ok: input.geminiOpen !== false, detail: input.geminiOpen === false ? 'Gemini free-tier quota is used up. Turns stay local.' : 'Gemini quota is open or unused.' },
+    geminiCheck(input),
     { id: 'backup', ok: Boolean(input.lastBackupAt), detail: input.lastBackupAt ? `Last backup ${input.lastBackupAt}.` : 'No backup has been taken.' },
   ];
+}
+
+function geminiCheck(input: DoctorInput) {
+  const state = input.geminiState ?? (input.geminiOpen === false ? 'quota' : input.geminiOpen === true ? 'open' : 'unknown');
+  if (state === 'off') return { id: 'gemini', ok: true, detail: 'Gemini is off (disabled or no GEMINI_API_KEY). Turns stay local.' };
+  if (state === 'quota') return { id: 'gemini', ok: false, detail: 'Gemini free-tier quota is used up. Turns stay local.' };
+  return { id: 'gemini', ok: true, detail: 'Gemini quota is open or unused.' };
+}
+
+/** Gemini state from the provider row and the environment. */
+export function geminiStateOf(provider: { enabled: boolean; apiKeyEnv: string | null } | undefined | null, env: NodeJS.ProcessEnv = process.env): 'open' | 'off' {
+  if (!provider?.enabled) return 'off';
+  return env[provider.apiKeyEnv || 'GEMINI_API_KEY'] ? 'open' : 'off';
 }
 
 export function zipStore(files: { name: string; data: Buffer }[]): Buffer {
