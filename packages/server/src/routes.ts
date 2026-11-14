@@ -732,7 +732,12 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
 
 /** Resolves a chat model by id, API name, or name. Unknown or disabled models are a 400 that lists the valid ones. */
 function chatModelId(store: Store, wanted: string): string {
-  const models = store.listModels().filter((model) => model.enabled && !model.embedding);
+  const usable = (providerId: string) => {
+    const provider = store.getProvider(providerId);
+    if (!provider?.enabled) return false;
+    return provider.kind !== 'gemini' || Boolean(process.env[provider.apiKeyEnv || 'GEMINI_API_KEY']);
+  };
+  const models = store.listModels().filter((model) => model.enabled && !model.embedding && usable(model.providerId));
   const match = models.find((model) => model.id === wanted) ?? models.find((model) => model.apiName === wanted || model.name === wanted);
   if (match) return match.id;
   const valid = models.filter((model) => model.profileId !== 'rehearsal').map((model) => `${model.id} (${model.apiName})`);
