@@ -6,26 +6,45 @@
     <title>local-agent</title>
     <style>
       :root { color-scheme: dark; }
-      body { margin: 0; font-family: "Segoe UI", sans-serif; background: #090a0c; color: #f4f0e6; }
-      main { max-width: 32rem; margin: 0 auto; padding: 2rem 1.2rem; }
-      h1 { font-weight: 560; letter-spacing: -0.03em; }
-      p { color: #b7b1a6; line-height: 1.5; }
-      label { display: block; margin: 1rem 0 0.4rem; color: #b7b1a6; }
-      input { width: 100%; box-sizing: border-box; background: #111318; color: inherit; border: 1px solid rgba(243,236,223,.16); border-radius: 12px; padding: 0.8rem; }
-      button { margin-top: 1.2rem; background: #e4b56a; color: #1a140c; border: 0; border-radius: 999px; padding: 0.8rem 1.2rem; font-weight: 600; }
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: "Segoe UI", system-ui, sans-serif; background: radial-gradient(900px 420px at -10% -10%, rgba(228,181,106,.09), transparent 55%), #090a0c; color: #f4f0e6; }
+      main { width: min(32rem, calc(100vw - 2rem)); padding: 2rem; background: #111318; border: 1px solid rgba(243,236,223,.08); border-radius: 18px; box-shadow: 0 24px 80px rgba(0,0,0,.45); }
+      h1 { font-weight: 560; letter-spacing: -0.03em; margin: 0 0 .5rem; display: flex; align-items: center; gap: .6rem; }
+      p { color: #b7b1a6; line-height: 1.5; margin: .5rem 0; }
+      label { display: block; margin: 1.2rem 0 0.4rem; color: #b7b1a6; font-size: .9rem; }
+      input { width: 100%; background: #090a0c; color: inherit; font: inherit; border: 1px solid rgba(243,236,223,.16); border-radius: 12px; padding: 0.75rem .9rem; outline: none; }
+      input:focus { border-color: #e4b56a; box-shadow: 0 0 0 3px rgba(228,181,106,.2); }
+      .actions { display: flex; align-items: center; gap: .8rem; margin-top: 1.2rem; flex-wrap: wrap; }
+      button { background: #e4b56a; color: #1a140c; border: 0; border-radius: 999px; padding: 0.75rem 1.3rem; font: inherit; font-weight: 600; cursor: pointer; min-height: 44px; }
+      button:hover { background: #f3d7a6; }
+      button:focus-visible { outline: 2px solid #f3d7a6; outline-offset: 2px; }
+      button:disabled { opacity: .6; cursor: wait; }
+      .chips { display: flex; gap: .4rem; flex-wrap: wrap; margin-top: .6rem; }
+      .chip { background: transparent; color: #b7b1a6; border: 1px solid rgba(243,236,223,.16); padding: .35rem .8rem; min-height: 32px; font-weight: 400; font-size: .85rem; }
+      .chip:hover { background: #181b22; color: #f4f0e6; }
+      .hint { font-size: .85rem; color: #8a847a; }
       .warn { color: #f3d7a6; }
+      #note:empty { display: none; }
+      #note { background: rgba(227,148,134,.1); border: 1px solid rgba(227,148,134,.4); color: #f0b7ac; border-radius: 12px; padding: .7rem .9rem; overflow-wrap: anywhere; }
     </style>
   </head>
   <body>
     <main>
-      <h1>local-agent</h1>
-      <p>Point this window at the server. At home that is the LAN address. On this PC, with the server in WSL, it is <span class="warn">http://127.0.0.1:8787</span>. The login cookie stays in this app.</p>
+      <h1><svg width="28" height="28" viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="18" fill="none" stroke="#e4b56a" stroke-width="4"/><circle cx="32" cy="32" r="5" fill="#e4b56a"/></svg>local-agent</h1>
+      <p>Point this window at the server. At home that is the LAN address. On this PC, with the server in WSL, it is <span class="warn">http://127.0.0.1:8787</span>.</p>
+      <p id="note" role="alert"></p>
       <form id="setup">
         <label for="url">Server URL</label>
-        <input id="url" name="url" inputmode="url" autocomplete="url" placeholder="http://192.168.1.20:8787" required />
-        <button type="submit">Open the console</button>
+        <input id="url" name="url" type="text" inputmode="url" autocomplete="url" spellcheck="false" placeholder="http://192.168.1.20:8787" required autofocus />
+        <div class="chips">
+          <button type="button" class="chip" data-url="http://127.0.0.1:8787">This PC (WSL)</button>
+        </div>
+        <div class="actions">
+          <button type="submit" id="go">Open the console</button>
+          <span class="hint">Change it later from Server → Change server…</span>
+        </div>
       </form>
-      <p class="warn" id="note"></p>
+      <p class="hint">The login cookie stays in this app.</p>
     </main>
     <script>
       const input = document.querySelector('#url');
@@ -35,10 +54,22 @@
       window.localAgent.getUrl().then((url) => {
         if (url) input.value = url;
       });
+      const go = document.querySelector('#go');
+      document.querySelectorAll('.chip').forEach((chip) => chip.addEventListener('click', () => { input.value = chip.dataset.url; input.focus(); }));
       document.querySelector('#setup').addEventListener('submit', async (event) => {
         event.preventDefault();
-        const result = await window.localAgent.setUrl(input.value);
-        if (!result.ok) note.textContent = result.error || 'That URL was not saved.';
+        let value = input.value.trim();
+        if (value && !/^https?:\/\//i.test(value)) value = `http://${value}`;
+        input.value = value;
+        note.textContent = '';
+        go.disabled = true;
+        go.textContent = 'Connecting…';
+        const result = await window.localAgent.setUrl(value);
+        if (!result.ok) {
+          note.textContent = result.error || 'That URL was not saved.';
+          go.disabled = false;
+          go.textContent = 'Open the console';
+        }
       });
     </script>
   </body>

@@ -11,9 +11,16 @@ export function Setup() {
   const [model, setModel] = useState('gemma4:e4b');
   const [log, setLog] = useState('');
 
+  const [scanning, setScanning] = useState(false);
+  async function scan() {
+    setScanning(true);
+    try { setItems((await post<{ checklist: Item[] }>('/api/discovery/scan')).checklist); } finally { setScanning(false); }
+  }
   async function load() {
-    const data = await api<{ checklist: Item[] }>('/api/discovery');
+    const data = await api<{ scan: unknown; checklist: Item[] }>('/api/discovery');
     setItems(data.checklist);
+    // After a restart nothing has been scanned yet, so "needed" would be a false alarm. Scan once (read-only).
+    if (!data.scan) await scan();
   }
   useEffect(() => { void load(); }, []);
 
@@ -21,7 +28,7 @@ export function Setup() {
     <div className="page">
       <h1>Setup</h1>
       <p className="lede">Nothing runs until you can read the exact command. Scan first, then pull a small model or start SearXNG if you want them.</p>
-      <button className="btn primary" onClick={async () => { const data = await post<{ checklist: Item[] }>('/api/discovery/scan'); setItems(data.checklist); }}>Scan this machine</button>
+      <button className="btn primary" disabled={scanning} onClick={() => void scan()}>{scanning ? 'Scanning…' : 'Scan again'}</button>
       <div className="checklist" style={{ marginTop: 16 }}>
         {items.map((item) => (
           <article key={item.id} className="card check">
@@ -30,7 +37,7 @@ export function Setup() {
               <strong>{item.title}</strong>
               <p className="muted">{item.detail}</p>
             </div>
-            <span className="badge">{item.ok ? 'ready' : item.optional ? 'optional' : 'needed'}</span>
+            <span className={`badge ${scanning ? '' : item.ok ? 'ok' : item.optional ? '' : 'bad'}`}>{scanning ? '…' : item.ok ? 'ready' : item.optional ? 'optional' : 'needed'}</span>
           </article>
         ))}
       </div>

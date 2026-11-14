@@ -114,7 +114,7 @@ export function Agents() {
         <label className="field"><span>Short description</span><input value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></label>
         <label className="field"><span>Emoji or icon</span><input value={draft.emoji} onChange={(event) => setDraft({ ...draft, emoji: event.target.value })} placeholder="Optional" /></label>
         <label className="field"><span>Accent</span>
-          <span className="row">{ACCENTS.map((color) => <button type="button" key={color} className="face initials" style={{ background: color, width: 28, height: 28 }} onClick={() => setDraft({ ...draft, accent: color })} />)}</span>
+          <span className="row">{ACCENTS.map((color) => <button type="button" key={color} aria-label={`Accent ${color}`} aria-pressed={draft.accent === color} className="face initials swatch" style={{ background: color }} onClick={() => setDraft({ ...draft, accent: color })} />)}</span>
           <input value={draft.accent} onChange={(event) => setDraft({ ...draft, accent: event.target.value })} />
         </label>
         <p className="faint">Face</p>

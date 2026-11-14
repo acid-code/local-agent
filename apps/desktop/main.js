@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, ipcMain } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
 
@@ -34,6 +34,12 @@ function validUrl(value) {
   }
 }
 
+function sameServer(url) {
+  const saved = readUrl();
+  if (!saved) return false;
+  try { return new URL(url).origin === new URL(saved).origin; } catch { return false; }
+}
+
 function showSetup(win, message) {
   const query = message ? { error: message } : undefined;
   return win.loadFile(SETUP, query ? { query } : undefined);
@@ -60,9 +66,11 @@ function createWindow() {
     },
   });
 
+  // Links to the console stay in the window. Anything else (search results, citations) opens in the default browser.
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) {
-      win.loadURL(url);
+      if (sameServer(url)) win.loadURL(url);
+      else void shell.openExternal(url);
     }
     return { action: 'deny' };
   });
@@ -86,6 +94,10 @@ function createWindow() {
           click: () => { void showSetup(win); },
         },
         {
+          label: 'Open in browser',
+          click: () => { const current = readUrl(); if (current) void shell.openExternal(current); },
+        },
+        {
           label: 'Reload',
           accelerator: 'CmdOrCtrl+R',
           click: () => {
@@ -96,6 +108,19 @@ function createWindow() {
         },
         { type: 'separator' },
         { role: 'quit' },
+      ],
+    },
+    // Without an Edit menu, Ctrl+C / Ctrl+V / Ctrl+A do nothing in text boxes on Windows.
+    { role: 'editMenu' },
+    {
+      label: 'View',
+      submenu: [
+        { role: 'zoomIn', accelerator: 'CmdOrCtrl+=' },
+        { role: 'zoomOut' },
+        { role: 'resetZoom' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+        { role: 'toggleDevTools' },
       ],
     },
   ]);

@@ -1,4 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
+import { Brain, Check, ChevronDown, Copy, ListTree, Menu, Mic, Pencil, RotateCcw, Send, Square, Trash2, Wrench, X } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { parseSources, toolSummary } from '@local-agent/shared';
+import { toast, errorText } from '../lib/toast';
 import { api, post } from '../lib/api';
 import { Markdown } from '../components/Markdown';
 import { Face, type FaceAgent } from '../components/Face';
@@ -12,6 +16,9 @@ interface Step { id: string; kind: string; name: string; status: string; latency
 interface Plan { id: string; items: { id: string; text: string; status: string }[] }
 interface Edit { id: string; label: string; diff: string; revertedAt: string | null }
 interface Offer { id: string; kind: string; masked: string }
+interface CheckItem { id: string; title: string; ok: boolean; detail: string; optional: boolean }
+
+const draftKey = (id: string) => `la-draft:${id}`;
 
 export function Chat() {
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -43,6 +50,15 @@ export function Chat() {
   const [rail, setRail] = useState(false);
   const [trace, setTrace] = useState(false);
   const box = useRef<HTMLDivElement>(null);
+  const [thinking, setThinking] = useState('');
+  const [runError, setRunError] = useState<string | null>(null);
+  const [lastModel, setLastModel] = useState('');
+  const [copied, setCopied] = useState<string | null>(null);
+  const [checklist, setChecklist] = useState<CheckItem[]>([]);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [titleDraft, setTitleDraft] = useState('');
+  const input = useRef<HTMLTextAreaElement>(null);
+  const active = ['running', 'loading', 'waiting', 'paused', 'awaiting_approval'].includes(status);
 
   async function refreshLists() {
     const [sessionRes, agentRes] = await Promise.all([
@@ -63,6 +79,8 @@ export function Chat() {
   }
 
   async function openSession(id: string) {
+    // Restore this chat's unsent draft in the same render as the switch, so the save effect never wipes it.
+    if (!new URLSearchParams(window.location.search).get('share')) setDraft(localStorage.getItem(draftKey(id)) || '');
     setCurrent(id);
     const data = await api<{ session: Session; messages: Message[]; plan: Plan | null; edits: Edit[] }>(`/api/sessions/${id}`);
     setMessages(data.messages);
@@ -71,6 +89,8 @@ export function Chat() {
     setMode(data.session.mode);
     setModelPin(data.session.modelPin || null);
     setStreaming('');
+    setThinking('');
+    setRunError(null);
     if (data.session.agentId) await post(`/api/agents/${data.session.agentId}/read`, {}).catch(() => undefined);
   }
 
@@ -93,7 +113,32 @@ export function Chat() {
       if (rows[0]) void openSession(rows[0].id);
     }).catch(() => undefined);
   }, []);
-  useEffect(() => { box.current?.scrollTo({ top: box.current.scrollHeight }); }, [messages, streaming]);
+  useEffect(() => { box.current?.scrollTo({ top: box.current.scrollHeight }); }, [messages, streaming, thinking, runError]);
+  // Keep an unsent draft per chat, so a reload or a failed send never loses it.
+  useEffect(() => {
+    if (!current) return;
+    if (draft) localStorage.setItem(draftKey(current), draft); else localStorage.removeItem(draftKey(current));
+  }, [draft, current]);
+  useEffect(() => {
+    api<{ scan: unknown; checklist: CheckItem[] }>('/api/discovery').then((data) => setChecklist(data.scan ? data.checklist || [] : [])).catch(() => undefined);
+  }, []);
+  // Esc stops a running reply (when no dialog or menu has focus).
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      if (rail) { setRail(false); return; }
+      if (active && runId) { event.preventDefault(); void control('stop'); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [active, runId, rail]);
+  // Grow the composer with its text, up to the CSS max height.
+  useEffect(() => {
+    const el = input.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${el.scrollHeight}px`;
+  }, [draft]);
 
   useEffect(() => {
     if (!runId) return;
@@ -105,10 +150,16 @@ export function Chat() {
         setStatus(data.run?.status || '');
       }
       if (data.type === 'token') setStreaming((value) => value + data.text);
-      if (data.type === 'step' && data.step) setSteps((value) => [...value.filter((step) => step.id !== data.step.id), data.step]);
+      if (data.type === 'thinking') setThinking((value) => value + data.text);
+      if (data.type === 'error') setRunError(String(data.message || 'The reply failed.'));
+      if (data.type === 'step' && data.step) {
+        setSteps((value) => [...value.filter((step) => step.id !== data.step.id), data.step]);
+        if (data.step.kind === 'model' && data.step.name) setLastModel(String(data.step.name));
+      }
       if (data.type === 'message') {
         setMessages((value) => [...value, data.message]);
         setStreaming('');
+        setThinking('');
       }
       if (data.type === 'context') setMeter({ used: Number(data.used || 0), budget: Number(data.budget || 0) });
       if (data.type === 'status') {
@@ -119,7 +170,10 @@ export function Chat() {
       if (data.type === 'done') {
         setLoadingNote('');
         setStatus(data.run?.status || 'completed');
+        if (data.run?.modelId) setLastModel(models.find((model) => model.id === data.run.modelId)?.name || String(data.run.modelId));
+        if (data.run?.status === 'failed' && data.run?.error) setRunError(String(data.run.error));
         if (current) void openSession(current);
+        void refreshLists().catch(() => undefined);
         source.close();
       }
     };
@@ -146,11 +200,14 @@ export function Chat() {
     await openSession(created.session.id);
   }
 
-  async function send(event?: { preventDefault(): void }) {
+  async function send(event?: { preventDefault(): void }, override?: string) {
     event?.preventDefault();
-    if (!current || !draft.trim()) return;
-    const content = draft;
-    setDraft('');
+    const content = override ?? draft;
+    if (!current || !content.trim()) return;
+    if (active) { toast('A reply is still running. Press Stop (Esc) first.', 'info'); return; }
+    if (override === undefined) setDraft('');
+    setRunError(null);
+    setThinking('');
     setMessages((value) => [...value, { id: 'local', role: 'user', content }]);
     const agentId = sessions.find((session) => session.id === current)?.agentId || agents[0]?.id;
     let result: { run: { id: string }; offers: Offer[] };
@@ -159,15 +216,14 @@ export function Chat() {
     } catch (error) {
       // A reply is still running (409) or the model choice was refused (400). Keep the draft.
       setMessages((value) => value.filter((message) => message.id !== 'local'));
-      setDraft(content);
-      setVoiceNote(error instanceof Error ? error.message : 'Could not send.');
+      if (override === undefined) setDraft(content);
+      toast(`Not sent: ${errorText(error, 'Could not send.')} Your text is still in the box.`, 'error');
       return;
     }
     setVoiceNote('');
     setOffers(result.offers || []);
     setRunId(result.run.id);
     setStatus('running');
-    setTrace(true);
   }
 
   async function holdTalk(start: boolean) {
@@ -189,6 +245,7 @@ export function Chat() {
         const data = await response.json();
         if (!response.ok) setVoiceNote(data.error || 'Voice is not available.');
         else setDraft((value) => `${value} ${data.text || ''}`.trim());
+        if (!response.ok) toast(data.error || 'Voice is not available.', 'error');
       };
       rec.start();
       recorder.current = rec;
@@ -201,56 +258,137 @@ export function Chat() {
 
   async function control(action: string) {
     if (!runId) return;
-    await post(`/api/runs/${runId}/control`, { action });
+    try {
+      await post(`/api/runs/${runId}/control`, { action });
+      if (action === 'stop') toast('Stopped.', 'info');
+    } catch (error) { toast(errorText(error), 'error'); }
   }
 
+  function retry() {
+    const last = [...messages].reverse().find((message) => message.role === 'user');
+    if (last) void send(undefined, last.content);
+  }
+
+  async function copy(id: string, text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(id);
+      setTimeout(() => setCopied((value) => (value === id ? null : value)), 1500);
+    } catch { toast('Copy is blocked here. Select the text instead.', 'info'); }
+  }
+
+  async function removeChat(id: string) {
+    const row = sessions.find((session) => session.id === id);
+    if (!window.confirm(`Delete “${row?.title || 'this chat'}”? It disappears from the list.`)) return;
+    try {
+      await api(`/api/sessions/${id}`, { method: 'DELETE' });
+      const rows = await refreshLists();
+      toast('Chat deleted.', 'ok');
+      if (id === current) {
+        if (rows[0]) await openSession(rows[0].id);
+        else { setCurrent(null); setMessages([]); }
+      }
+    } catch (error) { toast(errorText(error), 'error'); }
+  }
+
+  async function saveTitle(id: string) {
+    const title = titleDraft.trim();
+    setRenaming(null);
+    if (!title) return;
+    try {
+      await api(`/api/sessions/${id}`, { method: 'PATCH', body: JSON.stringify({ title }) });
+      setSessions((rows) => rows.map((row) => (row.id === id ? { ...row, title } : row)));
+    } catch (error) { toast(errorText(error), 'error'); }
+  }
+
+  const currentSession = sessions.find((session) => session.id === current);
+  const pinnedName = modelPin ? models.find((model) => model.id === modelPin)?.name || modelPin : '';
+  const lastAssistant = [...messages].reverse().find((message) => message.role === 'assistant')?.id;
+  const setupLeft = checklist.filter((item) => !item.optional && !item.ok);
+
   return (
-    <div className="chat">
-      <aside className={rail ? 'rail open' : 'rail'}>
-        <div className="row">
-          <button className="btn" onClick={() => createChat('chat')}>New chat</button>
-          <button className="btn" onClick={() => createChat('code')}>Code</button>
+    <div className={trace ? 'chat with-trace' : 'chat'}>
+      {(rail || trace) && <div className="scrim" onClick={() => { setRail(false); setTrace(false); }} />}
+      <aside className={rail ? 'rail open' : 'rail'} aria-label="Chats">
+        <div className="sheet-head">
+          <strong>Chats</strong>
+          <button className="icon-btn" aria-label="Close chats" onClick={() => setRail(false)}><X size={18} /></button>
         </div>
-        <form className="card" onSubmit={createWorkshop}>
-          <strong>Workshop</strong>
-          <p className="faint">Several projects in one coding chat. The turn goes to a model that can code.</p>
-          <input value={shopName} onChange={(event) => setShopName(event.target.value)} placeholder="Name" />
-          {projects.map((project, index) => (
-            <div key={project.label + index} className="row">
-              <input value={project.label} onChange={(event) => setProjects((rows) => rows.map((row, i) => i === index ? { ...row, label: event.target.value } : row))} placeholder="label" />
-              <input value={project.path} onChange={(event) => setProjects((rows) => rows.map((row, i) => i === index ? { ...row, path: event.target.value } : row))} placeholder="/home/asaf/src/server" />
+        <div className="row rail-actions">
+          <button className="btn primary" onClick={() => { void createChat('chat'); setRail(false); }}>New chat</button>
+          <button className="btn" onClick={() => { void createChat('code'); setRail(false); }}>Code</button>
+        </div>
+        <div className="session-list">
+          {sessions.map((session) => (
+            <div key={session.id} className={session.id === current ? 'session-item active' : 'session-item'}>
+              {renaming === session.id ? (
+                <form className="rename" onSubmit={(event) => { event.preventDefault(); void saveTitle(session.id); }}>
+                  <input autoFocus dir="auto" aria-label="Chat title" value={titleDraft} onChange={(event) => setTitleDraft(event.target.value)} onBlur={() => void saveTitle(session.id)} onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(null); } }} />
+                </form>
+              ) : (
+                <button className="session-open" onClick={() => { void openSession(session.id); setRail(false); }} title={session.title}>
+                  <strong dir="auto">{session.title}</strong>
+                  <span className="faint">{session.workshopId ? 'Workshop' : session.mode === 'code' ? 'Coding' : 'Chat'}</span>
+                </button>
+              )}
+              <span className="session-ops">
+                <button className="icon-btn" aria-label={`Rename ${session.title}`} title="Rename" onClick={() => { setRenaming(session.id); setTitleDraft(session.title); }}><Pencil size={15} /></button>
+                <button className="icon-btn danger" aria-label={`Delete ${session.title}`} title="Delete" onClick={() => void removeChat(session.id)}><Trash2 size={15} /></button>
+              </span>
             </div>
           ))}
-          <div className="row">
-            <button className="btn" type="button" onClick={() => setProjects((rows) => [...rows, { label: '', path: '' }])}>Add project</button>
-            <button className="btn primary" type="submit">Open workshop</button>
-          </div>
-          {shopNote && <p className="muted">{shopNote}</p>}
-        </form>
-        {sessions.map((session) => (
-          <button key={session.id} className={session.id === current ? 'session-item active' : 'session-item'} onClick={() => openSession(session.id)}>
-            <strong>{session.title}</strong>
-            <div className="faint">{session.workshopId ? 'Workshop' : session.mode === 'code' ? 'Coding' : 'Chat'}</div>
-          </button>
-        ))}
-        {nextCursor && <button className="btn" type="button" onClick={() => void loadMoreSessions()}>Older chats</button>}
+          {sessions.length === 0 && <p className="faint">No chats yet. Start one with New chat.</p>}
+          {nextCursor && <button className="btn" type="button" onClick={() => void loadMoreSessions()}>Older chats</button>}
+        </div>
         {agents.length < 2 && <p className="muted">Create two personas under Agents. The house operator and the researcher are one click each.</p>}
+        <details className="card workshop">
+          <summary><strong>Workshop</strong> <span className="faint">several projects, one coding chat</span><ChevronDown size={16} /></summary>
+          <form onSubmit={createWorkshop}>
+            <p className="faint">The turn goes to a model that can code.</p>
+            <input className="input" value={shopName} onChange={(event) => setShopName(event.target.value)} placeholder="Name" aria-label="Workshop name" />
+            {projects.map((project, index) => (
+              <div key={index} className="project-row">
+                <input className="input" value={project.label} onChange={(event) => setProjects((rows) => rows.map((row, i) => i === index ? { ...row, label: event.target.value } : row))} placeholder="label" aria-label="Project label" />
+                <input className="input" value={project.path} onChange={(event) => setProjects((rows) => rows.map((row, i) => i === index ? { ...row, path: event.target.value } : row))} placeholder="/home/asaf/src/server" aria-label="Project path" />
+              </div>
+            ))}
+            <div className="row">
+              <button className="btn" type="button" onClick={() => setProjects((rows) => [...rows, { label: '', path: '' }])}>Add project</button>
+              <button className="btn primary" type="submit">Open workshop</button>
+            </div>
+            {shopNote && <p className="muted">{shopNote}</p>}
+          </form>
+        </details>
       </aside>
       <section className="thread">
-        <div className="row" style={{ padding: '10px 16px' }}>
-          <button className="btn ghost" onClick={() => setRail((value) => !value)}>Chats</button>
-          <button className="btn ghost" onClick={() => setTrace((value) => !value)}>Trace</button>
-          {status && <span className="badge">{status}</span>}
-          {mode === 'code' && <span className="badge warn">{sessions.find((session) => session.id === current)?.workshopId ? 'workshop' : 'coding'}</span>}
+        <div className="thread-head">
+          <button className="btn ghost chats-btn" aria-label="Show chats" onClick={() => setRail(true)}><Menu size={16} /> <span>Chats</span></button>
+          <strong className="thread-title" dir="auto" title={currentSession?.title}>{currentSession?.title || 'No chat open'}</strong>
+          {status && status !== 'completed' && <span className={`badge ${status === 'failed' ? 'bad' : active ? 'warn' : ''}`}>{status}</span>}
+          {mode === 'code' && <span className="badge warn">{currentSession?.workshopId ? 'workshop' : 'coding'}</span>}
+          <button className={trace ? 'btn ghost on' : 'btn ghost'} aria-pressed={trace} aria-label="Trace" onClick={() => setTrace((value) => !value)}><ListTree size={16} /> <span>Trace</span></button>
         </div>
         <div className="messages" ref={box}>
+          <div className="messages-inner">
+          {setupLeft.length > 0 && (
+            <div className="card first-run">
+              <h3>Finish setup</h3>
+              <p className="muted">{setupLeft.length} step{setupLeft.length === 1 ? '' : 's'} left before real models answer here.</p>
+              <ul className="checklist">
+                {checklist.filter((item) => !item.optional).map((item) => (
+                  <li key={item.id} className={item.ok ? 'done' : ''}><span className={`dot ${item.ok ? 'ok' : 'warn'}`} /> <span><strong>{item.title}</strong> <span className="faint">{item.ok ? '' : item.detail}</span></span></li>
+                ))}
+              </ul>
+              <div className="row"><Link className="btn primary" to="/setup">Open Setup</Link><Link className="btn" to="/settings#health">Check health</Link></div>
+            </div>
+          )}
           {messages.length === 0 && (
             <div className="card">
-              <h3>The workshop is quiet.</h3>
-              <p className="muted">With no model connected, Rehearsal still streams and calls tools. Try “list files” or “remember that this box has 48 GB”.</p>
+              <h3>{current ? 'Say something to start.' : 'No chat open.'}</h3>
+              <p className="muted">Ask a question, or try one of these. With no model connected, Rehearsal still streams and calls tools.</p>
               <div className="row">
                 {['list files', 'remember that this box has 48 GB', 'search local agents'].map((prompt) => (
-                  <button key={prompt} className="btn" onClick={() => setDraft(prompt)}>{prompt}</button>
+                  <button key={prompt} className="btn" onClick={() => { setDraft(prompt); input.current?.focus(); }}>{prompt}</button>
                 ))}
               </div>
             </div>
@@ -267,7 +405,7 @@ export function Chat() {
             <form className="banner" onSubmit={async (event) => { event.preventDefault(); await post(`/api/secret-requests/${secret.id}`, { value: secretValue }); setSecret(null); setSecretValue(''); }}>
               <strong>Secret needed: {secret.name}</strong>
               <p className="muted">{secret.reason} The model will only see a handle.</p>
-              <input type="password" value={secretValue} onChange={(event) => setSecretValue(event.target.value)} placeholder="Paste the key" />
+              <input className="input" type="password" value={secretValue} onChange={(event) => setSecretValue(event.target.value)} placeholder="Paste the key" />
               <div className="row">
                 <button className="btn primary" type="submit">Save and resume</button>
                 <button className="btn danger" type="button" onClick={async () => { await post(`/api/secret-requests/${secret.id}`, { deny: true }); setSecret(null); }}>Deny</button>
@@ -276,16 +414,42 @@ export function Chat() {
           )}
           {messages.map((message) => {
             const speaker = message.agentId ? agents.find((agent) => agent.id === message.agentId) : undefined;
-            const fromAgent = message.role !== 'user' && speaker;
+            const fromAgent = message.role !== 'user' && message.role !== 'tool' && speaker;
+            if (message.role === 'tool') return <ToolCard key={message.id} name={message.toolName} content={message.content} />;
+            const calls = (message.toolCalls || []).map((call) => call.name).filter(Boolean);
+            if (message.role === 'assistant' && !message.content.trim() && calls.length) {
+              return <div key={message.id} className="tool-call-chip"><Wrench size={14} /> Calling {calls.join(', ')}…{message.routingNote && <span className="switch">{message.routingNote}</span>}</div>;
+            }
             return (
             <article key={message.id} className={message.role === 'user' ? 'msg user' : fromAgent ? 'msg from-agent' : 'msg'} style={fromAgent ? { ['--accent' as string]: speaker.accent || '#e4b56a' } : undefined}>
-              {fromAgent ? <div className="who"><Face agent={speaker} size={28} /><span className="meta">{speaker.emoji ? `${speaker.emoji} ` : ''}{speaker.name}{message.toolName ? ` · ${message.toolName}` : ''}</span></div> : <div className="meta"><span>{message.role}</span>{message.toolName && <span className="mono">{message.toolName}</span>}</div>}
+              {fromAgent ? <div className="who"><Face agent={speaker} size={28} /><span className="meta">{speaker.emoji ? `${speaker.emoji} ` : ''}{speaker.name}</span></div> : message.role !== 'user' && <div className="meta"><span>{message.role}</span></div>}
               {message.routingNote && <div className="switch">{message.routingNote}</div>}
-              {message.role === 'tool' ? <pre className="mono">{message.content}</pre> : <Markdown text={message.content} />}
+              <div dir="auto"><Markdown text={message.content} /></div>
+              {message.id !== 'local' && (
+                <div className="msg-actions">
+                  <button className="icon-btn" aria-label="Copy message" title="Copy" onClick={() => void copy(message.id, message.content)}>{copied === message.id ? <Check size={15} /> : <Copy size={15} />}</button>
+                  {message.role === 'user' && <button className="icon-btn" aria-label="Edit as new message" title="Edit into the box" onClick={() => { setDraft(message.content); input.current?.focus(); }}><Pencil size={15} /></button>}
+                  {message.id === lastAssistant && !active && <button className="icon-btn" aria-label="Regenerate reply" title="Ask again" onClick={retry}><RotateCcw size={15} /></button>}
+                </div>
+              )}
             </article>
             );
           })}
-          {streaming && <article className="msg"><Markdown text={streaming} streaming /></article>}
+          {thinking && (
+            <details className="thinking" open={!streaming}>
+              <summary><Brain size={14} /> {streaming ? 'Thought for a moment' : 'Thinking…'}</summary>
+              <div className="think" dir="auto">{thinking}</div>
+            </details>
+          )}
+          {streaming && <article className="msg" dir="auto"><Markdown text={streaming} streaming /></article>}
+          {active && !streaming && !thinking && <div className="typing" aria-label="Working"><span /><span /><span /> <em>{loadingNote || 'Working…'}</em></div>}
+          {runError && !active && (
+            <div className="banner error-card" role="alert">
+              <strong>The reply failed.</strong>
+              <p className="muted" dir="auto">{runError}</p>
+              <div className="row"><button className="btn primary" onClick={retry}><RotateCcw size={15} /> Try again</button><button className="btn ghost" onClick={() => setTrace(true)}>Open trace</button></div>
+            </div>
+          )}
           {mode === 'code' && plan && (
             <div className="card">
               <h3>Plan</h3>
@@ -303,41 +467,79 @@ export function Chat() {
               <pre className="command">{edit.diff}</pre>
             </div>
           ))}
+          </div>
         </div>
-        {meter && <p className="context-meter" aria-label="Context used">{meter.used} / {meter.budget} tokens</p>}
-        <label className="model-pill">
-          <span className="faint">Model</span>
-          <select aria-label="Model" value={modelPin || ''} onChange={async (event) => {
-            const value = event.target.value || null;
-            setModelPin(value);
-            if (current) await api(`/api/sessions/${current}`, { method: 'PATCH', body: JSON.stringify({ modelPin: value }) });
-          }}>
-            <option value="">Auto</option>
-            {models.filter((model) => !model.embedding && model.enabled !== false).map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
-          </select>
-        </label>
-        {loadingNote && <p className="switch loading-model">{loadingNote}</p>}
         <div className="composer">
           <form onSubmit={send}>
-            <textarea value={draft} placeholder={mode === 'code' ? 'Ask for a plan, then an edit…' : 'Message'} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send(event); } }} />
-            {voiceNote && <p className="faint">{voiceNote}</p>}
-            <button className="btn" type="button" onPointerDown={() => void holdTalk(true)} onPointerUp={() => void holdTalk(false)}>{recording ? 'Listening' : 'Hold to talk'}</button>
-            {status === 'running' ? <button className="btn danger" type="button" onClick={() => control('stop')}>Stop</button> : <button className="btn primary" type="submit">Send</button>}
-            {status === 'running' && <button className="btn" type="button" onClick={() => control('pause')}>Pause</button>}
+            <textarea ref={input} dir="auto" rows={1} value={draft} aria-label="Message" placeholder={mode === 'code' ? 'Ask for a plan, then an edit…' : 'Message'} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(event); } }} />
+            <div className="composer-bar">
+              <label className="model-pill" title={modelPin ? `Pinned to ${pinnedName}` : lastModel ? `Auto picks per message. Last reply: ${lastModel}` : 'Auto picks a model per message'}>
+                <select aria-label="Model" value={modelPin || ''} onChange={async (event) => {
+                  const value = event.target.value || null;
+                  setModelPin(value);
+                  try {
+                    if (current) await api(`/api/sessions/${current}`, { method: 'PATCH', body: JSON.stringify({ modelPin: value }) });
+                  } catch (error) { toast(errorText(error), 'error'); setModelPin(modelPin); }
+                }}>
+                  <option value="">{lastModel && !modelPin ? `Auto · ${lastModel}` : 'Auto'}</option>
+                  {models.filter((model) => !model.embedding && model.enabled !== false).map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
+                </select>
+                <ChevronDown size={14} aria-hidden />
+              </label>
+              {meter && <span className="context-meter" aria-label="Context used" title="Context used / budget">{Math.round((meter.used / Math.max(1, meter.budget)) * 100)}% ctx</span>}
+              <span className="spacer" />
+              <button className={recording ? 'icon-btn round on' : 'icon-btn round'} type="button" aria-label="Hold to talk" title="Hold to talk" onPointerDown={() => void holdTalk(true)} onPointerUp={() => void holdTalk(false)} onPointerLeave={() => { if (recording) void holdTalk(false); }}><Mic size={18} /></button>
+              {active && status !== 'paused' && <button className="btn ghost pause-btn" type="button" onClick={() => control('pause')}>Pause</button>}
+              {status === 'paused' && <button className="btn ghost" type="button" onClick={() => control('resume')}>Resume</button>}
+              {active ? <button className="icon-btn round danger-fill" type="button" aria-label="Stop (Esc)" title="Stop (Esc)" onClick={() => control('stop')}><Square size={16} /></button>
+                : <button className="icon-btn round primary-fill" type="submit" aria-label="Send" title="Send (Enter)" disabled={!draft.trim() || !current}><Send size={17} /></button>}
+            </div>
           </form>
+          {(voiceNote || loadingNote) ? <p className="composer-hint faint">{voiceNote || loadingNote}</p> : <p className="composer-hint faint"><span className="kbd-hint">Enter to send · Shift+Enter for a new line · Esc to stop</span></p>}
         </div>
       </section>
-      <aside className={trace ? 'trace open' : 'trace'}>
-        <h3>Trace</h3>
+      <aside className={trace ? 'trace open' : 'trace'} aria-label="Trace">
+        <div className="sheet-head">
+          <strong>Trace</strong>
+          <button className="icon-btn" aria-label="Close trace" onClick={() => setTrace(false)}><X size={18} /></button>
+        </div>
         <p className="faint">Every model call and tool call lands here, with the arguments the model actually sent.</p>
         {steps.map((step) => (
           <div key={step.id} className="step">
-            <div className="row"><span className={`dot ${step.status === 'completed' ? 'ok' : step.status === 'failed' ? 'bad' : 'live'}`} /><strong>{step.kind}</strong> <span className="muted">{step.name}</span></div>
+            <div className="row"><span className={`dot ${step.status === 'completed' ? 'ok' : step.status === 'failed' ? 'bad' : 'live'}`} /><strong>{step.kind}</strong> <span className="muted ellipsis">{step.name}</span></div>
             <div className="faint">{step.status}{step.latencyMs ? ` · ${step.latencyMs} ms` : ''}</div>
-            {step.error && <div className="badge bad">{step.error}</div>}
+            {step.error && <div className="badge bad wrap">{step.error}</div>}
           </div>
         ))}
       </aside>
     </div>
+  );
+}
+
+function ToolCard({ name, content }: { name?: string | null; content: string }) {
+  const sources = parseSources(name, content);
+  return (
+    <details className="tool-card">
+      <summary>
+        <Wrench size={14} />
+        <strong>{name || 'tool'}</strong>
+        <span className="faint ellipsis">{sources.length ? `${sources.length} source${sources.length === 1 ? '' : 's'}` : toolSummary(content)}</span>
+        <ChevronDown size={14} className="chev" />
+      </summary>
+      {sources.length > 0 ? (
+        <ol className="sources">
+          {sources.map((source) => (
+            <li key={source.n}>
+              <span className="cite">{source.n}</span>
+              <span className="source-body">
+                {source.url ? <a href={source.url} target="_blank" rel="noreferrer" dir="auto">{source.title}</a> : <strong dir="auto">{source.title}</strong>}
+                {source.url && <span className="faint url">{source.url.replace(/^https?:\/\//, '')}</span>}
+                {source.snippet && <span className="muted snippet" dir="auto">{source.snippet}</span>}
+              </span>
+            </li>
+          ))}
+        </ol>
+      ) : <pre className="mono tool-output" dir="auto">{content}</pre>}
+    </details>
   );
 }

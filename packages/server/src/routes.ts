@@ -359,6 +359,13 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     if (body.modelPin) body.modelPin = chatModelId(store, body.modelPin);
     return { session: store.updateSession((req.params as { id: string }).id, body) };
   });
+  app.delete('/api/sessions/:id', async (req) => {
+    const id = (req.params as { id: string }).id;
+    if (!store.getSession(id)) throw http(404, 'Chat not found.');
+    if (engine.sessionBusy(id)) throw http(409, 'A reply is still running in this chat. Press Stop first, then delete it.');
+    store.updateSession(id, { archived: true });
+    return { ok: true };
+  });
   app.post('/api/sessions/:id/messages', async (req) => {
     const id = (req.params as { id: string }).id;
     const session = store.getSession(id);
