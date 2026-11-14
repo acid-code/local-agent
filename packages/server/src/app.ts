@@ -132,7 +132,7 @@ export async function buildApp(options: {
     reply.code(status || 500).send({ error: status >= 500 ? 'Internal error' : message });
   });
 
-  registerRoutes(app, { store, engine, bus, docker, mcp, vault, notifier, config, fetchImpl: options.fetchImpl ?? fetch });
+  registerRoutes(app, { store, engine, bus, docker, mcp, vault, notifier, config, fetchImpl: options.fetchImpl ?? fetch, autoConnectors: options.startScheduler !== false && !process.env.VITEST });
 
   if (options.serveWeb !== false && fs.existsSync(config.webDist)) {
     await app.register(fastifyStatic, { root: config.webDist });

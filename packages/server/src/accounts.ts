@@ -202,7 +202,7 @@ export const MEMBER_DENIED_TOOLS = new Set([
  */
 export const MEMBER_ROUTES = new Set([
   'GET /api/auth/me', 'POST /api/auth/logout', 'POST /api/account/password', 'GET /api/me', 'GET /api/me/theme', 'PUT /api/me/theme', 'GET /api/me/quota', 'POST /api/me/wallpaper', 'GET /api/me/wallpaper', 'DELETE /api/me/wallpaper', 'GET /api/images/status', 'POST /api/images/generate',
-  'GET /api/agents', 'POST /api/agents', 'POST /api/agents/reorder', 'GET /api/agents/:id', 'PATCH /api/agents/:id', 'DELETE /api/agents/:id',
+  'GET /api/agents', 'POST /api/agents', 'GET /api/gallery', 'POST /api/gallery/:id', 'GET /api/connectors', 'POST /api/agents/reorder', 'GET /api/agents/:id', 'PATCH /api/agents/:id', 'DELETE /api/agents/:id',
   'POST /api/agents/:id/read', 'POST /api/agents/:id/avatar', 'GET /api/agents/:id/avatar', 'GET /api/agents/:id/files', 'GET /api/agents/:id/file',
   'GET /api/rooms', 'POST /api/rooms',
   'POST /api/files', 'GET /api/files', 'GET /api/files/:id', 'GET /api/files/:id/raw', 'DELETE /api/files/:id',

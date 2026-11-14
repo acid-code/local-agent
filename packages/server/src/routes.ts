@@ -34,6 +34,8 @@ import {
 } from './triggers.js';
 import { secret as randomSecret } from './util.js';
 import { RULE_FILE_CAP, RULE_TOTAL_CAP, disabledRules, discoverRules, setRuleEnabled } from './rules.js';
+import { GALLERY, gallerySystemPrompt, galleryList, installGallerySkills, type GalleryPersona } from './gallery.js';
+import { connectorStateFlag, BUILTIN_CONNECTORS, RECOMMENDED_CONNECTORS, connectorEnabled, connectorReport, connectorTools, recommendedConnected, setConnectorEnabled } from './connectors.js';
 import { memoryFiles, rollbackRun, writeMemoryFile } from './learning.js';
 import { createWorkshop, getWorkshop, listWorkshops } from './workshops.js';
 import { ACCENT_DEFAULT, FACES, accentOk, avatarPath, saveAvatar } from './avatars.js';
@@ -57,6 +59,7 @@ import { budgetConfig, budgetReport, type MemoryBudget } from './memory.js';
 import { localStatus } from './images.js';
 
 type Ctx = {
+  autoConnectors?: boolean;
   store: Store;
   engine: Engine;
   bus: Bus;
@@ -104,6 +107,8 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     }
     await setSession(reply, store);
     store.addLog('info', `Owner ${body.username} created.`);
+    // One assistant to start with; the rest of the gallery is optional.
+    if (!store.listAgents(OWNER_ID).length) await addFromGallery(GALLERY[0]!, OWNER_ID, false).catch((error) => store.addLog('warn', `Default assistant not created: ${(error as Error).message}`));
     return { username: body.username };
   });
 
@@ -268,8 +273,82 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   });
 
   const me = (req: Parameters<typeof accountOf>[0]) => accountOf(req).id;
+  // Built-in connectors (offline, no secrets) and recommended account connectors.
+  const healthEnv = () => ({ store, dataDir: config.dataDir, searxngUrl: store.getSettings().searxngUrl || process.env.SEARXNG_URL || '', fetchImpl, dockerAvailable: () => docker.available() });
+  const connectorBrief = (id: string, member: boolean) => {
+    const builtin = BUILTIN_CONNECTORS.find((row) => row.id === id);
+    if (builtin) return member && builtin.ownerOnly ? null : { name: builtin.name, builtIn: true, status: connectorEnabled(store, id) ? 'on' : 'off' };
+    const rec = RECOMMENDED_CONNECTORS.find((row) => row.id === id);
+    return rec ? { name: rec.name, builtIn: false, status: recommendedConnected(store, id) ? 'connected' : 'not connected' } : null;
+  };
+  // Web search is a built-in connector: on a fresh install, find SearXNG on :8088 or start the local container once.
+  if (ctx.autoConnectors) setTimeout(() => void (async () => {
+    if (store.getSettings().searxngUrl || connectorStateFlag(store, 'search:auto')) return;
+    connectorStateFlag(store, 'search:auto', true);
+    try {
+      const res = await fetchImpl('http://127.0.0.1:8088/search?q=ping&format=json', { signal: AbortSignal.timeout(3000) });
+      if (res.ok) { const current = store.getSettings(); store.saveSettings({ ...current, searxngUrl: 'http://127.0.0.1:8088' }, 'SearXNG found', { searxngUrl: 'http://127.0.0.1:8088' }); return; }
+    } catch { /* not running yet */ }
+    if (await docker.ping().catch(() => false)) {
+      const job = store.createJob('start-searxng', 'built-in web search');
+      await runSetup('start-searxng', undefined, job.id, ctx);
+    }
+  })().catch((error: Error) => store.addLog('warn', `Built-in search: ${error.message}`)), 3000);
+  app.get('/api/connectors', async (req) => connectorReport(healthEnv(), accountOf(req).role === 'member'));
+  app.patch('/api/connectors/:id', async (req) => {
+    const id = (req.params as { id: string }).id;
+    if (!BUILTIN_CONNECTORS.some((row) => row.id === id)) throw http(404, 'No such built-in connector.');
+    const body = parse(z.object({ enabled: z.boolean() }), req.body);
+    setConnectorEnabled(store, id, body.enabled);
+    return connectorReport(healthEnv(), false);
+  });
+  /** One click: vet the recommended server's package; the Tools page shows the report and installs it in its container on approval. */
+  app.post('/api/connectors/:id/connect', async (req) => {
+    const item = RECOMMENDED_CONNECTORS.find((row) => row.id === (req.params as { id: string }).id);
+    if (!item) throw http(404, 'No such connector.');
+    const settings = store.getSettings();
+    const report = await vetSpec({ name: item.id, transport: 'stdio', command: 'npx', args: [item.package], source: 'recommended' }, fetchImpl, {
+      reputation: true, searxngUrl: settings.searxngUrl || process.env.SEARXNG_URL || '', summarize: localReputationSummarizer(store, fetchImpl),
+    });
+    store.saveVetting(report.id, report);
+    return { report, needs: item.needs };
+  });
+
+  async function addFromGallery(item: GalleryPersona, accountId: string, member: boolean) {
+    const taken = new Set(store.listAgents(accountId).map((agent) => agent.name));
+    let name = item.name;
+    for (let n = 2; taken.has(name); n += 1) name = `${item.name} ${n}`;
+    const workspace = workspaceFor(config.dataDir, accountId, name);
+    fs.mkdirSync(workspace, { recursive: true });
+    const agent = store.createAgent({
+      name, description: item.description, systemPrompt: gallerySystemPrompt(item), ownerId: accountId, workspacePath: workspace,
+      toolAllowlist: [...new Set([...item.tools, ...connectorTools(item.connectors, member)])].filter((tool) => !member || !MEMBER_DENIED_TOOLS.has(tool)),
+    });
+    store.updateAgent(agent.id, { title: item.title, accent: item.accent, avatarKind: 'initials', avatarRef: `blob-${item.shape}`, templateId: item.id });
+    await installGallerySkills(store, config.dataDir, agent.id, item);
+    return store.getAgent(agent.id)!;
+  }
   const memberTools = (req: Parameters<typeof accountOf>[0], tools: string[]) => accountOf(req).role === 'member' ? tools.filter((tool) => !MEMBER_DENIED_TOOLS.has(tool)) : tools;
   app.get('/api/agents', async (req) => ({ agents: store.listAgents(me(req)), templates: TEMPLATES, faces: FACES }));
+  // Persona gallery: ready-made personas with skills, rules, tools and connectors. One click adds one.
+  app.get('/api/gallery', async (req) => {
+    const mine = store.listAgents(me(req));
+    const member = accountOf(req).role === 'member';
+    return {
+      personas: galleryList(store, (id) => connectorBrief(id, member)).map((item) => ({
+        ...item, tools: member ? item.tools.filter((tool) => !MEMBER_DENIED_TOOLS.has(tool)) : item.tools,
+        added: mine.some((agent) => agent.templateId === item.id),
+      })),
+    };
+  });
+  app.post('/api/gallery/:id', async (req) => {
+    const item = GALLERY.find((row) => row.id === (req.params as { id: string }).id);
+    if (!item) throw http(404, 'No such persona in the gallery.');
+    const account = accountOf(req);
+    if (account.role === 'member' && store.listAgents(account.id).length >= account.limits.maxAgents) throw http(400, `You can have up to ${account.limits.maxAgents} personas.`);
+    return { agent: await addFromGallery(item, account.id, account.role === 'member') };
+  });
+
   app.post('/api/agents/reorder', async (req) => {
     const body = parse(z.object({ ids: z.array(z.string()).min(1) }), req.body);
     store.reorderAgents(body.ids.filter((id) => ownerOf(store, 'agent', id) === me(req)));

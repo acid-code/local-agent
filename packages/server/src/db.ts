@@ -24,6 +24,8 @@ export interface Agent {
   pinned: boolean; hidden: boolean; sortOrder: number; lastReadAt: string | null; unread: number; workshopIds: string[];
   /** 'mute' hides this persona's unread dot. */
   notify: 'all' | 'mute';
+  /** Gallery persona this one was added from, if any. */
+  templateId?: string | null;
   createdAt: string; updatedAt: string; ownerId: string;
 }
 export interface Room { id: string; name: string; createdAt: string; agentIds: string[] }
@@ -244,6 +246,7 @@ export class Store {
     addAgentCol('sort_order', `sort_order INTEGER NOT NULL DEFAULT 0`);
     addAgentCol('last_read_at', `last_read_at TEXT`);
     addAgentCol('notify', `notify TEXT NOT NULL DEFAULT 'all'`);
+    addAgentCol('template_id', 'template_id TEXT');
     // Agent self-management and background helpers.
     const colsOf = (table: string) => this.many<Raw>(`PRAGMA table_info(${table})`).map((row) => String(row.name));
     const addCol = (table: string, name: string, ddl: string) => { if (!colsOf(table).includes(name)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`); };
@@ -502,9 +505,9 @@ export class Store {
     const current = this.getAgent(id);
     if (!current) return null;
     const next = { ...current, ...patch, updatedAt: now() };
-    this.db.prepare(`UPDATE agents SET name=?, title=?, description=?, system_prompt=?, model_id=?, routing=?, strategy=?, tool_allowlist=?, memory_enabled=?, avatar_kind=?, avatar_ref=?, accent=?, emoji=?, pinned=?, hidden=?, sort_order=?, notify=?, updated_at=? WHERE id=?`).run(
+    this.db.prepare(`UPDATE agents SET name=?, title=?, description=?, system_prompt=?, model_id=?, routing=?, strategy=?, tool_allowlist=?, memory_enabled=?, avatar_kind=?, avatar_ref=?, accent=?, emoji=?, pinned=?, hidden=?, sort_order=?, notify=?, template_id=?, updated_at=? WHERE id=?`).run(
       next.name, next.title, next.description, next.systemPrompt, next.modelId, next.routing, next.strategy, JSON.stringify(next.toolAllowlist), next.memoryEnabled ? 1 : 0,
-      next.avatarKind, next.avatarRef, next.accent, next.emoji, next.pinned ? 1 : 0, next.hidden ? 1 : 0, next.sortOrder, next.notify === 'mute' ? 'mute' : 'all', next.updatedAt, id,
+      next.avatarKind, next.avatarRef, next.accent, next.emoji, next.pinned ? 1 : 0, next.hidden ? 1 : 0, next.sortOrder, next.notify === 'mute' ? 'mute' : 'all', next.templateId ?? null, next.updatedAt, id,
     );
     if (patch.workshopIds) this.setAgentWorkshops(id, patch.workshopIds);
     return this.getAgent(id);
@@ -1049,7 +1052,7 @@ function mapAgent(row: Raw): Agent {
     toolAllowlist: parseJson<string[]>(String(row.tool_allowlist), []), memoryEnabled: Boolean(row.memory_enabled), workspacePath: String(row.workspace_path),
     avatarKind: kind === 'builtin' || kind === 'upload' ? kind : 'initials', avatarRef: String(row.avatar_ref || ''), accent: String(row.accent || '#e4b56a'), emoji: String(row.emoji || ''),
     pinned: Boolean(row.pinned), hidden: Boolean(row.hidden), sortOrder: Number(row.sort_order || 0), lastReadAt: row.last_read_at ? String(row.last_read_at) : null,
-    unread: 0, workshopIds: [], notify: row.notify === 'mute' ? 'mute' : 'all',
+    unread: 0, workshopIds: [], notify: row.notify === 'mute' ? 'mute' : 'all', templateId: row.template_id ? String(row.template_id) : null,
     createdAt: String(row.created_at), updatedAt: String(row.updated_at), ownerId: String(row.owner_id || 'owner'),
   };
 }
