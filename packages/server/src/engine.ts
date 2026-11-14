@@ -44,6 +44,7 @@ import { generateImage, imageTool, localStatus } from './images.js';
 import { NO_MODEL_MESSAGE } from './usable-models.js';
 import { BudgetError, type Lease, type MemoryBudget } from './memory.js';
 import { MEMBER_DENIED_TOOLS, OWNER_ID, foreignPath, getAccount } from './accounts.js';
+import { Autonomy, HELPER_DENIED } from './autonomy.js';
 
 export class Engine {
   private readonly inflight = new Map<string, { abort: AbortController; paused: boolean; resumePause: () => void }>();
@@ -66,9 +67,13 @@ export class Engine {
     private readonly instanceId: string,
     private readonly fetchImpl: typeof fetch = fetch,
     private readonly providerOverride?: (model: ModelRow) => ModelProvider,
-  ) {}
+  ) {
+    this.autonomy = new Autonomy(store, bus, vault, (input) => this.startTurn(input), (runId) => this.stop(runId), () => this.libraryDir);
+  }
+  /** Timers/triggers an agent manages itself, and background helpers. */
+  readonly autonomy: Autonomy;
 
-  async startTurn(input: { sessionId: string; agentId: string; content?: string; imageUrl?: string; modelId?: string; parentRunId?: string | null; depth?: number; wait?: boolean; background?: boolean }) {
+  async startTurn(input: { sessionId: string; agentId: string; content?: string; imageUrl?: string; modelId?: string; parentRunId?: string | null; depth?: number; wait?: boolean; background?: boolean; cursorExtras?: Partial<RunCursor>; onDone?: (run: RunRow) => void }) {
     const session = this.store.getSession(input.sessionId);
     const agent = this.store.getAgent(input.agentId);
     if (!session || !agent) throw new Error('Chat or persona is missing.');
@@ -106,9 +111,10 @@ export class Engine {
       }
       userMessageId = message.id;
     }
-    const cursor: RunCursor = { phase: 'route', turn: 0, userMessageId, messageModelId: input.modelId, depth: input.depth ?? 0, configVersion: this.store.getSettings().version, agentUpdatedAt: agent.updatedAt, commandAck, pinMiss, imagePrompt: imageCommand?.[1]?.trim() || undefined, background: input.background || undefined };
+    const cursor: RunCursor = { phase: 'route', turn: 0, userMessageId, messageModelId: input.modelId, depth: input.depth ?? 0, configVersion: this.store.getSettings().version, agentUpdatedAt: agent.updatedAt, commandAck, pinMiss, imagePrompt: imageCommand?.[1]?.trim() || undefined, background: input.background || undefined, ...input.cursorExtras };
     const run = this.store.createRun({ sessionId: session.id, agentId: agent.id, parentRunId: input.parentRunId, configVersion: cursor.configVersion ?? 1, cursor });
     const task = this.execute(run.id);
+    if (input.onDone) void task.then(() => { const done = this.store.getRun(run.id); if (done) input.onDone!(done); }, () => { const done = this.store.getRun(run.id); if (done) input.onDone!(done); });
     if (input.wait) await task;
     else void task;
     return this.store.getRun(run.id)!;
@@ -119,7 +125,9 @@ export class Engine {
     const abort = new AbortController();
     const state = { abort, paused: false, resumePause: () => {} };
     const runForLimit = this.store.getRun(runId);
-    const limitMs = runForLimit ? this.runLimitMs(runForLimit.agentId) : null;
+    const baseLimit = runForLimit ? this.runLimitMs(runForLimit.agentId) : null;
+    const ownLimit = runForLimit?.cursor.timeoutMs;
+    const limitMs = ownLimit ? Math.min(ownLimit, baseLimit || ownLimit) : baseLimit;
     const limitTimer = limitMs ? setTimeout(() => abort.abort(), limitMs) : null;
     this.inflight.set(runId, state);
     this.touch(runId);
@@ -357,7 +365,8 @@ export class Engine {
     await this.waitIfPaused(run.id, signal);
     const settings = this.store.getSettings();
     const sessionMode = this.store.getSession(run.sessionId)?.mode;
-    const maxSteps = sessionMode === 'code' || run.cursor.stage ? Math.max(settings.maxSteps, 24) : settings.maxSteps;
+    const baseSteps = sessionMode === 'code' || run.cursor.stage ? Math.max(settings.maxSteps, 24) : settings.maxSteps;
+    const maxSteps = run.cursor.maxSteps ? Math.min(run.cursor.maxSteps, baseSteps) : baseSteps;
     let current = this.store.getRun(run.id)!;
     if (current.cursor.turn >= maxSteps) {
       this.store.updateRun(run.id, { cursor: { ...current.cursor, phase: 'summarize' } });
@@ -395,7 +404,7 @@ export class Engine {
     }
     const provider = this.provider(model);
     const toolless = Boolean(current.cursor.noTools) || this.toolSupportOf(model) === false;
-    const tools = toolless ? [] : this.tools(agent, this.store.getSession(run.sessionId)?.mode, current.cursor.stage).map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
+    const tools = toolless ? [] : this.tools(agent, this.store.getSession(run.sessionId)?.mode, current.cursor.stage, current.cursor.toolSubset, Boolean(current.cursor.helperId)).map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
     let numCtx = model.local ? ollamaNumCtx(current.cursor.budgetOverride || model.practicalBudget, settings.outputReserveTokens, model.contextWindow) : undefined;
     const admitted = model.local && numCtx ? await this.admitLocal(current, model, numCtx, signal) : { lease: null, numCtx };
     if ('switchTo' in admitted) {
@@ -549,7 +558,7 @@ export class Engine {
       if (completed.has(call.id)) continue;
       await this.waitIfPaused(run.id, signal);
       if (signal.aborted) throw new StopError();
-      const tools = this.tools(this.store.getAgent(run.agentId)!, this.store.getSession(run.sessionId)?.mode, run.cursor.stage);
+      const tools = this.tools(this.store.getAgent(run.agentId)!, this.store.getSession(run.sessionId)?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId));
       const tool = tools.find((item) => item.name === call.name);
       let args = parseArgs(call.arguments);
       const speaker = this.store.getAgent(run.agentId);
@@ -673,7 +682,7 @@ export class Engine {
     }
     const latest = this.store.getRun(run.id)!;
     const turn = latest.cursor.turn + 1;
-    let next: RunCursor = { ...latest.cursor, phase: turn >= this.store.getSettings().maxSteps ? 'summarize' : 'model', turn, toolCalls: undefined, completedToolIds: [], approvalId: undefined };
+    let next: RunCursor = { ...latest.cursor, phase: turn >= (latest.cursor.maxSteps ? Math.min(latest.cursor.maxSteps, this.store.getSettings().maxSteps) : this.store.getSettings().maxSteps) ? 'summarize' : 'model', turn, toolCalls: undefined, completedToolIds: [], approvalId: undefined };
     if (handoff) {
       const approval = this.store.createApproval({ runId: run.id, toolCallId: 'plan', toolName: 'plan', args: { stage: 'plan' }, reason: 'Start coding from this plan. Edit the plan first if you want to change it.' });
       const waiting = { ...latest.cursor, phase: 'tools' as const, stage: 'plan' as const, approvalId: approval.id };
@@ -1040,7 +1049,7 @@ export class Engine {
     return this.refreshing;
   }
 
-  private tools(agent: Agent, sessionMode?: string, stage?: 'plan' | 'implement') {
+  private tools(agent: Agent, sessionMode?: string, stage?: 'plan' | 'implement', subset?: string[], helper = false) {
     const names = new Set(agent.toolAllowlist);
     names.add('request_secret');
     names.add('read_output');
@@ -1050,13 +1059,17 @@ export class Engine {
     names.add('repo_sync');
     names.add('find_context');
     names.add('share_file');
+    for (const name of ['manage_timer', 'manage_trigger', 'spawn_agent', 'helpers']) names.add(name);
     if (this.store.getSettings().imageGen.mode !== 'off') names.add('generate_image');
     if (stage === 'plan') {
       for (const name of ['web_search', 'web_fetch', 'read_file', 'list_dir', 'grep', 'glob', 'plan', 'recall', 'consult_agent']) names.add(name);
     }
     if (stage === 'implement' || sessionMode === 'code') for (const tool of CODING_TOOLS) names.add(tool.name);
     if (agent.ownerId !== OWNER_ID) for (const name of MEMBER_DENIED_TOOLS) names.delete(name);
-    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), ...this.extraTools];
+    // A helper run gets only the tools it was started with (never more than its persona allows).
+    if (subset) for (const name of [...names]) if (!subset.includes(name)) names.delete(name);
+    if (helper) for (const name of HELPER_DENIED) names.delete(name);
+    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), ...this.autonomy.tools(), ...this.extraTools];
     const seen = new Set<string>();
     return catalog.filter((tool) => {
       if (!names.has(tool.name) || seen.has(tool.name)) return false;

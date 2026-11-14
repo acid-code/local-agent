@@ -51,6 +51,11 @@ export type RunStatus =
 
 export interface RunCursor {
   phase: RunPhase;
+  /** Background helper limits: fewer model steps, a shorter wall clock, and only these tools. */
+  maxSteps?: number;
+  timeoutMs?: number;
+  toolSubset?: string[];
+  helperId?: string;
   /** Set by the /image chat command: generate a picture instead of calling a chat model. */
   imagePrompt?: string;
   /** Scheduled or triggered run: queued behind chat replies and images when memory is short. */

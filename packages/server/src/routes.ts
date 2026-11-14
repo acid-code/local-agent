@@ -410,8 +410,9 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     }
   });
   app.get('/api/files', async (req) => {
-    const query = parse(z.object({ sessionId: z.string().optional(), q: z.string().optional(), limit: z.coerce.number().int().optional() }), req.query);
-    return { files: listFiles(store, { sessionId: query.sessionId, query: query.q, limit: query.limit, ownerId: me(req) }) };
+    const query = parse(z.object({ sessionId: z.string().optional(), q: z.string().optional(), limit: z.coerce.number().int().optional(), source: z.enum(['upload', 'agent']).optional() }), req.query);
+    if (query.sessionId) mustOwn(store, req, 'session', query.sessionId, 'Chat not found.');
+    return { files: listFiles(store, { sessionId: query.sessionId, query: query.q, limit: query.limit, ownerId: me(req), source: query.source }) };
   });
   app.get('/api/files/:id', async (req) => {
     mustOwn(store, req, 'file', (req.params as { id: string }).id, 'File not found.');
@@ -621,6 +622,27 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     // The persona's default workspaces pre-fill a new chat.
     prefillChatWorkspaces(store, session.id, body.agentId);
     return { session: store.getSession(session.id) };
+  });
+  // Everything this chat set in motion: helpers, timers/triggers it created, and files in both directions.
+  app.get('/api/sessions/:id/context', async (req) => {
+    const id = (req.params as { id: string }).id;
+    mustOwn(store, req, 'session', id, 'Chat not found.');
+    const helpers = engine.autonomy.listHelpers(id);
+    const files = listFiles(store, { sessionId: id, limit: 200, ownerId: me(req) });
+    // Files a helper produced count as this chat's output too.
+    const helperFiles = helpers.flatMap((row) => listFiles(store, { sessionId: row.childSessionId, limit: 50, ownerId: me(req), source: 'agent' }).map((file) => ({ ...file, helperId: row.id })));
+    const childRuns = new Set(helpers.map((row) => row.childRunId).filter(Boolean));
+    const waiting = store.listApprovals('pending').filter((approval) => childRuns.has(approval.runId));
+    return {
+      helpers, approvals: waiting,
+      timers: engine.autonomy.timersFor(id), triggers: accountOf(req).role === 'member' ? [] : engine.autonomy.triggersFor(id),
+      files: { uploads: files.filter((file) => file.source === 'upload'), produced: [...files.filter((file) => file.source !== 'upload'), ...helperFiles] },
+    };
+  });
+  app.post('/api/helpers/:id/stop', async (req) => {
+    const helper = engine.autonomy.getHelper((req.params as { id: string }).id);
+    if (!helper || helper.ownerId !== me(req)) throw http(404, 'Helper not found.');
+    return { helper: engine.autonomy.stop(helper.id) };
   });
   app.get('/api/sessions/:id', async (req) => {
     const id = (req.params as { id: string }).id;

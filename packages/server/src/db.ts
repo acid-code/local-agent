@@ -244,6 +244,20 @@ export class Store {
     addAgentCol('sort_order', `sort_order INTEGER NOT NULL DEFAULT 0`);
     addAgentCol('last_read_at', `last_read_at TEXT`);
     addAgentCol('notify', `notify TEXT NOT NULL DEFAULT 'all'`);
+    // Agent self-management and background helpers.
+    const colsOf = (table: string) => this.many<Raw>(`PRAGMA table_info(${table})`).map((row) => String(row.name));
+    const addCol = (table: string, name: string, ddl: string) => { if (!colsOf(table).includes(name)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`); };
+    addCol('schedules', 'origin_session_id', 'origin_session_id TEXT');
+    addCol('schedules', 'created_by', `created_by TEXT NOT NULL DEFAULT 'user'`);
+    addCol('triggers', 'origin_session_id', 'origin_session_id TEXT');
+    addCol('triggers', 'created_by', `created_by TEXT NOT NULL DEFAULT 'user'`);
+    addCol('chat_sessions', 'helper_of', 'helper_of TEXT');
+    this.db.exec(`CREATE TABLE IF NOT EXISTS helpers (
+      id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL, parent_run_id TEXT, child_session_id TEXT NOT NULL, child_run_id TEXT,
+      agent_id TEXT NOT NULL, owner_id TEXT NOT NULL, task TEXT NOT NULL, cli TEXT, status TEXT NOT NULL, result TEXT, error TEXT,
+      max_steps INTEGER NOT NULL, timeout_ms INTEGER NOT NULL, tools TEXT, delivered INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, ended_at TEXT
+    )`);
+    this.db.exec('CREATE INDEX IF NOT EXISTS helpers_parent ON helpers(parent_session_id, created_at)');
     const repoCols = this.many<Raw>('PRAGMA table_info(shared_repos)').map((row) => String(row.name));
     if (!repoCols.includes('lock_run_id')) this.db.exec(`ALTER TABLE shared_repos ADD COLUMN lock_run_id TEXT`);
     if (!repoCols.includes('lock_agent_id')) this.db.exec(`ALTER TABLE shared_repos ADD COLUMN lock_agent_id TEXT`);
@@ -589,8 +603,8 @@ export class Store {
     const owner = opts.ownerId ? 'AND owner_id = ?' : '';
     const ownerArg = opts.ownerId ? [opts.ownerId] : [];
     const rows = updatedAt && id
-      ? this.many<Raw>(`SELECT * FROM chat_sessions WHERE archived = 0 ${owner} AND (updated_at < ? OR (updated_at = ? AND id < ?)) ORDER BY updated_at DESC, id DESC LIMIT ?`, ...ownerArg, updatedAt, updatedAt, id, limit + 1)
-      : this.many<Raw>(`SELECT * FROM chat_sessions WHERE archived = 0 ${owner} ORDER BY updated_at DESC, id DESC LIMIT ?`, ...ownerArg, limit + 1);
+      ? this.many<Raw>(`SELECT * FROM chat_sessions WHERE archived = 0 AND helper_of IS NULL ${owner} AND (updated_at < ? OR (updated_at = ? AND id < ?)) ORDER BY updated_at DESC, id DESC LIMIT ?`, ...ownerArg, updatedAt, updatedAt, id, limit + 1)
+      : this.many<Raw>(`SELECT * FROM chat_sessions WHERE archived = 0 AND helper_of IS NULL ${owner} ORDER BY updated_at DESC, id DESC LIMIT ?`, ...ownerArg, limit + 1);
     const more = rows.length > limit;
     const page = rows.slice(0, limit);
     const last = page.at(-1);
@@ -599,7 +613,7 @@ export class Store {
 
   /** The persona's most recently active one-to-one chat for this account, if any. */
   latestSessionForAgent(agentId: string, ownerId: string): Session | null {
-    const row = this.one<Raw>('SELECT * FROM chat_sessions WHERE archived = 0 AND agent_id = ? AND room_id IS NULL AND owner_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1', agentId, ownerId);
+    const row = this.one<Raw>('SELECT * FROM chat_sessions WHERE archived = 0 AND helper_of IS NULL AND agent_id = ? AND room_id IS NULL AND owner_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1', agentId, ownerId);
     return row ? mapSession(row) : null;
   }
 
