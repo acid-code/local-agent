@@ -48,6 +48,7 @@ import { MEMBER_DENIED_TOOLS, OWNER_ID, accountOf, foreignPath, mustOwn, ownerOf
 import { memberByUsername } from './accounts.js';
 import { registerAccounts } from './members.js';
 import { registerMedia } from './media.js';
+import { budgetConfig, budgetReport, type MemoryBudget } from './memory.js';
 import { localStatus } from './images.js';
 
 type Ctx = {
@@ -69,7 +70,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
 
   app.get('/api/health', async () => ({ ok: true, version: VERSION }));
   registerAccounts(app, { store, config });
-  registerMedia(app, { store, dataDir: config.dataDir, vault, fetchImpl });
+  registerMedia(app, { store, dataDir: config.dataDir, vault, fetchImpl, memory: () => engine.memory });
 
   app.get('/api/auth/me', async (req) => {
     const owner = store.getOwner();
@@ -172,6 +173,8 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       sandbox: z.enum(['docker-or-host', 'docker-only', 'host']).optional(),
       maxSteps: z.number().int().min(1).max(40).optional(),
       outputReserveTokens: z.number().int().min(128).max(32000).optional(),
+      ramBudgetGiB: z.number().min(2).max(1024).optional(),
+      ramSystemReserveGiB: z.number().min(0).max(64).optional(),
       summaryTriggerTokens: z.number().int().min(200).max(20000).optional(),
       searxngUrl: z.string().optional(),
       searchHits: z.number().int().min(1).max(20).optional(),
@@ -811,7 +814,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const session = schedule.sessionId ? store.getSession(schedule.sessionId) : store.createSession({ agentId: schedule.agentId, title: schedule.name });
     if (!session) throw http(400, 'Session missing.');
     if (!schedule.sessionId) store.updateSchedule(schedule.id, { sessionId: session.id });
-    const run = await engine.startTurn({ sessionId: session.id, agentId: schedule.agentId, content: schedule.prompt });
+    const run = await engine.startTurn({ sessionId: session.id, agentId: schedule.agentId, content: schedule.prompt, background: true });
     return { run };
   });
 
@@ -941,9 +944,16 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     });
     return { run: replay };
   });
-  app.get('/api/debug/health', async () => ({ checks: await healthChecks(store, docker, fetchImpl, config.dataDir) }));
+  app.get('/api/memory/budget', async (req) => {
+    if (accountOf(req).role === 'member') throw http(403, 'Only the owner can see the RAM budget.');
+    const memory = engine.memory;
+    if (!memory) return { tracked: false };
+    const cfg = budgetConfig(store.getSettings());
+    return { tracked: true, budgetBytes: cfg.budgetBytes, usage: await memory.usage(), active: memory.snapshotActive(), queue: memory.snapshotQueue(), summary: (await budgetReport(memory, cfg)).detail };
+  });
+  app.get('/api/debug/health', async () => ({ checks: await healthChecks(store, docker, fetchImpl, config.dataDir, engine.memory) }));
   app.post('/api/debug/health/:id', async (req) => {
-    const checks = await healthChecks(store, docker, fetchImpl, config.dataDir);
+    const checks = await healthChecks(store, docker, fetchImpl, config.dataDir, engine.memory);
     const check = checks.find((item) => item.id === (req.params as { id: string }).id);
     if (!check) throw http(404, 'No check with that name.');
     return { check };
@@ -969,7 +979,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     return { results };
   });
   app.get('/api/debug/bundle', async (_req, reply) => {
-    const checks = await healthChecks(store, docker, fetchImpl, config.dataDir);
+    const checks = await healthChecks(store, docker, fetchImpl, config.dataDir, engine.memory);
     const runs = store.listRuns(8).map((run) => redactValue({ run, steps: store.listSteps(run.id) }));
     const body = zipStore([
       { name: 'logs.json', data: Buffer.from(JSON.stringify(searchLogs(store, { limit: 400 }), null, 2)) },
@@ -1043,7 +1053,7 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   return result.data;
 }
 
-async function healthChecks(store: Store, docker: DockerCtl, fetchImpl: typeof fetch, dataDir: string) {
+async function healthChecks(store: Store, docker: DockerCtl, fetchImpl: typeof fetch, dataDir: string, memory: MemoryBudget | null) {
   const loaded = await ollamaLoaded(fetchImpl);
   let ollamaOk = false;
   try {
@@ -1073,6 +1083,7 @@ async function healthChecks(store: Store, docker: DockerCtl, fetchImpl: typeof f
     geminiOpen: settings.geminiTier === 'paid' ? true : null, geminiState: geminiStateOf(store.getProvider('prov_gemini')) === 'off' ? 'off' : undefined, lastBackupAt: backups[0]?.createdAt ?? null, tailscaleOk: await tailscaleUp(),
   }), { id: 'embed', ok: !embedWarning, detail: embedWarning || (ollamaOk ? 'The embed role is an embedding model.' : 'Ollama is down, so the embed role was not checked.') },
   await imageCheck(store, dataDir, fetchImpl),
+  { id: 'ram', ...(memory ? await budgetReport(memory, budgetConfig(settings)) : { ok: true, detail: `RAM budget ${settings.ramBudgetGiB} GB (not tracked in this build).` }) },
   { id: 'roles', ok: missingRoles.length === 0, detail: installed === null ? 'Ollama is down, so the Auto roles were not checked.' : missingRoles.length ? `Auto roles point at models Ollama does not have: ${missingRoles.join(', ')}. Pull them or change Defaults in Setup.` : 'Every Auto role points at an installed model.' }];
 }
 

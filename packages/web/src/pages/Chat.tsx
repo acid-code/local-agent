@@ -184,7 +184,7 @@ export function Chat() {
       if (data.type === 'context') setMeter({ used: Number(data.used || 0), budget: Number(data.budget || 0) });
       if (data.type === 'status') {
         setStatus(data.status);
-        setLoadingNote(data.status === 'loading' ? String(data.detail || 'Loading model') : '');
+        setLoadingNote(data.status === 'loading' || data.status === 'waiting' ? String(data.detail || (data.status === 'waiting' ? 'Waiting' : 'Loading model')) : '');
       }
       if (data.type === 'secret' && data.request) setSecret(data.request);
       if (data.type === 'done') {

@@ -40,6 +40,7 @@ import { CrashError, InterruptedToolError, StopError, clampText, now } from './u
 import type { Vault } from './vault.js';
 import { CITE_HINT, findContextTool, shareFileTool } from './files.js';
 import { generateImage, imageTool, localStatus } from './images.js';
+import { BudgetError, type Lease, type MemoryBudget } from './memory.js';
 import { MEMBER_DENIED_TOOLS, OWNER_ID, foreignPath, getAccount } from './accounts.js';
 
 export class Engine {
@@ -51,6 +52,8 @@ export class Engine {
   residentLarge: string[] = [];
   extraTools: Tool[] = [];
   libraryDir = '';
+  /** Shared RAM budget. Set by buildApp; absent in some unit tests. */
+  memory: MemoryBudget | null = null;
 
   constructor(
     private readonly store: Store,
@@ -63,7 +66,7 @@ export class Engine {
     private readonly providerOverride?: (model: ModelRow) => ModelProvider,
   ) {}
 
-  async startTurn(input: { sessionId: string; agentId: string; content?: string; imageUrl?: string; modelId?: string; parentRunId?: string | null; depth?: number; wait?: boolean }) {
+  async startTurn(input: { sessionId: string; agentId: string; content?: string; imageUrl?: string; modelId?: string; parentRunId?: string | null; depth?: number; wait?: boolean; background?: boolean }) {
     const session = this.store.getSession(input.sessionId);
     const agent = this.store.getAgent(input.agentId);
     if (!session || !agent) throw new Error('Chat or persona is missing.');
@@ -101,7 +104,7 @@ export class Engine {
       }
       userMessageId = message.id;
     }
-    const cursor: RunCursor = { phase: 'route', turn: 0, userMessageId, messageModelId: input.modelId, depth: input.depth ?? 0, configVersion: this.store.getSettings().version, agentUpdatedAt: agent.updatedAt, commandAck, pinMiss, imagePrompt: imageCommand?.[1]?.trim() || undefined };
+    const cursor: RunCursor = { phase: 'route', turn: 0, userMessageId, messageModelId: input.modelId, depth: input.depth ?? 0, configVersion: this.store.getSettings().version, agentUpdatedAt: agent.updatedAt, commandAck, pinMiss, imagePrompt: imageCommand?.[1]?.trim() || undefined, background: input.background || undefined };
     const run = this.store.createRun({ sessionId: session.id, agentId: agent.id, parentRunId: input.parentRunId, configVersion: cursor.configVersion ?? 1, cursor });
     const task = this.execute(run.id);
     if (input.wait) await task;
@@ -259,7 +262,7 @@ export class Engine {
     let content: string;
     let note: string;
     try {
-      const result = await generateImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl }, { prompt, ownerId, sessionId: run.sessionId, agentId: run.agentId });
+      const result = await generateImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }, { prompt, ownerId, sessionId: run.sessionId, agentId: run.agentId, onWait: (ahead) => this.bus.publish({ type: 'status', runId: run.id, status: 'waiting', detail: ahead ? `Waiting for memory, ${ahead} ahead` : 'Waiting for memory to free up' }) });
       note = `Image · ${result.detail} · ${Math.max(1, Math.round(result.ms / 1000))} s`;
       content = `Here it is: [file:${result.file.id}]`;
     } catch (error) {
@@ -386,6 +389,15 @@ export class Engine {
     const provider = this.provider(model);
     const toolless = Boolean(current.cursor.noTools) || this.toolSupportOf(model) === false;
     const tools = toolless ? [] : this.tools(agent, this.store.getSession(run.sessionId)?.mode, current.cursor.stage).map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
+    let numCtx = model.local ? ollamaNumCtx(current.cursor.budgetOverride || model.practicalBudget, settings.outputReserveTokens, model.contextWindow) : undefined;
+    const admitted = model.local && numCtx ? await this.admitLocal(current, model, numCtx, signal) : { lease: null, numCtx };
+    if ('switchTo' in admitted) {
+      this.store.addLog('warn', admitted.reason, undefined, 'router');
+      this.store.updateRun(run.id, { cursor: { ...current.cursor, modelId: admitted.switchTo.id, phase: 'model', switched: true, routingReason: admitted.reason }, modelId: admitted.switchTo.id, switched: true, routingNote: admitted.reason });
+      return;
+    }
+    const lease = admitted.lease;
+    numCtx = admitted.numCtx;
     if (model.local && model.sizeClass === 'large') {
       await this.waitForLarge(run.id, model.name);
       await this.loadLarge(run.id, model);
@@ -404,7 +416,7 @@ export class Engine {
       for await (const event of provider.complete({
         model: model.apiName, messages: built.messages, tools, signal,
         paceMs: model.profileId === 'rehearsal' && process.env.NODE_ENV !== 'test' ? 10 : 0,
-        numCtx: model.local ? ollamaNumCtx(current.cursor.budgetOverride || model.practicalBudget, settings.outputReserveTokens, model.contextWindow) : undefined,
+        numCtx,
         keepAlive: model.local ? (model.sizeClass === 'large' ? '30m' : '5m') : undefined,
         think: Boolean(current.cursor.reasoning) && !current.cursor.noThink,
         noThink: Boolean(current.cursor.noThink),
@@ -421,7 +433,9 @@ export class Engine {
           if (event.usage) usage = event.usage;
         }
       }
+      if (lease) await this.calibrateLease(lease, model.apiName, numCtx);
     } catch (error) {
+      lease?.release();
       if (error instanceof StopError) throw error;
       const message = error instanceof Error ? error.message : String(error);
       if (isToolUnsupportedError(message)) {
@@ -1032,7 +1046,7 @@ export class Engine {
     }
     if (stage === 'implement' || sessionMode === 'code') for (const tool of CODING_TOOLS) names.add(tool.name);
     if (agent.ownerId !== OWNER_ID) for (const name of MEMBER_DENIED_TOOLS) names.delete(name);
-    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl }), ...this.extraTools];
+    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), ...this.extraTools];
     const seen = new Set<string>();
     return catalog.filter((tool) => {
       if (!names.has(tool.name) || seen.has(tool.name)) return false;
@@ -1166,6 +1180,56 @@ export class Engine {
     this.store.updateStep(step.id, { status: 'completed', output: `Loading ${model.name}`, endedAt: now() });
     this.bus.publish({ type: 'step', runId, step: this.store.getStep(step.id) });
     this.bus.publish({ type: 'status', runId, status: 'running' });
+  }
+
+  /**
+   * RAM admission for a local model call. Waits (concurrently with other jobs) until the model fits the budget.
+   * If it can never fit, tries a smaller context, then a smaller local model, then fails with a clear message.
+   */
+  private async admitLocal(run: RunRow, model: ModelRow, numCtx: number, signal: AbortSignal): Promise<{ lease: Lease | null; numCtx: number } | { switchTo: ModelRow; reason: string }> {
+    const memory = this.memory;
+    if (!memory) return { lease: null, numCtx };
+    const kind = run.cursor.background ? 'background' : 'chat';
+    const onWait = (ahead: number) => this.bus.publish({ type: 'status', runId: run.id, status: 'waiting', detail: ahead ? `Waiting for memory, ${ahead} ahead` : 'Waiting for memory to free up' });
+    let last: unknown = null;
+    for (const ctx of [...new Set([numCtx, Math.min(numCtx, 8192)])]) {
+      const bytes = await memory.estimateModel(model.apiName, ctx);
+      if (!bytes) return { lease: null, numCtx };
+      try {
+        const lease = await memory.admit({ kind, label: model.name, model: model.apiName, bytes, onWait, signal });
+        this.bus.publish({ type: 'status', runId: run.id, status: 'running' });
+        if (ctx !== numCtx) this.store.addLog('warn', `Using ${model.name} with a ${ctx}-token context so it fits the RAM budget.`, undefined, 'router');
+        return { lease, numCtx: ctx };
+      } catch (error) {
+        if (error instanceof BudgetError && !error.neverFits && signal.aborted) throw new StopError();
+        if (!(error instanceof BudgetError) || !error.neverFits) throw error;
+        last = error;
+      }
+    }
+    const budget = this.store.getSettings().ramBudgetGiB * 1024 ** 3;
+    for (const candidate of this.candidates(this.store.getSettings(), run.agentId)) {
+      if (!candidate.local || candidate.id === model.id) continue;
+      const bytes = await memory.estimateModel(candidate.apiName, 8192);
+      if (bytes && bytes < budget * 0.9) {
+        const row = this.store.getModel(candidate.id);
+        if (row) return { switchTo: row, reason: `Switched to ${row.name} — ${model.name} does not fit the ${this.store.getSettings().ramBudgetGiB} GB RAM budget.` };
+      }
+    }
+    throw last instanceof Error ? last : new Error(`${model.name} does not fit the RAM budget.`);
+  }
+
+  /** After a call, compare Ollama's reported size for the model with the estimate and nudge future estimates. */
+  private async calibrateLease(lease: Lease, apiName: string, numCtx: number | undefined) {
+    lease.release();
+    const memory = this.memory;
+    if (!memory || !numCtx) return;
+    try {
+      const loaded = (await memory.usage()).loaded.find((item) => item.name === apiName);
+      if (loaded?.sizeBytes && (loaded.contextLength == null || loaded.contextLength === numCtx)) {
+        const key = `ollama:${apiName}`;
+        memory.calibrate(key, lease.bytes / memory.factor(key), loaded.sizeBytes);
+      }
+    } catch { /* calibration is best effort */ }
   }
 
   private async unload(names: string[]) {

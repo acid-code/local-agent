@@ -9,6 +9,7 @@ import type { ImageGenSettings, Settings } from './settings.js';
 import type { Tool } from './tools.js';
 import { OWNER_ID, getAccount } from './accounts.js';
 import { saveFile } from './files.js';
+import type { MemoryBudget } from './memory.js';
 
 /**
  * The image role. Two kinds of backend:
@@ -79,7 +80,7 @@ function sizeFor(cfg: ImageGenSettings, shape?: string) {
   return { width: base, height: base };
 }
 
-export async function generateLocal(dataDir: string, cfg: ImageGenSettings, prompt: string, shape: string | undefined, fetchImpl: typeof fetch, signal?: AbortSignal): Promise<Buffer> {
+export async function generateLocal(dataDir: string, cfg: ImageGenSettings, prompt: string, shape: string | undefined, fetchImpl: typeof fetch, signal?: AbortSignal, onSpawn?: (pid: number) => void): Promise<Buffer> {
   const { width, height } = sizeFor(cfg, shape);
   if (mocked()) return mockPng(prompt, width, height);
   if (cfg.backend === 'http') {
@@ -102,6 +103,7 @@ export async function generateLocal(dataDir: string, cfg: ImageGenSettings, prom
       if (error) reject(new Error(`stable-diffusion.cpp failed: ${String(stderr || error.message).trim().split('\n').slice(-2).join(' ').slice(0, 300)}`));
       else resolve();
     });
+    if (child.pid) onSpawn?.(child.pid);
     signal?.addEventListener('abort', () => child.kill('SIGTERM'), { once: true });
   });
   try { return fs.readFileSync(out); } finally { fs.rmSync(out, { force: true }); }
@@ -131,10 +133,10 @@ export function imageQuota(store: Store, settings: Settings) {
   return { apiName, limit, used, remaining: limit == null ? null : Math.max(0, limit - used), day };
 }
 
-export interface GenerateDeps { store: Store; dataDir: string; fetchImpl: typeof fetch; geminiKey?: () => string | undefined }
+export interface GenerateDeps { store: Store; dataDir: string; fetchImpl: typeof fetch; geminiKey?: () => string | undefined; memory?: MemoryBudget | null }
 
 /** One generation for an account, saved to that account's files. */
-export async function generateImage(deps: GenerateDeps, input: { prompt: string; ownerId: string; backend?: 'auto' | ImageBackend; shape?: string; sessionId?: string | null; agentId?: string | null; signal?: AbortSignal }) {
+export async function generateImage(deps: GenerateDeps, input: { prompt: string; ownerId: string; backend?: 'auto' | ImageBackend; shape?: string; sessionId?: string | null; agentId?: string | null; signal?: AbortSignal; onWait?: (ahead: number) => void }) {
   const prompt = input.prompt.trim().slice(0, 2000);
   if (!prompt) throw new Error('Describe the image to make.');
   const settings = deps.store.getSettings();
@@ -149,7 +151,7 @@ export async function generateImage(deps: GenerateDeps, input: { prompt: string;
   const started = Date.now();
   let bytes: Buffer; let mime = 'image/png'; let detail: string;
   if (route.backend === 'local') {
-    bytes = await generateLocal(deps.dataDir, cfg, prompt, input.shape, deps.fetchImpl, input.signal);
+    bytes = await runLocalWithBudget(deps, cfg, local, prompt, input.shape, input.signal, input.onWait);
     detail = local.kind === 'mock' ? 'mock runner' : local.kind === 'http' ? 'local image server' : `${local.model} on this machine`;
   } else {
     const quota = imageQuota(deps.store, settings);
@@ -163,6 +165,27 @@ export async function generateImage(deps: GenerateDeps, input: { prompt: string;
   const slug = prompt.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'image';
   const file = saveFile(deps.store, deps.dataDir, { name: `${slug}.${ext}`, bytes, mime, sessionId: input.sessionId ?? null, agentId: input.agentId ?? null, source: 'agent', ownerId: input.ownerId });
   return { file, backend: route.backend, ms: Date.now() - started, detail, slow: route.slow, reason: route.reason };
+}
+
+/** The local runner under the shared RAM budget: wait for room, track the process RSS, calibrate from its peak. */
+async function runLocalWithBudget(deps: GenerateDeps, cfg: ImageGenSettings, local: LocalStatus, prompt: string, shape: string | undefined, signal?: AbortSignal, onWait?: (ahead: number) => void) {
+  const spec = specFor(cfg);
+  if (!deps.memory || local.kind !== 'sdcpp' || !spec) return generateLocal(deps.dataDir, cfg, prompt, shape, deps.fetchImpl, signal);
+  const { width, height } = sizeFor(cfg, shape);
+  const modelBytes = spec.files.reduce((sum, file) => sum + file.bytes, 0);
+  const key = `image:${spec.id}`;
+  const estimate = deps.memory.estimateImage(spec.id, modelBytes, width, height, spec.files.some((file) => file.role === 'diffusion'));
+  const lease = await deps.memory.admit({ kind: 'image', label: `${spec.name} image`, bytes: estimate, onWait, signal });
+  const sampler = setInterval(() => deps.memory!.peakOf(lease), 500);
+  try {
+    const png = await generateLocal(deps.dataDir, cfg, prompt, shape, deps.fetchImpl, signal, (pid) => lease.setPid(pid));
+    const peak = deps.memory.peakOf(lease);
+    if (peak) deps.memory.calibrate(key, estimate / deps.memory.factor(key), peak);
+    return png;
+  } finally {
+    clearInterval(sampler);
+    lease.release();
+  }
 }
 
 export function imageTool(deps: Omit<GenerateDeps, 'store'>): Tool {

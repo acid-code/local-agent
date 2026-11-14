@@ -5,6 +5,7 @@ import { loadConfig } from './config.js';
 import { Store } from './db.js';
 import { DockerCtl } from './docker.js';
 import { searxngHealth } from './tools.js';
+import { MemoryBudget, budgetConfig, budgetReport, systemProbe } from './memory.js';
 import { doctorChecks, geminiStateOf } from './debug.js';
 import { ollamaLoaded } from './ollama.js';
 import { snapshotResources } from './resources.js';
@@ -44,6 +45,8 @@ const checks = doctorChecks({
   geminiState: geminiStateOf(store.getProvider('prov_gemini')) === 'off' ? 'off' : 'unknown',
   lastBackupAt: listBackups(config.dataDir)[0]?.createdAt ?? null,
 });
+const ramBudget = new MemoryBudget(systemProbe(fetch), () => budgetConfig(store.getSettings()));
+checks.push({ id: 'ram', ...(await budgetReport(ramBudget, budgetConfig(store.getSettings()))) });
 console.log(`local-agent doctor  quota day ${geminiQuotaDay()} (UTC)`);
 for (const check of checks) console.log(`${check.ok ? 'ok  ' : 'warn'} ${check.id}: ${check.detail}`);
 console.log('Nothing was uploaded. Debug exports stay on this machine until you download one.');

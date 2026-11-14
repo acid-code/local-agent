@@ -24,7 +24,7 @@ export class Scheduler {
           : this.store.createSession({ agentId: schedule.agentId, title: schedule.name });
         if (!session) throw new Error('Session missing.');
         if (!schedule.sessionId) this.store.updateSchedule(schedule.id, { sessionId: session.id });
-        await this.engine.startTurn({ sessionId: session.id, agentId: schedule.agentId, content: schedule.prompt });
+        await this.engine.startTurn({ sessionId: session.id, agentId: schedule.agentId, content: schedule.prompt, background: true });
         const next = nextCron(schedule.cron, new Date()).toISOString();
         this.store.updateSchedule(schedule.id, { lastRunAt: new Date().toISOString(), nextRunAt: next, lastStatus: 'started' });
       } catch (error) {
