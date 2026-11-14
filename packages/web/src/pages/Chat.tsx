@@ -713,18 +713,6 @@ export function Chat() {
               {!persona && <Link className="btn primary" to="/agents?new=1">New persona</Link>}
             </div>
           )}
-          {asks.map((ask) => (
-            <div key={ask.id} className="approval-card" role="alertdialog" aria-label="Approval needed">
-              <div className="grow">
-                <small className="faint">Needs your OK · {ask.toolName}</small>
-                <p dir="auto">{ask.reason}</p>
-              </div>
-              <div className="row">
-                <button className="btn ghost" onClick={() => void decide(ask.id, 'deny')}>Deny</button>
-                <button className="btn primary" onClick={() => void decide(ask.id, 'approve')}><Check size={15} aria-hidden /> Approve</button>
-              </div>
-            </div>
-          ))}
           {offers.length > 0 && (
             <div className="banner">
               A key-shaped string was moved out of the message. Save it in the vault?
@@ -785,6 +773,18 @@ export function Chat() {
             </details>
           )}
           {streaming && <article className="msg" dir="auto"><Markdown text={streaming} streaming /></article>}
+          {asks.map((ask) => (
+            <div key={ask.id} className="approval-card" role="alertdialog" aria-label="Approval needed">
+              <div className="grow">
+                <small className="faint">Needs your OK · {ask.toolName}</small>
+                <p dir="auto">{ask.reason}</p>
+              </div>
+              <div className="row">
+                <button className="btn ghost" onClick={() => void decide(ask.id, 'deny')}>Deny</button>
+                <button className="btn primary" onClick={() => void decide(ask.id, 'approve')}><Check size={15} aria-hidden /> Approve</button>
+              </div>
+            </div>
+          ))}
           {active && !streaming && !thinking && <div className="typing" aria-label="Working"><span /><span /><span /> <em>{loadingNote || 'Working…'}</em></div>}
           {runError && !active && (
             <div className="banner error-card" role="alert">
