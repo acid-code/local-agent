@@ -89,6 +89,14 @@ describe('agent self-management', () => {
     await expect(timer.execute({ action: 'create', name: 'x', cron: 'every day', prompt: 'p' }, ctx)).rejects.toThrow(/5-field cron/);
     await timer.execute({ action: 'delete', id: timers[0]!.id }, ctx);
     expect(built.store.listSchedules()).toHaveLength(0);
+    // Small models often drop "action": a full row means create (still behind the card), nothing means list.
+    const loose = { name: 'Standup', cron: '0 9 * * 1-5', prompt: 'Summarize yesterday' };
+    expect(timer.mutates?.(loose)).toBe(true);
+    expect(timer.approval(loose, ctx)).toMatch(/Create timer “Standup”/);
+    await timer.execute(loose, ctx);
+    expect(await timer.execute({}, ctx)).toMatch(/Standup/);
+    const standup = built.store.listSchedules()[0]!.id;
+    await expect(timer.execute({ id: standup }, ctx)).rejects.toThrow(/Pass action/);
     await built.app.close();
   });
 

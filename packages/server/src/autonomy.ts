@@ -11,6 +11,9 @@ import { createTrigger, getTrigger, listTriggers, updateTrigger, type TriggerKin
 import { nid, now, secret as randomSecret } from './util.js';
 import type { Vault } from './vault.js';
 
+/** Small models often leave out "action". Infer create when they pass what a new row needs, list when they pass nothing. */
+const act = (args: Record<string, unknown>) => String(args.action || (args.id ? '' : (args.name || args.cron || args.prompt || args.kind || args.path) ? 'create' : 'list'));
+
 /**
  * Agent self-management (timers and triggers it owns) and background helper agents.
  * Creating or deleting a timer/trigger is an approval card; pausing and resuming are not.
@@ -217,17 +220,17 @@ export class Autonomy {
         name: 'manage_timer',
         description: 'Your own timers (scheduled prompts that start a run of you). action: list | create (name, cron as 5-field "m h dom mon dow", prompt) | pause | resume | delete (id). Creating or deleting asks the user first.',
         parameters: obj({ action: { type: 'string', enum: ['list', 'create', 'pause', 'resume', 'delete'] }, id: { type: 'string' }, name: { type: 'string' }, cron: { type: 'string' }, prompt: { type: 'string' } }, ['action']),
-        mutates: (args) => args.action !== 'list',
+        mutates: (args) => act(args) !== 'list',
         approval: (args, ctx) => {
-          if (args.action === 'create') return `Create timer “${String(args.name || 'Timer')}” (${String(args.cron || '')}): ${String(args.prompt || '').slice(0, 140)}`;
-          if (args.action === 'delete') {
+          if (act(args) === 'create') return `Create timer “${String(args.name || 'Timer')}” (${String(args.cron || '')}): ${String(args.prompt || '').slice(0, 140)}`;
+          if (act(args) === 'delete') {
             const row = ctx?.store.getSchedule(String(args.id || ''));
             return `Delete timer “${row?.name || args.id}”${row ? ` (${row.cron})` : ''}`;
           }
           return null;
         },
         async execute(args, ctx) {
-          const action = String(args.action);
+          const action = act(args);
           if (action === 'list') {
             const rows = ctx.store.listSchedules().filter((row) => row.agentId === ctx.agent.id);
             return rows.length ? rows.map((row) => `${row.id}\t${row.enabled ? 'on' : 'paused'}\t${row.cron}\t${row.name}\tnext ${row.nextRunAt || '—'}`).join('\n') : 'No timers yet.';
@@ -256,24 +259,24 @@ export class Autonomy {
             self.bus.publish({ type: 'context', sessionId: ctx.sessionId, what: 'timers' });
             return `Deleted timer “${row.name}”.`;
           }
-          throw new Error(`Unknown action ${action}.`);
+          throw new Error(`Unknown action "${action}". Pass action: list, create, pause, resume or delete.`);
         },
       },
       {
         name: 'manage_trigger',
         description: 'Your own triggers (events that start a run of you). action: list | create (name, kind webhook|github|folder, prompt with {{event}} placeholders, path for folder) | pause | resume | delete (id). Creating or deleting asks the user first. Webhook secrets are shown to the user on the Triggers page, never to you.',
         parameters: obj({ action: { type: 'string', enum: ['list', 'create', 'pause', 'resume', 'delete'] }, id: { type: 'string' }, name: { type: 'string' }, kind: { type: 'string', enum: ['webhook', 'github', 'folder'] }, prompt: { type: 'string' }, path: { type: 'string' } }, ['action']),
-        mutates: (args) => args.action !== 'list',
+        mutates: (args) => act(args) !== 'list',
         approval: (args, ctx) => {
-          if (args.action === 'create') return `Create ${String(args.kind || 'webhook')} trigger “${String(args.name || 'Trigger')}”${args.path ? ` on ${String(args.path)}` : ''}: ${String(args.prompt || '').slice(0, 140)}`;
-          if (args.action === 'delete') {
+          if (act(args) === 'create') return `Create ${String(args.kind || 'webhook')} trigger “${String(args.name || 'Trigger')}”${args.path ? ` on ${String(args.path)}` : ''}: ${String(args.prompt || '').slice(0, 140)}`;
+          if (act(args) === 'delete') {
             const row = ctx ? getTrigger(ctx.store, String(args.id || '')) : null;
             return `Delete trigger “${row?.name || args.id}”`;
           }
           return null;
         },
         async execute(args, ctx) {
-          const action = String(args.action);
+          const action = act(args);
           if (action === 'list') {
             const rows = listTriggers(ctx.store).filter((row) => row.agentId === ctx.agent.id);
             return rows.length ? rows.map((row) => `${row.id}\t${row.enabled ? 'on' : 'paused'}\t${row.kind}\t${row.name}`).join('\n') : 'No triggers yet.';
@@ -310,7 +313,7 @@ export class Autonomy {
             self.bus.publish({ type: 'context', sessionId: ctx.sessionId, what: 'triggers' });
             return `Deleted trigger “${row.name}”.`;
           }
-          throw new Error(`Unknown action ${action}.`);
+          throw new Error(`Unknown action "${action}". Pass action: list, create, pause, resume or delete.`);
         },
       },
       {
