@@ -5,7 +5,7 @@ import { CiteContext, type CiteHandlers } from '../components/Markdown';
 import { FileViewer, type QuotePick, type ViewerSource } from '../components/FileViewer';
 import { MentionPicker, type MentionPick } from '../components/MentionPicker';
 import { CONTEXT_MARK, citationsIn, fileMeta, humanSize, kindOf, quoteBlock, rawUrl, saveFile, uploadFile, type Cite, type FileMeta } from '../lib/files';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import { parseSources, toolSummary } from '@local-agent/shared';
 import { toast, errorText } from '../lib/toast';
 import { api, post } from '../lib/api';
@@ -106,11 +106,12 @@ export function Chat() {
     if (data.session.agentId) await post(`/api/agents/${data.session.agentId}/read`, {}).catch(() => undefined);
   }
 
+  const location = useLocation();
   useEffect(() => {
     api<{ models: ModelChoice[] }>('/api/models').then((data) => setModels(data.models)).catch(() => undefined);
-    const share = new URLSearchParams(window.location.search).get('share');
+    const share = new URLSearchParams(location.search).get('share');
     if (share) setDraft(share);
-    const persona = new URLSearchParams(window.location.search).get('persona');
+    const persona = new URLSearchParams(location.search).get('persona');
     refreshLists().then(async (rows) => {
       if (persona) {
         const existing = rows.find((session) => session.agentId === persona);
@@ -124,7 +125,7 @@ export function Chat() {
       }
       if (rows[0]) void openSession(rows[0].id);
     }).catch(() => undefined);
-  }, []);
+  }, [location.search]);
   useEffect(() => {
     if (pendingJump.current && messages.some((m) => m.id === pendingJump.current)) {
       const id = pendingJump.current; pendingJump.current = null;
@@ -212,18 +213,22 @@ export function Chat() {
     }
   }
 
-  async function createChat(nextMode: 'chat' | 'code') {
-    if (!agents[0]) return;
+  async function createChat(nextMode: 'chat' | 'code'): Promise<string | undefined> {
+    if (!agents[0]) return undefined;
     const created = await post<{ session: Session }>('/api/sessions', { agentId: agents[0].id, mode: nextMode, title: nextMode === 'code' ? 'Coding session' : 'New chat' });
     await refreshLists();
     await openSession(created.session.id);
+    return created.session.id;
   }
 
   async function send(event?: { preventDefault(): void }, override?: string) {
     event?.preventDefault();
     const typed = override ?? draft;
     const attaching = override === undefined && (quotes.length > 0 || mentions.length > 0);
-    if (!current || (!typed.trim() && !attaching)) return;
+    if (!typed.trim() && !attaching) return;
+    // Typing with no chat open starts one, instead of silently doing nothing.
+    const target = current || await createChat('chat').catch(() => undefined);
+    if (!target) { toast('Create a persona under Agents first.', 'info'); return; }
     if (active) { toast('A reply is still running. Press Stop (Esc) first.', 'info'); return; }
     const sentQuotes = override === undefined ? quotes : [];
     const sentMentions = override === undefined ? mentions : [];
@@ -234,10 +239,10 @@ export function Chat() {
     setRunError(null);
     setThinking('');
     setMessages((value) => [...value, { id: 'local', role: 'user', content }]);
-    const agentId = sessions.find((session) => session.id === current)?.agentId || agents[0]?.id;
+    const agentId = sessions.find((session) => session.id === target)?.agentId || agents[0]?.id;
     let result: { run: { id: string }; offers: Offer[] };
     try {
-      result = await post<{ run: { id: string }; offers: Offer[] }>(`/api/sessions/${current}/messages`, { content, agentId, mentions: payloadMentions.length ? payloadMentions : undefined });
+      result = await post<{ run: { id: string }; offers: Offer[] }>(`/api/sessions/${target}/messages`, { content, agentId, mentions: payloadMentions.length ? payloadMentions : undefined });
     } catch (error) {
       // A reply is still running (409) or the model choice was refused (400). Keep the draft.
       setMessages((value) => value.filter((message) => message.id !== 'local'));
