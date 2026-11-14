@@ -23,7 +23,7 @@ import { previewPrune, runPrune, snapshotResources } from './resources.js';
 import { speak, transcribe, voiceStatus, KOKORO_COMMAND, WHISPER_COMMAND } from './voice.js';
 import { listWorkspace, readWorkspaceFile } from './tools.js';
 import {
-  createCollection, ingestBuffer, ingestFolder, kbUsage, listCollections, ollamaEmbedder, searchKnowledge,
+  createCollection, embedRoleWarning, ingestBuffer, ingestFolder, kbUsage, listCollections, ollamaEmbedder, searchKnowledge,
 } from './kb.js';
 import {
   exportSkill, importSkill, listSkills, parseSkillMd, saveSkill, setSkillEnabled, skillFit, skillVersions,
@@ -738,12 +738,13 @@ async function healthChecks(store: Store, docker: DockerCtl, fetchImpl: typeof f
   }
   const dbFile = path.join(dataDir, 'local-agent.db');
   const dbBytes = fs.existsSync(dbFile) ? fs.statSync(dbFile).size : 0;
-  return doctorChecks({
+  const embedWarning = ollamaOk ? await embedRoleWarning(store, fetchImpl) : null;
+  return [...doctorChecks({
     ollamaOk, loaded, dockerOk: docker.available(), mcpCount: mcp.length, mcpErrors: mcp.filter((item) => item.lastError).length,
     searxngOk: searx, telegramQueued: telegramQueue(dataDir).length, dbBytes,
     diskFreeBytes: snap.disk.freeBytes, memAvailableGiB: snap.memory.availableGiB,
     geminiOpen: settings.geminiTier === 'paid' ? true : null, geminiState: geminiStateOf(store.getProvider('prov_gemini')) === 'off' ? 'off' : undefined, lastBackupAt: backups[0]?.createdAt ?? null, tailscaleOk: await tailscaleUp(),
-  });
+  }), { id: 'embed', ok: !embedWarning, detail: embedWarning || (ollamaOk ? 'The embed role is an embedding model.' : 'Ollama is down, so the embed role was not checked.') }];
 }
 
 function tailscaleUp(): Promise<boolean> {

@@ -7,6 +7,7 @@ import { hashEmbed } from '@local-agent/shared';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Store } from './db.js';
 import { nid, now } from './util.js';
+import { ollamaCapabilities } from './ollama.js';
 
 const CODE_EXT = new Set(['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'py', 'go', 'rs', 'java', 'c', 'h', 'hpp', 'cpp', 'cs', 'rb', 'php', 'sh', 'css', 'json', 'yml', 'yaml', 'toml', 'sql', 'xml']);
 const TEXT_EXT = new Set(['md', 'txt', 'html', 'htm', ...CODE_EXT]);
@@ -457,7 +458,7 @@ export async function searchKnowledge(store: Store, query: string, opts: { agent
     FROM kb_chunks c JOIN kb_documents d ON d.id = c.document_id
     WHERE c.collection_id IN (${placeholders})`).all(...ids) as Record<string, unknown>[];
   const embedderName = String(rows[0]?.embedder ?? 'hash');
-  const embed = opts.embed ?? (embedderName === 'hash' ? hashEmbedder() : ollamaEmbedder(fetch));
+  const embed = opts.embed ?? (embedderName === 'hash' ? hashEmbedder() : ollamaEmbedder(fetch, embedderName));
   const queryEmbedded = await embed([query]);
   const queryVector = queryEmbedded.vectors[0] ?? hashEmbed(query);
   const docs = rows.map((row) => {
@@ -490,4 +491,16 @@ export function formatCitations(hits: KbHit[]): string {
     const where = [hit.collection, hit.path || hit.document, hit.heading].filter(Boolean).join(' · ');
     return `[${index + 1}] ${where}\n${hit.text}`;
   }).join('\n\n');
+}
+
+/** A warning when the embed role is not a usable embedding model, so knowledge search silently uses keyword hashing. */
+export async function embedRoleWarning(store: Store, fetchImpl: typeof fetch): Promise<string | null> {
+  const name = store.getSettings().autoModels.embed || 'nomic-embed-text';
+  const hashed = Number((store.db.prepare("SELECT COUNT(*) AS n FROM kb_collections WHERE embedder = 'hash'").get() as { n: number } | undefined)?.n ?? 0);
+  const tail = hashed ? ` ${hashed} collection${hashed === 1 ? ' was' : 's were'} indexed with that fallback. Re-index after fixing it.` : '';
+  const found = await ollamaCapabilities(fetchImpl, name);
+  if (found.missing) return `The embed role "${name}" is not installed in Ollama, so knowledge search falls back to keyword hashing. Run: ollama pull ${name}.${tail}`;
+  if (found.capabilities && !found.capabilities.includes('embedding')) return `The embed role "${name}" is not an embedding model, so knowledge search falls back to keyword hashing. Choose one such as nomic-embed-text.${tail}`;
+  if (hashed) return `Knowledge search used the keyword-hash fallback.${tail}`;
+  return null;
 }

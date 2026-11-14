@@ -6,6 +6,7 @@ import { buildApp } from '../src/app.js';
 import { splitThinking } from '../src/engine.js';
 import { providerFor, type ModelProvider, type ProviderEvent } from '../src/providers.js';
 import type { Store } from '../src/db.js';
+import { createCollection, embedRoleWarning, hashEmbedder, ingestBuffer } from '../src/kb.js';
 import { decideAuto, foldCandidates, likelyNeedsTools, nextAutoTier, DEFAULT_AUTO_MAP } from '@local-agent/shared';
 import { doctorChecks, geminiStateOf } from '../src/debug.js';
 
@@ -289,5 +290,34 @@ describe('long messages', () => {
     const messages = [{ id: 'a', role: 'user' as const, content: big }, { id: 'b', role: 'assistant' as const, content: big }, { id: 'c', role: 'user' as const, content: big }];
     expect(foldCandidates(messages, new Set(), 'approx', 1800)).toBeNull();
     expect(foldCandidates(messages, new Set(), 'approx', 1800, 2000)).toEqual(['a']);
+  });
+});
+
+describe('knowledge base use', () => {
+  it('puts matching passages and a kb_search hint in front of the model, and warns about a non-embedding embed role', async () => {
+    const dir = tmp();
+    let system = '';
+    const provider: ModelProvider = {
+      async *complete(req) {
+        system = String(req.messages[0]?.content);
+        yield { type: 'token', text: 'BLUE HERON [1]' };
+        yield { type: 'done', finishReason: 'stop', usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+    };
+    const { app, store, engine } = await buildApp({ dataDir: dir, startScheduler: false, serveWeb: false, providerOverride: () => provider });
+    addLocal(store, 'main', 'qwen3:0.6b', 'large', 8192);
+    const agent = store.createAgent({ name: 'House', systemPrompt: 'Be brief.', toolAllowlist: [], workspacePath: dir });
+    const collection = createCollection(store, { name: 'Notes', agentId: null });
+    await ingestBuffer(store, collection.id, { name: 'birds.txt', bytes: Buffer.from('Field notes.\n\nThe secret bird name is BLUE HERON. It nests by the lake.') }, hashEmbedder());
+    const session = store.createSession({ agentId: agent.id, title: 'KB' });
+    await engine.startTurn({ sessionId: session.id, agentId: agent.id, content: 'What is the secret bird name?', wait: true });
+    expect(system).toMatch(/call kb_search first/);
+    expect(system).toMatch(/BLUE HERON/);
+
+    const notEmbed = async () => new Response(JSON.stringify({ capabilities: ['completion'] }), { status: 200 });
+    expect(await embedRoleWarning(store, notEmbed as typeof fetch)).toMatch(/is not an embedding model.*1 collection was indexed/);
+    const missing = async () => new Response('{"error":"not found"}', { status: 404 });
+    expect(await embedRoleWarning(store, missing as typeof fetch)).toMatch(/not installed in Ollama/);
+    await app.close();
   });
 });

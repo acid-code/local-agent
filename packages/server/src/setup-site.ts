@@ -11,6 +11,7 @@ import type { Store } from './db.js';
 import { consumeSetupToken, setupTokenValid } from './setup-token.js';
 import { contractWarnings } from './contracts.js';
 import { toolCapabilityWarnings } from './ollama.js';
+import { embedRoleWarning } from './kb.js';
 import type { Settings } from './settings.js';
 import type { Vault } from './vault.js';
 
@@ -60,9 +61,11 @@ export async function buildSetupApp(options: {
     if (!authed) return reply.code(401).send({ needsOwner: false, authenticated: false });
     const models = options.store.listModels();
     const capability = await toolCapabilityWarnings(fetchImpl, models);
+    const embedWarning = await embedRoleWarning(options.store, fetchImpl);
     const warnings = [
       ...contractWarnings(models.filter((model) => model.local && model.embedding).map((model) => model.name)),
       ...capability,
+      ...(embedWarning ? [embedWarning] : []),
     ];
     const support = { ...options.store.getSettings().toolSupport };
     let changed = false;

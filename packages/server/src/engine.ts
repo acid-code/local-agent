@@ -28,6 +28,7 @@ import { indexText, retrieve, type VectorIndex } from './embeddings.js';
 import { countGeminiTokens, ollamaNumCtx, providerFor, type ModelProvider } from './providers.js';
 import type { Settings } from './settings.js';
 import { CODING_TOOLS } from './coding.js';
+import { formatCitations, searchKnowledge } from './kb.js';
 import { kbSearchTool, loadSkillTool, toolsFor, type Tool, type ToolContext } from './tools.js';
 import { runSkillScript, skillCatalog } from './skills.js';
 import { getWorkshop, workshopBrief } from './workshops.js';
@@ -768,7 +769,8 @@ export class Engine {
       id: summary.id, level: summary.level, content: summary.content, covers: summary.covers, foldedInto: summary.foldedInto,
     }));
     const messages = this.store.listMessages(run.sessionId);
-    const user = [...messages].reverse().find((message) => message.role === 'user');
+    const user = (run.cursor.userMessageId && messages.find((message) => message.id === run.cursor.userMessageId))
+      || [...messages].reverse().find((message) => message.role === 'user');
     const retrieved = strategy === 'retrieval' || strategy === 'hierarchical+retrieval' ? retrieve(this.store, this.vectors, run.sessionId, user?.content ?? '', 4) : [];
     let budget = Math.min(model.contextWindow, model.practicalBudget);
     const session = this.store.getSession(run.sessionId);
@@ -780,7 +782,10 @@ export class Engine {
         ? '\n\nThe plan is saved. Implement it in the shared repos. Commit when the checks pass. Push only after the owner approves.'
         : '';
     const skillNote = skillCatalog(this.store, agent.id, user?.content ?? '');
-    const system = `${agent.systemPrompt}${sharedRepoBrief(this.store)}${stageNote}${roleNote}`;
+    const hasKb = this.hasKnowledge(agent.id);
+    const kbHint = hasKb ? '\n\nA knowledge base of the owner\'s documents is attached. When a question could be answered from it, call kb_search first and cite the numbered sources.' : '';
+    const kbNote = hasKb ? await this.knowledgeNote(agent.id, user?.content ?? '') : '';
+    const system = `${agent.systemPrompt}${sharedRepoBrief(this.store)}${stageNote}${roleNote}${kbHint}`;
     const preambleGuess = `${system}\n${notes.map((note) => note.content).join('\n')}`;
     if (model.providerId === 'prov_gemini' && estimateTokens(preambleGuess, 'gemini') > budget * 0.75) {
       const key = process.env.GEMINI_API_KEY;
@@ -791,7 +796,7 @@ export class Engine {
     }
     const plan = planContext({
       strategy, contextWindow: model.contextWindow, practicalBudget: run.cursor.budgetOverride || budget, outputReserve: settings.outputReserveTokens,
-      system, optional: [{ label: 'workshop brief', text: workshopNote }, { label: 'skills catalog', text: skillNote }].filter((part) => part.text.trim()),
+      system, optional: [{ label: 'knowledge base passages', text: kbNote }, { label: 'workshop brief', text: workshopNote }, { label: 'skills catalog', text: skillNote }].filter((part) => part.text.trim()),
       pinned: notes.filter((note) => note.pinned).map((note) => note.content),
       summaries, retrieved, tokenizer: model.tokenizer as 'gemma4',
       messages: messages.map((message) => ({ id: message.id, role: message.role as 'user', content: message.content })),
@@ -944,6 +949,17 @@ export class Engine {
       return Number(row?.n ?? 0) > 0;
     } catch {
       return false;
+    }
+  }
+
+  /** Top knowledge-base passages for a question, so small models that skip kb_search still see them. */
+  private async knowledgeNote(agentId: string, text: string): Promise<string> {
+    if (!text.trim() || !likelyNeedsTools(text, { kb: true })) return '';
+    try {
+      const hits = await searchKnowledge(this.store, readChatCommand(text).rest || text, { agentId, k: 3 });
+      return hits.length ? `Knowledge base passages that may answer the latest question. Cite them by number:\n${formatCitations(hits)}` : '';
+    } catch {
+      return '';
     }
   }
 
