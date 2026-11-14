@@ -1,5 +1,4 @@
-import fs from 'node:fs';
-import path from 'node:path';
+import { discoverRules, rulesBrief } from './rules.js';
 import { OWNER_ID } from './accounts.js';
 import type { Store } from './db.js';
 import { listSkills, renderSkillMd, saveSkill } from './skills.js';
@@ -163,29 +162,9 @@ export function searchChatsTool(): Tool {
 
 // ── Project rule files ───────────────────────────────────────────────────────
 
-export const RULE_FILES = ['AGENTS.md', 'CLAUDE.md', '.cursorrules'];
-const RULE_CAP = 3000;
-const RULE_TOTAL = 8000;
-
-/** AGENTS.md / CLAUDE.md / .cursorrules from each attached workspace, capped, so the agent follows the project's own rules. */
-export function projectRules(roots: { label: string; path: string }[]): string {
-  const parts: string[] = [];
-  let total = 0;
-  for (const root of roots) {
-    for (const name of RULE_FILES) {
-      const file = path.join(root.path, name);
-      let text = '';
-      try { if (fs.statSync(file).isFile()) text = fs.readFileSync(file, 'utf8'); } catch { continue; }
-      text = text.trim();
-      if (!text) continue;
-      const room = Math.min(RULE_CAP, RULE_TOTAL - total);
-      if (room <= 200) break;
-      const clipped = text.length > room ? `${text.slice(0, room)}\n… (${text.length - room} more characters in ${name})` : text;
-      parts.push(`### ${root.label}/${name}\n${clipped}`);
-      total += clipped.length;
-    }
-  }
-  return parts.length ? `\n\nProject rules from the attached workspaces. Follow them:\n${parts.join('\n\n')}` : '';
+/** Kept for callers that only have roots: every rule file on. See rules.ts for discovery and per-chat switches. */
+export function projectRules(roots: { label: string; path: string }[], disabled?: Set<string>): string {
+  return rulesBrief(discoverRules(roots, disabled));
 }
 
 // ── Rollback ─────────────────────────────────────────────────────────────────

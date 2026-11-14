@@ -208,7 +208,7 @@ export const MEMBER_ROUTES = new Set([
   'POST /api/files', 'GET /api/files', 'GET /api/files/:id', 'GET /api/files/:id/raw', 'DELETE /api/files/:id',
   'GET /api/messages/:id', 'GET /api/context/search',
   'GET /api/git/roots', 'GET /api/git/:root/status', 'GET /api/git/:root/diff', 'GET /api/git/:root/tree', 'GET /api/git/:root/raw', 'GET /api/git/:root/file', 'POST /api/git/:root/action',
-  'GET /api/sessions', 'POST /api/sessions', 'GET /api/sessions/:id', 'GET /api/sessions/:id/context', 'POST /api/helpers/:id/stop', 'POST /api/runs/:id/rollback', 'GET /api/agents/:id/memory-files', 'PUT /api/agents/:id/memory-files/:kind', 'PATCH /api/sessions/:id', 'DELETE /api/sessions/:id', 'POST /api/sessions/:id/messages',
+  'GET /api/sessions', 'POST /api/sessions', 'GET /api/sessions/:id', 'GET /api/sessions/:id/context', 'GET /api/sessions/:id/rules', 'PUT /api/sessions/:id/rules', 'POST /api/helpers/:id/stop', 'POST /api/runs/:id/rollback', 'GET /api/agents/:id/memory-files', 'PUT /api/agents/:id/memory-files/:kind', 'PATCH /api/sessions/:id', 'DELETE /api/sessions/:id', 'POST /api/sessions/:id/messages',
   'GET /api/sessions/:id/plan', 'PUT /api/sessions/:id/plan', 'PATCH /api/plan-items/:id', 'GET /api/sessions/:id/edits', 'POST /api/edits/:id/revert',
   'GET /api/runs', 'GET /api/runs/:id', 'GET /api/runs/:id/events', 'POST /api/runs/:id/control',
   'GET /api/approvals', 'POST /api/approvals/:id',

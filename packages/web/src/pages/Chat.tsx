@@ -852,7 +852,7 @@ export function Chat() {
         </div>
       </section>
       {panel === 'files' && wsRoot && chatWs.roots.find((root) => root.id === wsRoot) && (
-        <WorkspaceBrowser root={chatWs.roots.find((root) => root.id === wsRoot)!} live={active} onClose={() => setPanel(null)} onChanged={() => void loadChatWs(current)}
+        <WorkspaceBrowser sessionId={current} root={chatWs.roots.find((root) => root.id === wsRoot)!} live={active} onClose={() => setPanel(null)} onChanged={() => void loadChatWs(current)}
           onMention={(path) => addMention({ kind: 'path', root: wsRoot, path, dir: false, label: path })} />
       )}
       {panel === 'context' && current && <ContextPanel sessionId={current} tick={messages.length + helperTick} onClose={() => setPanel(null)}

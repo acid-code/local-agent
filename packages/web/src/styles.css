@@ -1215,3 +1215,6 @@ table.limits tbody th { color: var(--text); font-weight: 500; }
 .approval-card { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 8px 0; padding: 12px 14px; border: 1px solid var(--line); border-left: 3px solid var(--brass); border-radius: calc(10px * var(--round)); background: var(--bg-2); }
 .approval-card p { margin: 2px 0 0; font-size: calc(14px * var(--fs)); }
 .approval-card .row { gap: 8px; }
+.rule-chips { padding: 8px 14px 10px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
+.rule-chips .chip { font-size: calc(12px * var(--fs)); font-family: var(--mono, ui-monospace, monospace); }
+.rule-chips .chip:not(.on) { opacity: .55; text-decoration: line-through; }

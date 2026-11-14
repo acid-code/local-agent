@@ -45,6 +45,7 @@ import { NO_MODEL_MESSAGE } from './usable-models.js';
 import { BudgetError, type Lease, type MemoryBudget } from './memory.js';
 import { MEMBER_DENIED_TOOLS, OWNER_ID, foreignPath, getAccount } from './accounts.js';
 import { Autonomy, HELPER_DENIED } from './autonomy.js';
+import { disabledRules } from './rules.js';
 import { memoryBrief, memoryFileTool, projectRules, proposeSkillTool, searchChatsTool, skillNudge } from './learning.js';
 
 export class Engine {
@@ -864,7 +865,7 @@ export class Engine {
     const kbNote = hasKb ? await this.knowledgeNote(agent.id, user?.content ?? '') : '';
     // Hermes-style context: capped memory files, the project's own rule files, and a nudge to save a skill after hard tasks.
     const memoryNote = agent.memoryEnabled ? memoryBrief(this.store, agent.id) : '';
-    const rulesNote = session ? projectRules(chatWorkspacePaths(this.store, run.sessionId, session.ownerId || OWNER_ID)) : '';
+    const rulesNote = session ? projectRules(chatWorkspacePaths(this.store, run.sessionId, session.ownerId || OWNER_ID), disabledRules(this.store, run.sessionId)) : '';
     const toolNames = this.tools(agent, session?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId)).map((tool) => tool.name);
     const nudge = run.cursor.helperId ? '' : skillNudge(run.cursor.turn, toolNames);
     const system = `${agent.systemPrompt}${sharedRepoBrief(this.store)}${chatWorkspaces}${rulesNote}${memoryNote}${stageNote}${roleNote}${kbHint}${CITE_HINT}${nudge}`;

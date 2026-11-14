@@ -33,6 +33,7 @@ import {
   type TriggerKind,
 } from './triggers.js';
 import { secret as randomSecret } from './util.js';
+import { RULE_FILE_CAP, RULE_TOTAL_CAP, disabledRules, discoverRules, setRuleEnabled } from './rules.js';
 import { memoryFiles, rollbackRun, writeMemoryFile } from './learning.js';
 import { createWorkshop, getWorkshop, listWorkshops } from './workshops.js';
 import { ACCENT_DEFAULT, FACES, accentOk, avatarPath, saveAvatar } from './avatars.js';
@@ -49,7 +50,7 @@ import { MEMBER_DENIED_TOOLS, OWNER_ID, accountOf, foreignPath, mustOwn, ownerOf
 import { memberByUsername } from './accounts.js';
 import { registerAccounts } from './members.js';
 import { registerMedia } from './media.js';
-import { prefillChatWorkspaces, resolveChatWorkspaces, setChatWorkspaces } from './chat-workspaces.js';
+import { prefillChatWorkspaces, resolveChatWorkspaces, setChatWorkspaces, chatWorkspacePaths } from './chat-workspaces.js';
 import { usableModels } from './usable-models.js';
 import { registerWorkspaceRoutes } from './workspaces.js';
 import { budgetConfig, budgetReport, type MemoryBudget } from './memory.js';
@@ -664,6 +665,20 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     mustOwn(store, req, 'run', id, 'Run not found.');
     if (store.getSettings().readOnly) throw http(423, 'Read-only mode is on.');
     return { reverted: await rollbackRun(store, id) };
+  });
+  // Rule files the chat's workspaces bring (AGENTS.md, .cursor/rules, CLAUDE.md…), each switchable per chat.
+  app.get('/api/sessions/:id/rules', async (req) => {
+    const id = (req.params as { id: string }).id;
+    mustOwn(store, req, 'session', id, 'Chat not found.');
+    const rules = discoverRules(chatWorkspacePaths(store, id, me(req)), disabledRules(store, id));
+    return { rules: rules.map(({ text, ...rule }) => ({ ...rule, preview: text.slice(0, 400) })), caps: { file: RULE_FILE_CAP, total: RULE_TOTAL_CAP } };
+  });
+  app.put('/api/sessions/:id/rules', async (req) => {
+    const id = (req.params as { id: string }).id;
+    mustOwn(store, req, 'session', id, 'Chat not found.');
+    const body = parse(z.object({ key: z.string().min(1).max(2000), enabled: z.boolean() }), req.body);
+    setRuleEnabled(store, id, body.key, body.enabled);
+    return { ok: true };
   });
   app.post('/api/helpers/:id/stop', async (req) => {
     const helper = engine.autonomy.getHelper((req.params as { id: string }).id);

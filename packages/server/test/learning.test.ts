@@ -220,7 +220,7 @@ describe('project rule files', () => {
     const text = projectRules([{ label: 'app', path: a }, { label: 'infra', path: b }]);
     expect(text).toContain('### app/AGENTS.md\nRun npm test before commits.');
     expect(text).toContain('### infra/CLAUDE.md\nNever push to main.');
-    expect(text).toMatch(/2000 more characters in \.cursorrules/);
+    expect(text).toMatch(/1000 more characters; read app\/\.cursorrules/);
     expect(projectRules([{ label: 'empty', path: tmp() }])).toBe('');
   });
 });
