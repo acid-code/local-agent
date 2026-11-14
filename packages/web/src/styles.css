@@ -524,3 +524,4 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }
   .chip > button:last-child { width: 32px; height: 32px; }
   .git-files button { min-height: 44px; }
 }
+.ws-root strong { display: flex; align-items: center; gap: 6px; }

@@ -413,7 +413,7 @@ function ZipView({ url, name }: { url: string; name: string }) {
       <Info icon={<FileArchive size={28} />} title={apk ? 'Android app package' : 'Archive'} detail={apk ? 'On the phone, use Open with to install it. Android asks before installing apps from outside the Play Store.' : 'Download it to extract the files.'} />
       {error && <p className="badge warn">{error}</p>}
       {entries && entries.length > 0 && (
-        <details className="zip-list">
+        <details className="zip-list" open>
           <summary>{entries.length} entries</summary>
           <ul>{entries.slice(0, 500).map((entry) => <li key={entry.name} className="mono"><span className="ellipsis">{entry.name}</span><span className="faint">{entry.size ? humanSize(entry.size) : ''}</span></li>)}</ul>
         </details>
