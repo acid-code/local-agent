@@ -16,6 +16,7 @@ import { Triggers } from './pages/Triggers';
 import { Settings } from './pages/Settings';
 import { Setup } from './pages/Setup';
 import { Tools } from './pages/Tools';
+import { Workspace } from './pages/Workspace';
 
 export interface Me { needsSetup: boolean; authenticated: boolean; username?: string }
 
@@ -37,6 +38,7 @@ export function App() {
       <Routes>
         <Route path="/" element={<Chat />} />
         <Route path="/agents" element={<Agents />} />
+        <Route path="/workspace" element={<Workspace />} />
         <Route path="/runs" element={<Runs />} />
         <Route path="/runs/:id" element={<Runs />} />
         <Route path="/tools" element={<Tools />} />

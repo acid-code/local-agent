@@ -405,6 +405,20 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const root = rootOf((req.params as { root: string }).root);
     try { return { entries: listDir(root.path, String((req.query as { path?: string }).path || '.')) }; } catch (error) { throw http(400, error instanceof Error ? error.message : 'Bad path.'); }
   });
+  app.get('/api/git/:root/raw', async (req, reply) => {
+    const root = rootOf((req.params as { root: string }).root);
+    const q = req.query as { path?: string; download?: string };
+    const full = path.resolve(root.path, String(q.path || ''));
+    if (!isInside(root.path, full) || !fs.existsSync(full) || !fs.statSync(full).isFile()) throw http(404, 'File not found.');
+    const name = path.basename(full);
+    const download = q.download === '1';
+    const mime = mimeFor(name);
+    reply.header('content-type', /html|svg|xml|javascript/.test(mime) && !download ? 'text/plain; charset=utf-8' : mime);
+    reply.header('content-disposition', `${download ? 'attachment' : 'inline'}; filename="${name.replace(/[^\x20-\x7e]|"/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`);
+    reply.header('content-security-policy', "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'");
+    reply.header('content-length', String(fs.statSync(full).size));
+    return reply.send(fs.createReadStream(full));
+  });
   app.get('/api/git/:root/file', async (req) => {
     const root = rootOf((req.params as { root: string }).root);
     const q = req.query as { path?: string; start?: string; end?: string };

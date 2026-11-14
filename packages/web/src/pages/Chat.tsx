@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { Brain, Check, ChevronDown, Copy, ListTree, Menu, Mic, Pencil, RotateCcw, Send, Square, Trash2, Wrench, X } from 'lucide-react';
+import { AtSign, Brain, Check, ChevronDown, Copy, Download, Eye, FileText, Folder, ListTree, Menu, Mic, Paperclip, Pencil, Quote, RotateCcw, Send, Square, Trash2, Wrench, X } from 'lucide-react';
+import { CiteContext, type CiteHandlers } from '../components/Markdown';
+import { FileViewer, type QuotePick, type ViewerSource } from '../components/FileViewer';
+import { MentionPicker, type MentionPick } from '../components/MentionPicker';
+import { CONTEXT_MARK, citationsIn, fileMeta, humanSize, kindOf, quoteBlock, rawUrl, saveFile, uploadFile, type Cite, type FileMeta } from '../lib/files';
 import { Link } from 'react-router-dom';
 import { parseSources, toolSummary } from '@local-agent/shared';
 import { toast, errorText } from '../lib/toast';
@@ -58,6 +62,13 @@ export function Chat() {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [titleDraft, setTitleDraft] = useState('');
   const input = useRef<HTMLTextAreaElement>(null);
+  const [quotes, setQuotes] = useState<(QuotePick & { key: string })[]>([]);
+  const [mentions, setMentions] = useState<(MentionPick & { key: string })[]>([]);
+  const [viewer, setViewer] = useState<{ source: ViewerSource; anchor?: string } | null>(null);
+  const [picker, setPicker] = useState<{ query: string } | null>(null);
+  const [selQuote, setSelQuote] = useState<{ x: number; y: number; text: string; id: string } | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const pendingJump = useRef<string | null>(null);
   const active = ['running', 'loading', 'waiting', 'paused', 'awaiting_approval'].includes(status);
 
   async function refreshLists() {
@@ -113,7 +124,14 @@ export function Chat() {
       if (rows[0]) void openSession(rows[0].id);
     }).catch(() => undefined);
   }, []);
-  useEffect(() => { box.current?.scrollTo({ top: box.current.scrollHeight }); }, [messages, streaming, thinking, runError]);
+  useEffect(() => {
+    if (pendingJump.current && messages.some((m) => m.id === pendingJump.current)) {
+      const id = pendingJump.current; pendingJump.current = null;
+      setTimeout(() => flash(id), 50);
+      return;
+    }
+    box.current?.scrollTo({ top: box.current.scrollHeight });
+  }, [messages, streaming, thinking, runError]);
   // Keep an unsent draft per chat, so a reload or a failed send never loses it.
   useEffect(() => {
     if (!current) return;
@@ -202,21 +220,27 @@ export function Chat() {
 
   async function send(event?: { preventDefault(): void }, override?: string) {
     event?.preventDefault();
-    const content = override ?? draft;
-    if (!current || !content.trim()) return;
+    const typed = override ?? draft;
+    const attaching = override === undefined && (quotes.length > 0 || mentions.length > 0);
+    if (!current || (!typed.trim() && !attaching)) return;
     if (active) { toast('A reply is still running. Press Stop (Esc) first.', 'info'); return; }
-    if (override === undefined) setDraft('');
+    const sentQuotes = override === undefined ? quotes : [];
+    const sentMentions = override === undefined ? mentions : [];
+    const tokens = sentMentions.map((m) => m.kind === 'file' ? `[file:${m.id}]` : `[@${m.root}:${m.path || '.'}${m.start ? `#L${m.start}${m.end && m.end !== m.start ? `-${m.end}` : ''}` : ''}]`);
+    const content = [...sentQuotes.map((q) => quoteBlock(q.ref, q.text)), typed.trim() || (tokens.length ? 'Please look at these.' : ''), tokens.length ? tokens.join(' ') : ''].filter(Boolean).join('\n\n');
+    const payloadMentions = sentMentions.map((m) => m.kind === 'file' ? { kind: 'file' as const, id: m.id } : { kind: 'path' as const, root: m.root, path: m.path, start: m.start, end: m.end });
+    if (override === undefined) { setDraft(''); setQuotes([]); setMentions([]); }
     setRunError(null);
     setThinking('');
     setMessages((value) => [...value, { id: 'local', role: 'user', content }]);
     const agentId = sessions.find((session) => session.id === current)?.agentId || agents[0]?.id;
     let result: { run: { id: string }; offers: Offer[] };
     try {
-      result = await post<{ run: { id: string }; offers: Offer[] }>(`/api/sessions/${current}/messages`, { content, agentId });
+      result = await post<{ run: { id: string }; offers: Offer[] }>(`/api/sessions/${current}/messages`, { content, agentId, mentions: payloadMentions.length ? payloadMentions : undefined });
     } catch (error) {
       // A reply is still running (409) or the model choice was refused (400). Keep the draft.
       setMessages((value) => value.filter((message) => message.id !== 'local'));
-      if (override === undefined) setDraft(content);
+      if (override === undefined) { setDraft(typed); setQuotes(sentQuotes); setMentions(sentMentions); }
       toast(`Not sent: ${errorText(error, 'Could not send.')} Your text is still in the box.`, 'error');
       return;
     }
@@ -305,9 +329,64 @@ export function Chat() {
   const pinnedName = modelPin ? models.find((model) => model.id === modelPin)?.name || modelPin : '';
   const lastAssistant = [...messages].reverse().find((message) => message.role === 'assistant')?.id;
   const setupLeft = checklist.filter((item) => !item.optional && !item.ok);
+  const agentRoot = (currentSession?.agentId || agents[0]?.id) ? `ws:${currentSession?.agentId || agents[0]?.id}` : null;
+
+  function addQuote(pick: QuotePick) {
+    setQuotes((rows) => [...rows.filter((row) => !(row.ref === pick.ref && row.text === pick.text)), { ...pick, key: `${pick.ref}-${Date.now()}` }].slice(-6));
+    input.current?.focus();
+  }
+  function addMention(pick: MentionPick) {
+    setMentions((rows) => [...rows, { ...pick, key: `${pick.kind}-${Date.now()}-${Math.random()}` }].slice(-12));
+    setPicker(null);
+    // Drop the "@query" the user typed.
+    setDraft((value) => value.replace(/(^|\s)@[^\s@]*$/, '$1'));
+    setTimeout(() => input.current?.focus(), 0);
+  }
+  function flash(id: string) {
+    const el = document.getElementById(`m-${id}`);
+    if (!el) return false;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
+    return true;
+  }
+  async function openCite(cite: Cite) {
+    if (cite.kind === 'file') { setViewer({ source: { kind: 'file', id: cite.id }, anchor: cite.anchor }); return; }
+    if (cite.kind === 'path') { setViewer({ source: { kind: 'path', root: cite.root, path: cite.path }, anchor: cite.start ? `L${cite.start}-${cite.end || cite.start}` : undefined }); return; }
+    if (flash(cite.id)) return;
+    try {
+      const data = await api<{ message: { sessionId: string } }>(`/api/messages/${cite.id}`);
+      pendingJump.current = cite.id;
+      await openSession(data.message.sessionId);
+    } catch (error) { toast(errorText(error, 'That message is gone.'), 'error'); }
+  }
+  const citeHandlers: CiteHandlers = {
+    open: (cite) => void openCite(cite),
+    quoteCode: (code, sourceId) => addQuote({ ref: `msg:${sourceId}`, text: code.slice(0, 2000), label: 'code block' }),
+  };
+  function onSelectText() {
+    const sel = window.getSelection();
+    const text = sel?.toString().trim() || '';
+    if (!sel || !text || !sel.rangeCount) { setSelQuote(null); return; }
+    const node = sel.anchorNode instanceof Element ? sel.anchorNode : sel.anchorNode?.parentElement;
+    const article = node?.closest('article[data-mid]') as HTMLElement | null;
+    const id = article?.dataset.mid;
+    if (!id || id === 'local') { setSelQuote(null); return; }
+    const rect = sel.getRangeAt(0).getBoundingClientRect();
+    setSelQuote({ x: Math.min(window.innerWidth - 120, Math.max(8, rect.left + rect.width / 2 - 50)), y: Math.max(8, rect.top - 46), text: text.slice(0, 2000), id });
+  }
+  async function dropFiles(list: FileList | null) {
+    if (!list?.length) return;
+    for (const file of Array.from(list)) {
+      try { const saved = await uploadFile(file, current); addMention({ kind: 'file', id: saved.id, label: saved.name }); }
+      catch (error) { toast(errorText(error), 'error'); }
+    }
+  }
 
   return (
+    <CiteContext.Provider value={citeHandlers}>
     <div className={trace ? 'chat with-trace' : 'chat'}>
+      {viewer && <FileViewer source={viewer.source} anchor={viewer.anchor} onClose={() => setViewer(null)} onQuote={addQuote} />}
+      {selQuote && <button className="sel-quote" style={{ left: selQuote.x, top: selQuote.y }} onMouseDown={(event) => event.preventDefault()} onClick={() => { addQuote({ ref: `msg:${selQuote.id}`, text: selQuote.text, label: 'selection' }); setSelQuote(null); window.getSelection()?.removeAllRanges(); }}><Quote size={14} /> Quote</button>}
       {(rail || trace) && <div className="scrim" onClick={() => { setRail(false); setTrace(false); }} />}
       <aside className={rail ? 'rail open' : 'rail'} aria-label="Chats">
         <div className="sheet-head">
@@ -368,7 +447,8 @@ export function Chat() {
           {mode === 'code' && <span className="badge warn">{currentSession?.workshopId ? 'workshop' : 'coding'}</span>}
           <button className={trace ? 'btn ghost on' : 'btn ghost'} aria-pressed={trace} aria-label="Trace" onClick={() => setTrace((value) => !value)}><ListTree size={16} /> <span>Trace</span></button>
         </div>
-        <div className="messages" ref={box}>
+        <div className={dragging ? 'messages dragging' : 'messages'} ref={box} onMouseUp={onSelectText} onTouchEnd={() => setTimeout(onSelectText, 50)} onScroll={() => selQuote && setSelQuote(null)}
+          onDragOver={(event) => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); setDragging(true); } }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); void dropFiles(event.dataTransfer.files); }}>
           <div className="messages-inner">
           {setupLeft.length > 0 && (
             <div className="card first-run">
@@ -420,15 +500,20 @@ export function Chat() {
             if (message.role === 'assistant' && !message.content.trim() && calls.length) {
               return <div key={message.id} className="tool-call-chip"><Wrench size={14} /> Calling {calls.join(', ')}…{message.routingNote && <span className="switch">{message.routingNote}</span>}</div>;
             }
+            const [visible, attached] = message.content.split(CONTEXT_MARK);
+            const cites = citationsIn(visible || '').filter((cite) => cite.kind === 'file');
             return (
-            <article key={message.id} className={message.role === 'user' ? 'msg user' : fromAgent ? 'msg from-agent' : 'msg'} style={fromAgent ? { ['--accent' as string]: speaker.accent || '#e4b56a' } : undefined}>
+            <article key={message.id} id={`m-${message.id}`} data-mid={message.id} className={message.role === 'user' ? 'msg user' : fromAgent ? 'msg from-agent' : 'msg'} style={fromAgent ? { ['--accent' as string]: speaker.accent || '#e4b56a' } : undefined}>
               {fromAgent ? <div className="who"><Face agent={speaker} size={28} /><span className="meta">{speaker.emoji ? `${speaker.emoji} ` : ''}{speaker.name}</span></div> : message.role !== 'user' && <div className="meta"><span>{message.role}</span></div>}
               {message.routingNote && <div className="switch">{message.routingNote}</div>}
-              <div dir="auto"><Markdown text={message.content} /></div>
+              <div dir="auto"><Markdown text={visible || ''} sourceId={message.id} /></div>
+              {attached && <details className="attached-note"><summary className="faint">Context sent with this message ({Math.round(attached.length / 1000)}k characters)</summary><pre className="mono tool-output">{attached.slice(0, 4000)}{attached.length > 4000 ? '\n…' : ''}</pre></details>}
+              {cites.length > 0 && <div className="file-cards">{[...new Map(cites.map((c) => [c.kind === 'file' ? c.id : '', c])).values()].map((cite) => cite.kind === 'file' && <FileCard key={cite.id} id={cite.id} onOpen={() => setViewer({ source: { kind: 'file', id: cite.id }, anchor: cite.anchor })} />)}</div>}
               {message.id !== 'local' && (
                 <div className="msg-actions">
-                  <button className="icon-btn" aria-label="Copy message" title="Copy" onClick={() => void copy(message.id, message.content)}>{copied === message.id ? <Check size={15} /> : <Copy size={15} />}</button>
-                  {message.role === 'user' && <button className="icon-btn" aria-label="Edit as new message" title="Edit into the box" onClick={() => { setDraft(message.content); input.current?.focus(); }}><Pencil size={15} /></button>}
+                  <button className="icon-btn" aria-label="Quote message" title="Quote in your reply" onClick={() => addQuote({ ref: `msg:${message.id}`, text: (visible || '').slice(0, 1200), label: message.role === 'user' ? 'your message' : 'reply' })}><Quote size={15} /></button>
+                  <button className="icon-btn" aria-label="Copy message" title="Copy" onClick={() => void copy(message.id, visible || '')}>{copied === message.id ? <Check size={15} /> : <Copy size={15} />}</button>
+                  {message.role === 'user' && <button className="icon-btn" aria-label="Edit as new message" title="Edit into the box" onClick={() => { setDraft(visible || ''); input.current?.focus(); }}><Pencil size={15} /></button>}
                   {message.id === lastAssistant && !active && <button className="icon-btn" aria-label="Regenerate reply" title="Ask again" onClick={retry}><RotateCcw size={15} /></button>}
                 </div>
               )}
@@ -470,8 +555,34 @@ export function Chat() {
           </div>
         </div>
         <div className="composer">
+          {picker && <MentionPicker query={picker.query} setQuery={(query) => setPicker({ query })} defaultRoot={agentRoot} sessionId={current} onPick={addMention} onClose={() => { setPicker(null); input.current?.focus(); }} />}
           <form onSubmit={send}>
-            <textarea ref={input} dir="auto" rows={1} value={draft} aria-label="Message" placeholder={mode === 'code' ? 'Ask for a plan, then an edit…' : 'Message'} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(event); } }} />
+            {(quotes.length > 0 || mentions.length > 0) && (
+              <div className="chips" aria-label="Attached references">
+                {quotes.map((q) => (
+                  <span key={q.key} className="chip quote-chip" title={q.text}>
+                    <Quote size={13} /><span className="chip-label"><strong>{q.label}</strong> <span className="faint" dir="auto">“{q.text.replace(/\s+/g, ' ').slice(0, 60)}{q.text.length > 60 ? '…' : ''}”</span></span>
+                    <button type="button" aria-label="Remove quote" onClick={() => setQuotes((rows) => rows.filter((row) => row.key !== q.key))}><X size={13} /></button>
+                  </span>
+                ))}
+                {mentions.map((m) => (
+                  <span key={m.key} className="chip mention-chip">
+                    <button type="button" className="chip-open" title="Preview" onClick={() => { if (m.kind === 'file') setViewer({ source: { kind: 'file', id: m.id } }); else if (!m.dir) setViewer({ source: { kind: 'path', root: m.root, path: m.path }, anchor: m.start ? `L${m.start}-${m.end || m.start}` : undefined }); }}>
+                      {m.kind === 'file' ? <Paperclip size={13} /> : m.dir ? <Folder size={13} /> : <AtSign size={13} />}
+                      <span className="chip-label ellipsis" dir="auto">{m.label}{m.kind === 'path' && m.start ? `#L${m.start}-${m.end || m.start}` : ''}{m.kind === 'path' && m.dir ? '/' : ''}</span>
+                    </button>
+                    <button type="button" aria-label="Remove reference" onClick={() => setMentions((rows) => rows.filter((row) => row.key !== m.key))}><X size={13} /></button>
+                  </span>
+                ))}
+              </div>
+            )}
+            <textarea ref={input} dir="auto" rows={1} value={draft} aria-label="Message" placeholder={mode === 'code' ? 'Ask for a plan, then an edit…' : 'Message'} onChange={(event) => {
+              const value = event.target.value;
+              setDraft(value);
+              const upto = value.slice(0, event.target.selectionStart ?? value.length);
+              const at = /(^|\s)@([^\s@]*)$/.exec(upto);
+              if (at) setPicker({ query: at[2] || '' }); else if (picker && !upto.includes('@')) setPicker(null);
+            }} onPaste={(event) => { if (event.clipboardData.files.length) { event.preventDefault(); void dropFiles(event.clipboardData.files); } }} onKeyDown={(event) => { if (picker && event.key === 'Escape') { event.preventDefault(); setPicker(null); return; } if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(event); } }} />
             <div className="composer-bar">
               <label className="model-pill" title={modelPin ? `Pinned to ${pinnedName}` : lastModel ? `Auto picks per message. Last reply: ${lastModel}` : 'Auto picks a model per message'}>
                 <select aria-label="Model" value={modelPin || ''} onChange={async (event) => {
@@ -488,11 +599,12 @@ export function Chat() {
               </label>
               {meter && <span className="context-meter" aria-label="Context used" title="Context used / budget">{Math.round((meter.used / Math.max(1, meter.budget)) * 100)}% ctx</span>}
               <span className="spacer" />
+              <button className="icon-btn round" type="button" aria-label="Reference a file, folder, or upload (@)" title="Reference files (@) or upload" onClick={() => setPicker(picker ? null : { query: '' })}><Paperclip size={18} /></button>
               <button className={recording ? 'icon-btn round on' : 'icon-btn round'} type="button" aria-label="Hold to talk" title="Hold to talk" onPointerDown={() => void holdTalk(true)} onPointerUp={() => void holdTalk(false)} onPointerLeave={() => { if (recording) void holdTalk(false); }}><Mic size={18} /></button>
               {active && status !== 'paused' && <button className="btn ghost pause-btn" type="button" onClick={() => control('pause')}>Pause</button>}
               {status === 'paused' && <button className="btn ghost" type="button" onClick={() => control('resume')}>Resume</button>}
               {active ? <button className="icon-btn round danger-fill" type="button" aria-label="Stop (Esc)" title="Stop (Esc)" onClick={() => control('stop')}><Square size={16} /></button>
-                : <button className="icon-btn round primary-fill" type="submit" aria-label="Send" title="Send (Enter)" disabled={!draft.trim() || !current}><Send size={17} /></button>}
+                : <button className="icon-btn round primary-fill" type="submit" aria-label="Send" title="Send (Enter)" disabled={(!draft.trim() && !quotes.length && !mentions.length) || !current}><Send size={17} /></button>}
             </div>
           </form>
           {(voiceNote || loadingNote) ? <p className="composer-hint faint">{voiceNote || loadingNote}</p> : <p className="composer-hint faint"><span className="kbd-hint">Enter to send · Shift+Enter for a new line · Esc to stop</span></p>}
@@ -512,6 +624,24 @@ export function Chat() {
           </div>
         ))}
       </aside>
+    </div>
+    </CiteContext.Provider>
+  );
+}
+
+function FileCard({ id, onOpen }: { id: string; onOpen: () => void }) {
+  const [meta, setMeta] = useState<FileMeta | null | undefined>(undefined);
+  useEffect(() => { void fileMeta(id).then(setMeta); }, [id]);
+  if (meta === null) return <div className="file-card missing"><FileText size={18} /><span className="faint">File {id} is gone.</span></div>;
+  const kind = meta ? kindOf(meta.name, meta.mime) : 'binary';
+  return (
+    <div className="file-card">
+      <button className="file-card-main" onClick={onOpen} title="Preview">
+        {meta && kind === 'image' ? <img src={rawUrl(id)} alt="" className="file-thumb" /> : <span className={`file-icon k-${kind}`}><FileText size={20} /></span>}
+        <span className="file-card-text"><strong className="ellipsis" dir="auto">{meta?.name || 'Loading…'}</strong><span className="faint">{meta ? `${kind.toUpperCase()} · ${humanSize(meta.size)}` : ''}</span></span>
+      </button>
+      <button className="icon-btn" aria-label="Preview" title="Preview" onClick={onOpen}><Eye size={16} /></button>
+      <button className="icon-btn" aria-label="Download" title="Download" onClick={() => meta && saveFile(rawUrl(id), meta.name, meta.mime)}><Download size={16} /></button>
     </div>
   );
 }

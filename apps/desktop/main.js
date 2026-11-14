@@ -1,4 +1,5 @@
 const { app, BrowserWindow, Menu, ipcMain, shell } = require('electron');
+// Downloads (Save in the file viewer) ask where to put the file with the native save dialog.
 const fs = require('fs');
 const path = require('path');
 
@@ -67,8 +68,16 @@ function createWindow() {
   });
 
   // Links to the console stay in the window. Anything else (search results, citations) opens in the default browser.
+  win.webContents.session.on('will-download', (_event, item) => {
+    item.setSaveDialogOptions({ title: 'Save file', defaultPath: path.join(app.getPath('downloads'), item.getFilename()) });
+  });
+
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) {
+      // File previews (Open in new tab) get their own window so the console stays put.
+      if (sameServer(url) && /\/api\/(files|git)\/[^?]*\/raw/.test(url)) {
+        return { action: 'allow', overrideBrowserWindowOptions: { width: 1000, height: 800, autoHideMenuBar: true, backgroundColor: '#090a0c', webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } } };
+      }
       if (sameServer(url)) win.loadURL(url);
       else void shell.openExternal(url);
     }
