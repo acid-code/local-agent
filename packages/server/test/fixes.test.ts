@@ -454,3 +454,26 @@ describe('knowledge base uploads', () => {
     await app.close();
   });
 });
+
+describe('chat list paging', () => {
+  it('pages GET /api/sessions with limit and cursor past 200 chats', async () => {
+    const dir = tmp();
+    const { app, store } = await buildApp({ dataDir: dir, startScheduler: false, serveWeb: false });
+    const cookies = await login(app);
+    for (let i = 0; i < 230; i += 1) store.createSession({ title: `Chat ${i}` });
+    const seen = new Set<string>();
+    let cursor: string | null = null;
+    let pages = 0;
+    do {
+      const res = await app.inject({ method: 'GET', url: `/api/sessions?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, cookies });
+      expect(res.statusCode).toBe(200);
+      for (const session of res.json().sessions) seen.add(session.id);
+      cursor = res.json().nextCursor;
+      pages += 1;
+    } while (cursor && pages < 10);
+    expect(pages).toBe(3);
+    expect(seen.size).toBe(230);
+    expect((await app.inject({ method: 'GET', url: '/api/sessions?limit=0', cookies })).statusCode).toBe(400);
+    await app.close();
+  });
+});

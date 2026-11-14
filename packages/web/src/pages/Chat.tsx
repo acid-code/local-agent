@@ -15,6 +15,7 @@ interface Offer { id: string; kind: string; masked: string }
 
 export function Chat() {
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [current, setCurrent] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -45,12 +46,20 @@ export function Chat() {
 
   async function refreshLists() {
     const [sessionRes, agentRes] = await Promise.all([
-      api<{ sessions: Session[] }>('/api/sessions'),
+      api<{ sessions: Session[]; nextCursor: string | null }>('/api/sessions?limit=50'),
       api<{ agents: Agent[] }>('/api/agents'),
     ]);
     setSessions(sessionRes.sessions);
+    setNextCursor(sessionRes.nextCursor);
     setAgents(agentRes.agents);
     return sessionRes.sessions;
+  }
+
+  async function loadMoreSessions() {
+    if (!nextCursor) return;
+    const page = await api<{ sessions: Session[]; nextCursor: string | null }>(`/api/sessions?limit=50&cursor=${encodeURIComponent(nextCursor)}`);
+    setSessions((rows) => [...rows, ...page.sessions.filter((row) => !rows.some((have) => have.id === row.id))]);
+    setNextCursor(page.nextCursor);
   }
 
   async function openSession(id: string) {
@@ -224,6 +233,7 @@ export function Chat() {
             <div className="faint">{session.workshopId ? 'Workshop' : session.mode === 'code' ? 'Coding' : 'Chat'}</div>
           </button>
         ))}
+        {nextCursor && <button className="btn" type="button" onClick={() => void loadMoreSessions()}>Older chats</button>}
         {agents.length < 2 && <p className="muted">Create two personas under Agents. The house operator and the researcher are one click each.</p>}
       </aside>
       <section className="thread">

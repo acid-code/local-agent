@@ -336,7 +336,10 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     store.updateSession(session.id, { mode: 'code', workshopId: workshop.id });
     return { workshop, session: store.getSession(session.id) };
   });
-  app.get('/api/sessions', async () => ({ sessions: store.listSessions() }));
+  app.get('/api/sessions', async (req) => {
+    const query = parse(z.object({ limit: z.coerce.number().int().min(1).max(500).optional(), cursor: z.string().optional() }), req.query);
+    return store.pageSessions({ limit: query.limit ?? 100, cursor: query.cursor || null });
+  });
   app.post('/api/sessions', async (req) => {
     const body = parse(z.object({ agentId: z.string().optional(), roomId: z.string().optional(), title: z.string().optional(), mode: z.enum(['chat', 'code']).optional() }), req.body);
     const session = store.createSession(body);
