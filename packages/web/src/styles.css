@@ -1020,3 +1020,5 @@ table.limits tbody th { color: var(--text); font-weight: 500; }
 }
 @media (max-width: 420px) { .persona-chip .menu-trigger-text { max-width: 22vw; overflow: hidden; text-overflow: ellipsis; } }
 :root:not([data-flat="off"]) .settings-tabs button[aria-selected="true"] { background: var(--bg-3); border-color: transparent; box-shadow: none; color: var(--text); }
+@media (max-width: 1240px) { .chat, .chat.with-trace { grid-template-columns: 236px minmax(0, 1fr); } }
+@media (max-width: 980px) { .chat, .chat.with-trace, .chat.with-panel { grid-template-columns: minmax(0, 1fr); } }
