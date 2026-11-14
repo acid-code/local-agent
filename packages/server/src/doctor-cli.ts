@@ -46,7 +46,7 @@ const checks = doctorChecks({
   lastBackupAt: listBackups(config.dataDir)[0]?.createdAt ?? null,
 });
 const ramBudget = new MemoryBudget(systemProbe(fetch), () => budgetConfig(store.getSettings()));
-checks.push({ id: 'ram', ...(await budgetReport(ramBudget, budgetConfig(store.getSettings()))) });
+checks.push({ id: 'ram-budget', ...(await budgetReport(ramBudget, budgetConfig(store.getSettings()))) });
 console.log(`local-agent doctor  quota day ${geminiQuotaDay()} (UTC)`);
 for (const check of checks) console.log(`${check.ok ? 'ok  ' : 'warn'} ${check.id}: ${check.detail}`);
 console.log('Nothing was uploaded. Debug exports stay on this machine until you download one.');

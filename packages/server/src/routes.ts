@@ -1083,7 +1083,7 @@ async function healthChecks(store: Store, docker: DockerCtl, fetchImpl: typeof f
     geminiOpen: settings.geminiTier === 'paid' ? true : null, geminiState: geminiStateOf(store.getProvider('prov_gemini')) === 'off' ? 'off' : undefined, lastBackupAt: backups[0]?.createdAt ?? null, tailscaleOk: await tailscaleUp(),
   }), { id: 'embed', ok: !embedWarning, detail: embedWarning || (ollamaOk ? 'The embed role is an embedding model.' : 'Ollama is down, so the embed role was not checked.') },
   await imageCheck(store, dataDir, fetchImpl),
-  { id: 'ram', ...(memory ? await budgetReport(memory, budgetConfig(settings)) : { ok: true, detail: `RAM budget ${settings.ramBudgetGiB} GB (not tracked in this build).` }) },
+  { id: 'ram-budget', ...(memory ? await budgetReport(memory, budgetConfig(settings)) : { ok: true, detail: `RAM budget ${settings.ramBudgetGiB} GB (not tracked in this build).` }) },
   { id: 'roles', ok: missingRoles.length === 0, detail: installed === null ? 'Ollama is down, so the Auto roles were not checked.' : missingRoles.length ? `Auto roles point at models Ollama does not have: ${missingRoles.join(', ')}. Pull them or change Defaults in Setup.` : 'Every Auto role points at an installed model.' }];
 }
 
