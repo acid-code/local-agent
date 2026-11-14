@@ -669,3 +669,4 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 .file-card.image-card .file-preview { width: 100%; height: auto; max-height: 420px; object-fit: contain; border-radius: calc(10px * var(--round)); background: var(--bg-3); }
 .file-card.image-card .image-card-bar { display: flex; align-items: center; gap: 2px; padding: 4px 2px 0 6px; min-width: 0; }
 .file-card.image-card .image-card-bar .file-card-text { flex: 1; }
+input[type="range"], input[type="checkbox"], input[type="radio"], progress { accent-color: var(--brass); }
