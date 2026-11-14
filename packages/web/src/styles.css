@@ -1462,3 +1462,8 @@ button.state-card:hover, a.state-card:hover { background: var(--bg-3); }
   .chat.v2 .thread-head .head-pill { max-width: calc(100% - 190px); }
   .chat.v2 .head-actions [aria-label="Export chat"] { display: none; }
 }
+@media (hover: hover) {
+  .chat.v2 .msg .msg-actions { position: absolute; right: 10px; bottom: -16px; margin: 0; padding: 2px; opacity: 0; background: var(--bg-3); border: 1px solid var(--line); border-radius: 999px; z-index: 2; pointer-events: none; }
+  .chat.v2 .msg:hover .msg-actions, .chat.v2 .msg:focus-within .msg-actions { opacity: 1; pointer-events: auto; }
+  .chat.v2 .msg .msg-actions .icon-btn { width: 30px; height: 30px; min-width: 30px; min-height: 30px; }
+}
