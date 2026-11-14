@@ -40,6 +40,10 @@ export interface Settings {
   agentLimits: Record<string, { maxTokensPerDay?: number; maxSpendUsd?: number; maxRunMs?: number; readOnly?: boolean }>;
   /** The image role. Auto tries the local runner first, then Gemini when the account may use it. */
   imageGen: ImageGenSettings;
+  /** Hard RAM cap for everything local-agent runs (Ollama models + KV cache, image runner, server). */
+  ramBudgetGiB: number;
+  /** Second guard: never start a job that would leave less than this much free system RAM. */
+  ramSystemReserveGiB: number;
 }
 
 export interface ImageGenSettings {
@@ -90,6 +94,8 @@ export const DEFAULT_SETTINGS: Settings = {
   debugLevel: 'info',
   toolSupport: {},
   agentLimits: {},
+  ramBudgetGiB: 40,
+  ramSystemReserveGiB: 1.5,
   imageGen: { mode: 'auto', backend: 'sdcpp', sdBinary: '', localModel: 'sd-turbo', extraModels: [], httpUrl: '', geminiModel: 'gemini-2.5-flash-image', steps: 1, size: 512 },
 };
 

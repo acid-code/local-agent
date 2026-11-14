@@ -53,6 +53,8 @@ export interface RunCursor {
   phase: RunPhase;
   /** Set by the /image chat command: generate a picture instead of calling a chat model. */
   imagePrompt?: string;
+  /** Scheduled or triggered run: queued behind chat replies and images when memory is short. */
+  background?: boolean;
   turn: number;
   modelId?: string;
   messageModelId?: string;

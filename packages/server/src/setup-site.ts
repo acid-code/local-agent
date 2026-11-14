@@ -184,6 +184,7 @@ export async function buildSetupApp(options: {
       autoEmbed: z.string().max(120).optional(),
       dailyTokenLimit: z.number().int().nullable().optional(),
       dailySpendLimitUsd: z.number().nullable().optional(),
+      ramBudgetGiB: z.number().min(2).max(1024).optional(),
     }), req.body);
     const problem = validateDefaults(options.store, body);
     if (problem) return reply.code(400).send({ error: problem });
@@ -259,6 +260,7 @@ function publicSettings(settings: Settings) {
     gitSshKey: settings.gitSshKey,
     autoModels: settings.autoModels,
     dailyTokenLimit: settings.dailyTokenLimit,
+    ramBudgetGiB: settings.ramBudgetGiB,
     dailySpendLimitUsd: settings.dailySpendLimitUsd,
   };
 }
@@ -282,6 +284,7 @@ function validateDefaults(store: Store, body: {
   autoCloud?: string;
   autoEmbed?: string;
   dailyTokenLimit?: number | null;
+  ramBudgetGiB?: number;
   dailySpendLimitUsd?: number | null;
 }): string | null {
   if (body.goodModelId) {
@@ -559,6 +562,7 @@ const PAGE = `<!doctype html>
         + '<label>Backup transport</label><select name="backupTransport"><option>none</option><option>rsync</option><option>rclone</option><option>s3</option></select>'
         + field('Backup target', 'backupTarget', 'text', s.backupTarget || '')
         + field('Daily token cap', 'dailyTokenLimit', 'number', s.dailyTokenLimit || '')
+        + field('RAM budget (GB, hard cap for models, images and the server)', 'ramBudgetGiB', 'number', s.ramBudgetGiB || 40)
         + '<h3>Git</h3><p class="muted">Commits use this name and email. The SSH key is a path on the mini PC, not the key itself.</p>'
         + field('Git name', 'gitName', 'text', s.gitName || 'local-agent')
         + field('Git email', 'gitEmail', 'text', s.gitEmail || 'agent@local')
@@ -587,6 +591,7 @@ const PAGE = `<!doctype html>
         const data = Object.fromEntries(new FormData(event.target));
         if (!data.goodModelId) data.goodModelId = null;
         if (!data.dailyTokenLimit) data.dailyTokenLimit = null; else data.dailyTokenLimit = Number(data.dailyTokenLimit);
+        if (data.ramBudgetGiB) data.ramBudgetGiB = Number(data.ramBudgetGiB); else delete data.ramBudgetGiB;
         const msg = document.querySelector('#msg');
         try { await api('/api/setup/defaults', { method: 'PATCH', body: JSON.stringify(data) }); msg.textContent = 'Saved on this machine.'; msg.className = 'ok'; }
         catch (error) { msg.textContent = error.message; msg.className = 'warn'; }

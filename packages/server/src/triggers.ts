@@ -193,7 +193,7 @@ export async function fireTrigger(store: Store, engine: Engine, trigger: Trigger
   }
   const content = renderTriggerPrompt(trigger.prompt, event);
   const session = store.createSession({ agentId: trigger.agentId, title: trigger.name });
-  const run = await engine.startTurn({ sessionId: session.id, agentId: trigger.agentId, content, wait: opts?.wait ?? false });
+  const run = await engine.startTurn({ sessionId: session.id, agentId: trigger.agentId, content, wait: opts?.wait ?? false, background: true });
   store.db.prepare('UPDATE trigger_events SET status = ?, run_id = ? WHERE id = ?').run('started', run.id, eventId);
   updateTrigger(store, trigger.id, { status: 'listening', lastError: null });
   return { runId: run.id, sessionId: session.id, duplicate: false };

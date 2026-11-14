@@ -1,3 +1,4 @@
+import { MemoryBudget, budgetConfig, systemProbe, type MemoryProbe } from './memory.js';
 import path from 'node:path';
 import { ensureFilesTable } from './files.js';
 import Fastify from 'fastify';
@@ -44,6 +45,8 @@ export async function buildApp(options: {
   fetchImpl?: typeof fetch;
   docker?: DockerCtl;
   providerOverride?: (model: ModelRow) => ModelProvider;
+  /** RAM probe override (tests). Without one, mocked-provider builds and unit tests skip the RAM budget. */
+  memoryProbe?: MemoryProbe;
   startScheduler?: boolean;
   serveWeb?: boolean;
 }): Promise<BuiltApp> {
@@ -57,6 +60,8 @@ export async function buildApp(options: {
   const vault = new Vault(store, loadMasterKey(config.dataDir));
   const engine = new Engine(store, bus, docker, vectors, vault, config.instanceId, options.fetchImpl ?? fetch, options.providerOverride);
   engine.libraryDir = config.dataDir;
+  const memoryProbe = options.memoryProbe ?? (options.providerOverride || process.env.VITEST ? undefined : systemProbe(options.fetchImpl ?? fetch));
+  engine.memory = memoryProbe ? new MemoryBudget(memoryProbe, () => budgetConfig(store.getSettings()), path.join(config.dataDir, 'memory-calibration.json')) : null;
   const triggers = new TriggerRuntime(store, engine, vault, bus);
   const mcp = new McpRuntime(store, docker);
   const scheduler = new Scheduler(store, engine);

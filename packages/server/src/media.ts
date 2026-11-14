@@ -1,3 +1,4 @@
+import type { MemoryBudget } from './memory.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -70,7 +71,7 @@ export function registerImageAdmin(app: FastifyInstance, base: string, deps: { s
   });
 }
 
-export function registerMedia(app: FastifyInstance, deps: { store: Store; dataDir: string; vault: Vault; fetchImpl: typeof fetch }) {
+export function registerMedia(app: FastifyInstance, deps: { store: Store; dataDir: string; vault: Vault; fetchImpl: typeof fetch; memory?: () => MemoryBudget | null }) {
   const { store, dataDir } = deps;
 
   // ----- Wallpaper upload (per account) -----
@@ -121,7 +122,7 @@ export function registerMedia(app: FastifyInstance, deps: { store: Store; dataDi
     const body = parse(z.object({ prompt: z.string().min(1).max(2000), backend: z.enum(['auto', 'local', 'gemini']).optional(), shape: z.enum(['square', 'portrait', 'landscape']).optional() }), req.body);
     let result: Awaited<ReturnType<typeof generateImage>>;
     try {
-      result = await generateImage({ store, dataDir, fetchImpl: deps.fetchImpl }, { prompt: body.prompt, ownerId: account.id, backend: body.backend, shape: body.shape });
+      result = await generateImage({ store, dataDir, fetchImpl: deps.fetchImpl, memory: deps.memory?.() }, { prompt: body.prompt, ownerId: account.id, backend: body.backend, shape: body.shape });
     } catch (error) {
       // Routing refusals, quota and backend failures are all things the user can read and act on.
       throw http(422, error instanceof Error ? error.message : String(error));
