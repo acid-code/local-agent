@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 import { api, ApiError } from './lib/api';
 import { Shell } from './components/Shell';
+import { Gallery } from './pages/Gallery';
 import { Agents } from './pages/Agents';
 import { Chat } from './pages/Chat';
 import { Containers } from './pages/Containers';
@@ -41,6 +42,7 @@ export function App() {
       <Routes>
         <Route path="/" element={<Chat />} />
         <Route path="/agents" element={<Agents />} />
+        <Route path="/gallery" element={<Gallery />} />
         <Route path="/workspace" element={<Workspace />} />
         <Route path="/runs" element={<Runs />} />
         <Route path="/runs/:id" element={<Runs />} />

@@ -329,7 +329,16 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     return store.getAgent(agent.id)!;
   }
   const memberTools = (req: Parameters<typeof accountOf>[0], tools: string[]) => accountOf(req).role === 'member' ? tools.filter((tool) => !MEMBER_DENIED_TOOLS.has(tool)) : tools;
-  app.get('/api/agents', async (req) => ({ agents: store.listAgents(me(req)), templates: TEMPLATES, faces: FACES }));
+  // Each persona's latest message, for the sidebar preview.
+  const lastMessage = store.db.prepare(`SELECT m.content AS content, m.role AS role, m.created_at AS at FROM messages m JOIN chat_sessions s ON s.id = m.session_id
+    WHERE s.agent_id = ? AND s.helper_of IS NULL AND s.archived = 0 AND m.role IN ('user', 'assistant') AND m.content <> '' ORDER BY m.rowid DESC LIMIT 1`);
+  app.get('/api/agents', async (req) => ({
+    agents: store.listAgents(me(req)).map((agent) => {
+      const last = lastMessage.get(agent.id) as { content: string; role: string; at: string } | undefined;
+      return { ...agent, lastMessage: last ? { text: last.content.replace(/\s+/g, ' ').slice(0, 120), role: last.role, at: last.at } : null };
+    }),
+    templates: TEMPLATES, faces: FACES,
+  }));
   // Persona gallery: ready-made personas with skills, rules, tools and connectors. One click adds one.
   app.get('/api/gallery', async (req) => {
     const mine = store.listAgents(me(req));

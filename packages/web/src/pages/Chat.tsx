@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Menu as DropMenu } from '../components/ui';
 import { ModelPicker, useUsableModels } from '../lib/models';
 import { browserDictationSupported, startDictation } from '../lib/dictation';
-import { AtSign, Info, Layers, Brain, Check, ChevronDown, Code2, Copy, Download, Eye, FileText, Folder, FolderGit2, GitBranch, ListTree, Menu, MessageSquarePlus, Pin, PinOff, Plus, Search, Mic, Paperclip, Pencil, Quote, RotateCcw, Send, Square, Trash2, Wrench, X } from 'lucide-react';
+import { AtSign, Info, Layers, Brain, Check, ChevronDown, Code2, Copy, Download, Eye, FileText, Folder, FolderGit2, GitBranch, ListTree, Menu, MessageSquarePlus, Pin, PinOff, Plus, Search, Mic, PanelRight, Paperclip, Pencil, Quote, RotateCcw, Send, Square, Trash2, Wrench, X } from 'lucide-react';
 import { CiteContext, type CiteHandlers } from '../components/Markdown';
 import { FileViewer, type QuotePick, type ViewerSource } from '../components/FileViewer';
 import { MentionPicker, type MentionPick } from '../components/MentionPicker';
@@ -11,6 +11,7 @@ import { CONTEXT_MARK, citationsIn, fileMeta, humanSize, kindOf, quoteBlock, raw
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { PullModel } from '../components/PullModel';
 import { WorkspaceBrowser, type ChatRoot } from '../components/WorkspaceBrowser';
+import { PersonaStatePanel } from '../components/PersonaStatePanel';
 import { PersonaPanel, useWorkspaces, type PanelAgent } from '../components/PersonaPanel';
 import { PersonaChip, greetingFor, startersFor } from '../components/ChatChips';
 import { ContextPanel } from '../components/ContextPanel';
@@ -78,7 +79,19 @@ export function Chat() {
   const [selQuote, setSelQuote] = useState<{ x: number; y: number; text: string; id: string } | null>(null);
   const [dragging, setDragging] = useState(false);
   const pendingJump = useRef<string | null>(null);
-  const [panel, setPanel] = useState<null | 'persona' | 'settings' | 'workspace' | 'files' | 'context'>(null);
+  const [panel, setPanel] = useState<null | 'persona' | 'settings' | 'workspace' | 'files' | 'context' | 'state'>(null);
+  // The persona status panel sits on the right on wide screens unless closed; on narrow ones it opens on demand.
+  const [stateOpen, setStateOpen] = useState(() => localStorage.getItem('la-state-pane') !== 'closed');
+  const [wide, setWide] = useState(() => window.matchMedia('(min-width: 1100px)').matches);
+  useEffect(() => {
+    const query = window.matchMedia('(min-width: 1100px)');
+    const onChange = () => setWide(query.matches);
+    query.addEventListener('change', onChange);
+    return () => query.removeEventListener('change', onChange);
+  }, []);
+  useEffect(() => { localStorage.setItem('la-state-pane', stateOpen ? 'open' : 'closed'); }, [stateOpen]);
+  const showState = panel === 'state' || (!panel && wide && stateOpen);
+  const toggleState = () => { if (showState) { setStateOpen(false); if (panel === 'state') setPanel(null); } else { setStateOpen(true); setPanel(wide ? null : 'state'); } };
   // Bumps when a background helper finishes, so the chat and its context panel refresh.
   const [helperTick, setHelperTick] = useState(0);
   // Tool calls waiting for a yes/no (e.g. creating a timer). Shown as a card above the composer.
@@ -598,7 +611,7 @@ export function Chat() {
 
   return (
     <CiteContext.Provider value={citeHandlers}>
-    <div className={`chat${trace ? ' with-trace' : ''}${panel ? ' with-panel' : ''}`} style={persona?.accent ? { ['--persona' as string]: persona.accent } : undefined}>
+    <div className={`chat v2${trace ? ' with-trace' : ''}${panel || showState ? ' with-panel' : ''}`} style={persona?.accent ? { ['--persona' as string]: persona.accent } : undefined}>
       {viewer && <FileViewer source={viewer.source} anchor={viewer.anchor} onClose={() => setViewer(null)} onQuote={addQuote} />}
       {selQuote && <button className="sel-quote" style={{ left: selQuote.x, top: selQuote.y }} onMouseDown={(event) => event.preventDefault()} onClick={() => { addQuote({ ref: `msg:${selQuote.id}`, text: selQuote.text, label: 'selection' }); setSelQuote(null); window.getSelection()?.removeAllRanges(); }}><Quote size={14} /> Quote</button>}
       {(rail || trace || panel) && <div className="scrim" onClick={() => { setRail(false); setTrace(false); setPanel(null); }} />}
@@ -638,6 +651,7 @@ export function Chat() {
           {mode === 'code' && <span className="badge warn">{currentSession?.workshopId ? 'workshop' : 'coding'}</span>}
           <button className={trace ? 'btn ghost on' : 'btn ghost'} aria-pressed={trace} title="Show what the agent did: model, tools, timings" onClick={() => setTrace((value) => !value)}><ListTree size={16} aria-hidden /> <span>Trace</span></button>
           {currentSession && <button className={panel === 'context' ? 'btn ghost on' : 'btn ghost'} aria-pressed={panel === 'context'} title="Helpers, timers, files and edits from this chat" onClick={() => setPanel(panel === 'context' ? null : 'context')}><Layers size={16} aria-hidden /> <span>This chat</span></button>}
+          {persona && <button className={showState ? 'btn ghost on' : 'btn ghost'} aria-pressed={showState} title={`${persona.name}: coding, upcoming, computer, voice`} onClick={toggleState}><PanelRight size={16} aria-hidden /> <span>Status</span></button>}
           {currentSession && <DropMenu label="Chat options" items={[
             { label: 'Rename chat', icon: Pencil, onSelect: () => { setRail(true); setRenaming(currentSession.id); setTitleDraft(currentSession.title); } },
             { label: trace ? 'Hide trace' : 'Show trace', icon: ListTree, onSelect: () => setTrace((value) => !value) },
@@ -828,6 +842,7 @@ export function Chat() {
               if (at) setPicker({ query: at[2] || '' }); else if (picker && !upto.includes('@')) setPicker(null);
             }} onPaste={(event) => { if (event.clipboardData.files.length) { event.preventDefault(); void dropFiles(event.clipboardData.files); } }} onKeyDown={(event) => { if (picker && event.key === 'Escape') { event.preventDefault(); setPicker(null); return; } if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(event); } }} />
             <div className="composer-bar">
+              <button className="icon-btn round composer-plus" type="button" aria-label="Add files, folders or uploads (@)" title="Add files (@) or upload" onClick={() => setPicker(picker ? null : { query: '' })}><Plus size={18} /></button>
               <PersonaChip agents={agents} active={persona} onSwitch={(id) => void switchPersona(id)} onEdit={() => setPanel('settings')} onNew={() => void newPersona()} />
               <span title={modelPin ? `Pinned to ${pinnedName}` : lastModel ? `Auto picks per message. Last reply: ${lastModel}` : 'Auto picks a model per message'}>
                 <ModelPicker state={modelState} value={modelPin} autoLabel={lastModel && !modelPin ? `Auto · ${lastModel}` : 'Auto'} onChange={async (value) => {
@@ -840,7 +855,6 @@ export function Chat() {
               </span>
               {meter && <span className="context-meter" aria-label="Context used" title="Context used / budget">{Math.round((meter.used / Math.max(1, meter.budget)) * 100)}% ctx</span>}
               <span className="spacer" />
-              <button className="icon-btn round" type="button" aria-label="Reference a file, folder, or upload (@)" title="Reference files (@) or upload" onClick={() => setPicker(picker ? null : { query: '' })}><Paperclip size={18} /></button>
               <button className={recording ? 'icon-btn round on' : 'icon-btn round'} type="button" aria-label="Hold to talk" title="Hold to talk" onPointerDown={() => void holdTalk(true)} onPointerUp={() => void holdTalk(false)} onPointerLeave={() => { if (recording) void holdTalk(false); }}><Mic size={18} /></button>
               {active && status !== 'paused' && <button className="btn ghost pause-btn" type="button" onClick={() => control('pause')}>Pause</button>}
               {status === 'paused' && <button className="btn ghost" type="button" onClick={() => control('resume')}>Resume</button>}
@@ -864,6 +878,10 @@ export function Chat() {
           setMessages((rows) => { const last = rows[rows.length - 1]; const text = 'Settings changed · applies to the next message'; return last?.role === 'divider' && last.content === text ? rows : rows.length ? [...rows, { id: `div-${Date.now()}`, role: 'divider', content: text }] : rows; });
           void what;
         }} />}
+      {showState && persona && !['persona', 'settings', 'workspace', 'files', 'context'].includes(panel || '') && (
+        <PersonaStatePanel agent={persona} sessions={sessions} tick={messages.length + helperTick} onClose={toggleState}
+          onOpenSession={(id) => { void openSession(id); if (!wide) setPanel(null); }} onOpenFile={(id) => setViewer({ source: { kind: 'file', id } })} onOpenPersona={() => setPanel('persona')} />
+      )}
       <aside className={trace ? 'trace open' : 'trace'} aria-label="Trace">
         <div className="sheet-head">
           <strong>Trace</strong>

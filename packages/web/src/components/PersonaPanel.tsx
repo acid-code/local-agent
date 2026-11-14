@@ -158,7 +158,7 @@ export function PersonaPanel({ agent, tab, onTab, onClose, onSaved, ws, canManag
             <Face agent={draft} size={56} />
             <div className="grow">
               <div className="face-row" role="group" aria-label="Face">
-                <button type="button" className="face-pick" aria-label="Initials" aria-pressed={draft.avatarKind !== 'builtin' && draft.avatarKind !== 'upload'} onClick={() => save({ avatarKind: 'initials', avatarRef: '' }, 'face', 0)}><Face agent={{ ...draft, avatarKind: 'initials', avatarRef: '' }} size={28} /></button>
+                {[0, 1, 2, 3, 4, 5].map((shape) => <button type="button" key={`blob-${shape}`} className="face-pick" aria-label={`Blob face ${shape + 1}`} aria-pressed={draft.avatarKind !== 'builtin' && draft.avatarKind !== 'upload' && draft.avatarRef === `blob-${shape}`} onClick={() => save({ avatarKind: 'initials', avatarRef: `blob-${shape}` }, 'face', 0)}><Face agent={{ ...draft, avatarKind: 'initials', avatarRef: `blob-${shape}` }} size={28} /></button>)}
                 {FACE_IDS.map((id) => <button type="button" key={id} className="face-pick" aria-label={`Face ${id}`} aria-pressed={draft.avatarKind === 'builtin' && draft.avatarRef === id} onClick={() => save({ avatarKind: 'builtin', avatarRef: id }, 'face', 0)}><Face agent={{ ...draft, avatarKind: 'builtin', avatarRef: id }} size={28} /></button>)}
               </div>
               <div className="swatch-row" role="group" aria-label="Colour">

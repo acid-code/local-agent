@@ -3,6 +3,7 @@ import { toast, errorText } from '../lib/toast';
 import { api, post } from '../lib/api';
 import { Download, FlaskConical, Plug, Plus, RefreshCw, Search, Trash2, Wrench } from 'lucide-react';
 import { EmptyState, Menu, PageHeader, Section } from '../components/ui';
+import { Connectors } from '../components/Connectors';
 
 interface Server { id: string; name: string; source: string | null; enabled: boolean; riskLevel: string | null; riskScore: number | null; lastError: string | null; execution: string; network: string; tools?: { name: string }[] }
 interface Report {
@@ -63,6 +64,7 @@ export function Tools() {
           <button className="btn ghost" onClick={async () => { const result = await post<{ found?: number }>('/api/mcp/discover').catch((error) => { toast(errorText(error), 'error'); return null; }); await load(); if (result) toast('Imported known configs. They stay off until you vet them.', 'ok'); }}><Download size={16} aria-hidden /> Import known configs</button>
           <button className="btn primary" aria-expanded={adding} onClick={() => setAdding((value) => !value)}><Plus size={16} aria-hidden /> Add server</button>
         </>} />
+      <Connectors onReport={(value) => setReport(value as Report)} />
       <Section title="Installed servers" description={servers.length ? `${servers.length} server${servers.length === 1 ? '' : 's'}.` : undefined}>
         {loaded && servers.length === 0 && <EmptyState icon={Wrench} title="No MCP servers yet" action={<button className="btn" onClick={() => setAdding(true)}>Add a server</button>}>Search the registry below, import configs from Claude or Cursor, or add one by command.</EmptyState>}
         <div className="item-list">
