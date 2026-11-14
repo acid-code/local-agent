@@ -119,7 +119,7 @@ export function Chat() {
     if (draft) localStorage.setItem(draftKey(current), draft); else localStorage.removeItem(draftKey(current));
   }, [draft, current]);
   useEffect(() => {
-    api<{ checklist: CheckItem[] }>('/api/discovery').then((data) => setChecklist(data.checklist || [])).catch(() => undefined);
+    api<{ scan: unknown; checklist: CheckItem[] }>('/api/discovery').then((data) => setChecklist(data.scan ? data.checklist || [] : [])).catch(() => undefined);
   }, []);
   // Esc stops a running reply (when no dialog or menu has focus).
   useEffect(() => {
@@ -488,7 +488,7 @@ export function Chat() {
                 : <button className="icon-btn round primary-fill" type="submit" aria-label="Send" title="Send (Enter)" disabled={!draft.trim() || !current}><Send size={17} /></button>}
             </div>
           </form>
-          <p className="composer-hint faint">{voiceNote || loadingNote || 'Enter to send · Shift+Enter for a new line · Esc to stop'}</p>
+          {(voiceNote || loadingNote) ? <p className="composer-hint faint">{voiceNote || loadingNote}</p> : <p className="composer-hint faint"><span className="kbd-hint">Enter to send · Shift+Enter for a new line · Esc to stop</span></p>}
         </div>
       </section>
       <aside className={trace ? 'trace open' : 'trace'} aria-label="Trace">
