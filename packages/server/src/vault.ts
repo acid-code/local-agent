@@ -128,6 +128,19 @@ export class Vault {
     return env;
   }
 
+  /** Secrets typed into an MCP server's form: only that server's container gets them, never a model. */
+  mcpEnv(serverId: string): Record<string, string> {
+    const rows = this.store.db.prepare(`SELECT * FROM secrets WHERE revoked_at IS NULL AND scope = 'mcp' AND scope_id = ?`).all(serverId) as Record<string, unknown>[];
+    const env: Record<string, string> = {};
+    for (const row of rows) { env[String(row.name)] = open(this.key, String(row.nonce), String(row.ciphertext)); this.audit(String(row.id), 'inject', `mcp:${serverId}`); }
+    return env;
+  }
+
+  /** Names (never values) of the secrets an MCP server has. */
+  mcpSecretNames(serverId: string): string[] {
+    return (this.store.db.prepare(`SELECT name FROM secrets WHERE revoked_at IS NULL AND scope = 'mcp' AND scope_id = ?`).all(serverId) as { name: string }[]).map((row) => row.name);
+  }
+
   sealText(value: string) {
     return seal(this.key, value);
   }

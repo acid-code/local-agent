@@ -45,6 +45,8 @@ import { NO_MODEL_MESSAGE } from './usable-models.js';
 import { BudgetError, type Lease, type MemoryBudget } from './memory.js';
 import { MEMBER_DENIED_TOOLS, OWNER_ID, foreignPath, getAccount } from './accounts.js';
 import { Autonomy, HELPER_DENIED } from './autonomy.js';
+import type { McpAgentTool } from './mcp.js';
+import { GALLERY } from './gallery.js';
 import { disabledRules } from './rules.js';
 import { CONNECTOR_TOOLS, disabledConnectorTools } from './connectors.js';
 import { memoryBrief, memoryFileTool, projectRules, proposeSkillTool, searchChatsTool, skillNudge } from './learning.js';
@@ -57,6 +59,8 @@ export class Engine {
   private readonly dwell = new Map<string, { modelId: string; previousId: string | null; until: number; explicit: boolean }>();
   residentLarge: string[] = [];
   extraTools: Tool[] = [];
+  /** Tools from installed MCP servers (owner personas only). */
+  mcpTools: () => McpAgentTool[] = () => [];
   libraryDir = '';
   /** Shared RAM budget. Set by buildApp; absent in some unit tests. */
   memory: MemoryBudget | null = null;
@@ -1082,13 +1086,20 @@ export class Engine {
       for (const name of ['web_search', 'web_fetch', 'read_file', 'list_dir', 'grep', 'glob', 'plan', 'recall', 'consult_agent']) names.add(name);
     }
     if (stage === 'implement' || sessionMode === 'code') for (const tool of CODING_TOOLS) names.add(tool.name);
+    // MCP connector tools: owner personas only (servers carry the owner's tokens). A persona gets a server's tools when its
+    // allowlist names them (exact name, "mcp:<server>" or "mcp:*"), or when its gallery template lists that connector.
+    const mcp = (agent.ownerId || OWNER_ID) === OWNER_ID ? this.mcpTools() : [];
+    const templateConnectors = agent.templateId ? GALLERY.find((item) => item.id === agent.templateId)?.connectors ?? [] : [];
+    for (const row of mcp) {
+      if (names.has(row.tool.name) || names.has('mcp:*') || names.has(`mcp:${row.serverName}`) || (row.connector && templateConnectors.includes(row.connector))) names.add(row.tool.name);
+    }
     if (agent.ownerId !== OWNER_ID) for (const name of MEMBER_DENIED_TOOLS) names.delete(name);
     // A helper run gets only the tools it was started with (never more than its persona allows).
     if (subset) for (const name of [...names]) if (!subset.includes(name)) names.delete(name);
     if (helper) for (const name of HELPER_DENIED) names.delete(name);
     // Built-in connectors the owner switched off take their tools with them.
     for (const name of disabledConnectorTools(this.store)) names.delete(name);
-    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), ...this.autonomy.tools(), memoryFileTool(), searchChatsTool(), proposeSkillTool(), ...CONNECTOR_TOOLS(), ...this.extraTools];
+    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), ...this.autonomy.tools(), memoryFileTool(), searchChatsTool(), proposeSkillTool(), ...CONNECTOR_TOOLS(), ...this.extraTools, ...mcp.map((row) => row.tool)];
     const seen = new Set<string>();
     const chosen = catalog.filter((tool) => {
       if (!names.has(tool.name) || seen.has(tool.name)) return false;
@@ -1188,6 +1199,8 @@ export class Engine {
   }
 
   private touch(runId: string) {
+    // The heartbeat timer can outlive the database during shutdown; a closed store means there is nothing to renew.
+    if (!this.store.isOpen) return;
     this.store.updateRun(runId, { leaseOwner: this.instanceId, heartbeatAt: now() });
   }
 

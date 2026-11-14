@@ -1023,7 +1023,10 @@ export class Store {
     };
   }
 
+  isOpen = true;
+
   close() {
+    this.isOpen = false;
     this.db.close();
   }
 }

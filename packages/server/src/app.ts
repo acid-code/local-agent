@@ -36,6 +36,7 @@ export interface BuiltApp {
   bus: Bus;
   vault: Vault;
   scheduler: Scheduler;
+  mcp: McpRuntime;
   config: ReturnType<typeof loadConfig>;
 }
 
@@ -63,7 +64,8 @@ export async function buildApp(options: {
   const memoryProbe = options.memoryProbe ?? (options.providerOverride || process.env.VITEST ? undefined : systemProbe(options.fetchImpl ?? fetch));
   engine.memory = memoryProbe ? new MemoryBudget(memoryProbe, () => budgetConfig(store.getSettings()), path.join(config.dataDir, 'memory-calibration.json')) : null;
   const triggers = new TriggerRuntime(store, engine, vault, bus);
-  const mcp = new McpRuntime(store, docker);
+  const mcp = new McpRuntime(store, docker, { secretsFor: (id) => vault.mcpEnv(id), cacheDir: path.join(config.dataDir, 'mcp-cache') });
+  engine.mcpTools = () => mcp.agentTools();
   const scheduler = new Scheduler(store, engine);
   engine.recover();
   const notifier = new Notifier(store, bus, engine, config.dataDir, options.fetchImpl ?? fetch);
@@ -71,6 +73,7 @@ export async function buildApp(options: {
     scheduler.start();
     notifier.start();
     triggers.start();
+    if (!process.env.VITEST) mcp.startAll();
   }
 
   const app = Fastify({ bodyLimit: 8 * 1024 * 1024, logger: false });
@@ -161,9 +164,10 @@ export async function buildApp(options: {
     scheduler.stop();
     notifier.stop();
     triggers.stop();
+    await mcp.closeAll().catch(() => undefined);
     for (const timer of background) clearInterval(timer);
     store.close();
   });
 
-  return { app, store, engine, bus, vault, scheduler, config };
+  return { app, store, engine, bus, vault, scheduler, config, mcp };
 }

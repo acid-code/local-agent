@@ -12,7 +12,9 @@ import { secretDrift, secretNames, writeSecret } from './config.js';
 import type { DockerCtl } from './docker.js';
 import { checklist, scanMachine, setupPreview } from './discovery.js';
 import type { McpRuntime } from './mcp.js';
-import { importConfigs, searchRegistry, vetSpec } from './mcp.js';
+import type { McpServer } from './db.js';
+import { importConfigs, searchRegistry, trustOf, vetSpec, type VettingReport } from './mcp.js';
+import { cacheNpm, cacheStatus, dockerCatalog, officialCatalog, specFor, vetCatalogImage } from './mcp-catalog.js';
 import { localReputationSummarizer } from './reputation.js';
 import type { Notifier } from './notify.js';
 import { createBackup, listBackups, shipBackup, stageRestore } from './ops.js';
@@ -35,7 +37,7 @@ import {
 import { secret as randomSecret } from './util.js';
 import { RULE_FILE_CAP, RULE_TOTAL_CAP, disabledRules, discoverRules, setRuleEnabled } from './rules.js';
 import { GALLERY, gallerySystemPrompt, galleryList, installGallerySkills, type GalleryPersona } from './gallery.js';
-import { connectorStateFlag, BUILTIN_CONNECTORS, RECOMMENDED_CONNECTORS, connectorEnabled, connectorReport, connectorTools, recommendedConnected, setConnectorEnabled } from './connectors.js';
+import { connectorStateFlag, BUILTIN_CONNECTORS, RECOMMENDED_CONNECTORS, recommendedSpec, connectorEnabled, connectorReport, connectorTools, recommendedConnected, setConnectorEnabled } from './connectors.js';
 import { memoryFiles, rollbackRun, writeMemoryFile } from './learning.js';
 import { createWorkshop, getWorkshop, listWorkshops } from './workshops.js';
 import { ACCENT_DEFAULT, FACES, accentOk, avatarPath, saveAvatar } from './avatars.js';
@@ -302,16 +304,58 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     setConnectorEnabled(store, id, body.enabled);
     return connectorReport(healthEnv(), false);
   });
-  /** One click: vet the recommended server's package; the Tools page shows the report and installs it in its container on approval. */
+  /** One click: vet the recommended server's pinned image or package; the Tools page shows the report and installs on approval. */
   app.post('/api/connectors/:id/connect', async (req) => {
     const item = RECOMMENDED_CONNECTORS.find((row) => row.id === (req.params as { id: string }).id);
     if (!item) throw http(404, 'No such connector.');
-    const settings = store.getSettings();
-    const report = await vetSpec({ name: item.id, transport: 'stdio', command: 'npx', args: [item.package], source: 'recommended' }, fetchImpl, {
-      reputation: true, searxngUrl: settings.searxngUrl || process.env.SEARXNG_URL || '', summarize: localReputationSummarizer(store, fetchImpl),
-    });
+    const spec = recommendedSpec(item);
+    let report: VettingReport;
+    if (item.image) {
+      report = vetCatalogImage({ source: 'docker', id: item.id, title: item.name, description: item.description, trust: item.trust, image: item.image, secrets: item.secrets.map((env) => ({ env })), env: [], installable: true });
+    } else {
+      const settings = store.getSettings();
+      report = await vetSpec({ name: item.name, transport: 'stdio', command: 'npx', args: ['-y', item.npm!], source: spec.source }, fetchImpl, {
+        reputation: true, searxngUrl: settings.searxngUrl || process.env.SEARXNG_URL || '', summarize: localReputationSummarizer(store, fetchImpl),
+      });
+    }
+    report.spec = spec;
+    report.name = item.name;
     store.saveVetting(report.id, report);
-    return { report, needs: item.needs };
+    return { report, needs: item.needs, trust: item.trust, secrets: item.secrets, note: item.note ?? null };
+  });
+  /** What "Download all recommended" would fetch, and what is already on disk. */
+  const cacheItems = () => RECOMMENDED_CONNECTORS.map((item) => ({ id: item.id, image: item.image, npm: item.npm }));
+  const mcpCacheDir = path.join(config.dataDir, 'mcp-cache');
+  let cacheJob: { id: string; running: boolean; current: string | null; errors: Record<string, string> } | null = null;
+  app.get('/api/connectors/cache', async () => ({
+    items: (await cacheStatus(cacheItems(), docker, mcpCacheDir)).map((row) => ({ ...row, status: cacheJob?.running && cacheJob.current === row.id ? 'downloading' : cacheJob?.errors[row.id] && row.status !== 'ready' ? 'failed' : row.status, detail: cacheJob?.errors[row.id] })),
+    running: Boolean(cacheJob?.running), dockerAvailable: docker.available(),
+  }));
+  app.post('/api/connectors/cache', async () => {
+    if (cacheJob?.running) return { started: false, running: true };
+    const job = store.createJob('mcp-cache', 'Download all recommended connectors');
+    cacheJob = { id: job.id, running: true, current: null, errors: {} };
+    const state = cacheJob;
+    void (async () => {
+      for (const row of await cacheStatus(cacheItems(), docker, mcpCacheDir)) {
+        if (row.status === 'ready') continue;
+        state.current = row.id;
+        try {
+          if (row.kind === 'image') {
+            if (!docker.available()) throw new Error('Docker is not reachable.');
+            await docker.pull(row.ref);
+          } else await cacheNpm(row.ref, mcpCacheDir);
+          store.appendJob(job.id, `${row.id}: ready\n`);
+        } catch (error) {
+          state.errors[row.id] = error instanceof Error ? error.message.slice(0, 200) : 'failed';
+          store.appendJob(job.id, `${row.id}: ${state.errors[row.id]}\n`);
+        }
+      }
+      state.current = null;
+      state.running = false;
+      store.finishJob(job.id, Object.keys(state.errors).length ? 'failed' : 'done');
+    })();
+    return { started: true, running: true, jobId: job.id };
   });
 
   async function addFromGallery(item: GalleryPersona, accountId: string, member: boolean) {
@@ -955,7 +999,68 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     return { provider };
   });
 
-  app.get('/api/mcp', async () => ({ servers: mcp.list(), builtin: ['shell', 'files', 'web_search', 'web_fetch', 'docker', 'memory', 'consult_agent', 'plan', 'grep', 'glob', 'apply_patch', 'git'] }));
+  app.get('/api/mcp', async () => ({ servers: mcp.list().map((server) => mcpView(server)), builtin: ['shell', 'files', 'web_search', 'web_fetch', 'docker', 'memory', 'consult_agent', 'plan', 'grep', 'glob', 'apply_patch', 'git'] }));
+  /** A server as the Tools page sees it: health, trust and which secrets are set (names only, never values). */
+  const mcpView = (server: McpServer) => {
+    const needed = [...new Set(Object.values(server.env).flatMap((value) => [...String(value).matchAll(/\{\{secret:([A-Z0-9_]+)\}\}/gi)].map((match) => match[1]!.toUpperCase())))];
+    const set = vault.mcpSecretNames(server.id);
+    return {
+      ...server, env: Object.fromEntries(Object.entries(server.env).map(([key, value]) => [key, /\{\{secret:/i.test(String(value)) ? '(from the vault)' : String(value)])),
+      health: mcp.health(server.id), trust: trustOf({ name: server.name, image: server.image, packageName: server.args.find((arg) => !arg.startsWith('-')), source: server.source }),
+      secrets: needed.map((name) => ({ name, set: set.includes(name) })),
+    };
+  };
+  app.get('/api/mcp/catalog', async (req) => {
+    const query = req.query as { source?: string; q?: string };
+    const q = String(query.q || '').trim().toLowerCase();
+    if (query.source === 'official') return { source: 'official', entries: await officialCatalog(q || 'mcp', fetchImpl) };
+    const entries = (await dockerCatalog(fetchImpl, config.dataDir)).filter((entry) => !q || `${entry.id} ${entry.title} ${entry.description}`.toLowerCase().includes(q));
+    return { source: 'docker', total: entries.length, entries: entries.slice(0, 60) };
+  });
+  app.post('/api/mcp/catalog/vet', async (req) => {
+    const body = parse(z.object({ source: z.enum(['docker', 'official']), id: z.string().min(1).max(200) }), req.body);
+    const entries = body.source === 'docker' ? await dockerCatalog(fetchImpl, config.dataDir) : await officialCatalog(body.id, fetchImpl);
+    const entry = entries.find((row) => row.id === body.id);
+    if (!entry) throw http(404, 'Not found in that catalog.');
+    if (!entry.installable) throw http(400, entry.note || 'This server cannot be installed here.');
+    let report: VettingReport;
+    if (entry.image) report = vetCatalogImage(entry);
+    else {
+      const settings = store.getSettings();
+      report = await vetSpec(specFor(entry), fetchImpl, { reputation: true, searxngUrl: settings.searxngUrl || process.env.SEARXNG_URL || '', summarize: localReputationSummarizer(store, fetchImpl) });
+      if (entry.trust === 'community' && !report.findings.some((row) => row.code === 'community')) report.findings.push({ severity: 'medium', code: 'community', detail: 'Community server: read its source before trusting it with tokens.' });
+    }
+    store.saveVetting(report.id, report);
+    return { report, trust: entry.trust, secrets: entry.secrets.map((row) => row.env) };
+  });
+  /** Secrets for one server, typed into a form: stored in the vault for that server only; never returned or shown to a model. */
+  app.get('/api/mcp/:id/secrets', async (req) => {
+    const server = store.getMcp((req.params as { id: string }).id);
+    if (!server) throw http(404, 'MCP server not found.');
+    return { secrets: mcpView(server).secrets };
+  });
+  app.put('/api/mcp/:id/secrets', async (req) => {
+    const id = (req.params as { id: string }).id;
+    const server = store.getMcp(id);
+    if (!server) throw http(404, 'MCP server not found.');
+    const body = parse(z.object({ values: z.record(z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/), z.string().max(20_000)) }), req.body);
+    const allowed = new Set(mcpView(server).secrets.map((row) => row.name));
+    for (const [name, value] of Object.entries(body.values)) {
+      if (!allowed.has(name)) throw http(400, `${name} is not a secret this server uses.`);
+      if (value) vault.put({ name, value, scope: 'mcp', scopeId: id, actor: me(req) });
+    }
+    if (mcp.health(id).status === 'connected' || server.lastError) void mcp.connect(id).catch(() => undefined);
+    return { secrets: mcpView(store.getMcp(id)!).secrets };
+  });
+  app.patch('/api/mcp/:id', async (req) => {
+    const id = (req.params as { id: string }).id;
+    const server = store.getMcp(id);
+    if (!server) throw http(404, 'MCP server not found.');
+    const body = parse(z.object({ enabled: z.boolean() }), req.body);
+    store.upsertMcp({ ...server, enabled: body.enabled });
+    if (!body.enabled) await mcp.stop(id);
+    return { server: mcpView(store.getMcp(id)!) };
+  });
   app.post('/api/mcp/discover', async () => ({ servers: mcp.importFound(config.dataDir), found: importConfigs(config.dataDir).length }));
   app.get('/api/mcp/registry', async (req) => searchRegistry(String((req.query as { q?: string }).q || 'file'), fetchImpl));
   app.post('/api/mcp/vet', async (req) => {
@@ -975,15 +1080,22 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     return { report };
   });
   app.post('/api/mcp/install', async (req) => {
-    const body = parse(z.object({ reportId: z.string(), acknowledgeRisk: z.boolean(), acknowledgeCritical: z.boolean().optional(), grants: z.array(z.string()).optional() }), req.body);
+    const body = parse(z.object({ reportId: z.string(), acknowledgeRisk: z.boolean(), acknowledgeCritical: z.boolean().optional(), acknowledgeCommunity: z.boolean().optional(), grants: z.array(z.string()).optional() }), req.body);
     const report = store.getVetting<import('./mcp.js').VettingReport>(body.reportId);
     if (!report) throw http(404, 'Vetting report not found. Vet the server first.');
-    return { server: mcp.install(report, body) };
+    try { return { server: mcpView(mcp.install(report, body)) }; } catch (error) { throw http(400, error instanceof Error ? error.message : 'Install failed.'); }
   });
-  app.post('/api/mcp/:id/refresh', async (req) => ({ server: await mcp.connect((req.params as { id: string }).id) }));
+  app.post('/api/mcp/:id/refresh', async (req) => {
+    const id = (req.params as { id: string }).id;
+    try { await mcp.connect(id); } catch { /* the view carries the error */ }
+    const server = store.getMcp(id);
+    if (!server) throw http(404, 'MCP server not found.');
+    return { server: mcpView(server) };
+  });
   app.delete('/api/mcp/:id', async (req) => {
     const id = (req.params as { id: string }).id;
     await mcp.stop(id);
+    for (const secret of vault.list().filter((row) => row.scope === 'mcp' && row.scopeId === id && !row.revokedAt)) vault.revoke(secret.id, me(req));
     store.deleteMcp(id);
     return { ok: true };
   });

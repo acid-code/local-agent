@@ -58,15 +58,39 @@ export const BUILTIN_CONNECTORS: BuiltinConnector[] = [
     async health(env) { return env.dockerAvailable() ? { status: 'healthy', detail: 'Docker answered.' } : { status: 'degraded', detail: 'Docker is not reachable.' }; } },
 ];
 
-export interface RecommendedConnector { id: string; name: string; description: string; package: string; ecosystem: 'npm' | 'pypi'; needs: string }
+/**
+ * Account-based connectors, pinned: a Docker catalog image by sha256 digest where one exists, otherwise an exact npm version that
+ * "Download all recommended" installs into a local cache (mounted read-only into the container), so nothing changes under you.
+ */
+export interface RecommendedConnector {
+  id: string; name: string; description: string; package: string; ecosystem: 'npm' | 'docker'; needs: string;
+  image?: string; npm?: string; bin?: string; secrets: string[]; env?: Record<string, string>; trust: 'official' | 'docker' | 'community'; note?: string;
+}
 export const RECOMMENDED_CONNECTORS: RecommendedConnector[] = [
-  { id: 'github', name: 'GitHub', description: 'Issues, pull requests and repos.', package: '@modelcontextprotocol/server-github', ecosystem: 'npm', needs: 'A GitHub token (stored in the vault).' },
-  { id: 'gmail', name: 'Gmail', description: 'Read and draft email.', package: '@gongrzhe/server-gmail-autoauth-mcp', ecosystem: 'npm', needs: 'Google sign-in.' },
-  { id: 'calendar', name: 'Google Calendar', description: 'Events and free/busy.', package: '@cocal/google-calendar-mcp', ecosystem: 'npm', needs: 'Google sign-in.' },
-  { id: 'slack', name: 'Slack', description: 'Channels and messages.', package: '@modelcontextprotocol/server-slack', ecosystem: 'npm', needs: 'A Slack bot token.' },
-  { id: 'notion', name: 'Notion', description: 'Pages and databases.', package: '@notionhq/notion-mcp-server', ecosystem: 'npm', needs: 'A Notion integration token.' },
-  { id: 'linear', name: 'Linear', description: 'Issues and projects.', package: 'linear-mcp-server', ecosystem: 'npm', needs: 'A Linear API key.' },
+  { id: 'github', name: 'GitHub', description: 'Issues, pull requests and repos.', package: 'ghcr.io/github/github-mcp-server', ecosystem: 'docker', trust: 'official', needs: 'A GitHub token.',
+    image: 'ghcr.io/github/github-mcp-server@sha256:f6056fc10bfffcc8c81a6417a2e9ca12808647e8dd6049642a4feaadee0e0f8a', secrets: ['GITHUB_PERSONAL_ACCESS_TOKEN'] },
+  { id: 'gmail', name: 'Gmail', description: 'Read and send email over IMAP/SMTP with an app password.', package: 'yashtekwani/gmail-mcp', ecosystem: 'docker', trust: 'community', needs: 'Your address and a Google app password.',
+    image: 'yashtekwani/gmail-mcp@sha256:9d806c6ba3752bd83a94782cc65d79929e05b3d4d805a01320d86004e39daf13', secrets: ['EMAIL_ADDRESS', 'EMAIL_PASSWORD'],
+    env: { IMAP_HOST: 'imap.gmail.com', IMAP_PORT: '993', SMTP_HOST: 'smtp.gmail.com', SMTP_PORT: '587' } },
+  { id: 'calendar', name: 'Google Calendar', description: 'Events and free/busy.', package: '@cocal/google-calendar-mcp', ecosystem: 'npm', trust: 'community', needs: 'A Google OAuth client file path.',
+    npm: '@cocal/google-calendar-mcp@2.8.1', bin: 'node_modules/@cocal/google-calendar-mcp/build/index.js', secrets: ['GOOGLE_OAUTH_CREDENTIALS'], note: 'First sign-in opens a Google consent page.' },
+  { id: 'slack', name: 'Slack', description: 'Channels and messages.', package: 'mcp/slack', ecosystem: 'docker', trust: 'docker', needs: 'A Slack bot token and team id.',
+    image: 'mcp/slack@sha256:4cc10c3f4bd988bd2dce40e3068fe38fa3b3bad1da99f9653eb5fa5cce35baa1', secrets: ['SLACK_BOT_TOKEN', 'SLACK_TEAM_ID'], note: 'Docker marks this reference server archived.' },
+  { id: 'notion', name: 'Notion', description: 'Pages and databases.', package: 'mcp/notion', ecosystem: 'docker', trust: 'docker', needs: 'A Notion integration token.',
+    image: 'mcp/notion@sha256:df0d6781d03f37bd5b962c85ae1f288382f31b7108c489473641ffc372f43dc9', secrets: ['INTERNAL_INTEGRATION_TOKEN'],
+    env: { OPENAPI_MCP_HEADERS: '{"Authorization": "Bearer $INTERNAL_INTEGRATION_TOKEN", "Notion-Version": "2022-06-28"}' } },
+  { id: 'linear', name: 'Linear', description: 'Issues and projects.', package: 'linear-mcp-server', ecosystem: 'npm', trust: 'community', needs: 'A Linear API key.',
+    npm: 'linear-mcp-server@0.1.0', bin: 'node_modules/linear-mcp-server/build/index.js', secrets: ['LINEAR_API_KEY'] },
 ];
+
+/** The install spec for a recommended connector: its pinned image, or the cached npm package run with node. */
+export function recommendedSpec(item: RecommendedConnector) {
+  const env: Record<string, string> = { ...(item.env ?? {}) };
+  for (const name of item.secrets) env[name] = `{{secret:${name}}}`;
+  return item.image
+    ? { name: item.name, transport: 'stdio' as const, args: [], env, source: `recommended:${item.id}`, image: item.image }
+    : { name: item.name, transport: 'stdio' as const, command: 'npm-cache', args: [item.npm!, item.bin!], env, source: `recommended:${item.id}` };
+}
 
 // ── State ────────────────────────────────────────────────────────────────────
 

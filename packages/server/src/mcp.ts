@@ -7,6 +7,8 @@ import type { McpServer, Store } from './db.js';
 import { mcpContainerSpec, type DockerCtl } from './docker.js';
 import { reputationSubject, runReputation, type ReputationCheck } from './reputation.js';
 import { nid, now } from './util.js';
+import { McpClient, mcpToolName, type McpCallResult, type McpTool } from './mcp-client.js';
+import type { Tool } from './tools.js';
 
 export interface ImportedMcp {
   name: string;
@@ -16,6 +18,8 @@ export interface ImportedMcp {
   url?: string;
   env?: Record<string, string>;
   source: string;
+  /** A pinned container image (Docker MCP catalog). */
+  image?: string;
 }
 
 export interface VettingReport {
@@ -261,10 +265,32 @@ export async function searchRegistry(query: string, fetchImpl: typeof fetch) {
   }
 }
 
-export class McpRuntime {
-  private readonly stops = new Map<string, () => Promise<void>>();
+export type Trust = 'built-in' | 'official' | 'docker' | 'community';
 
-  constructor(private readonly store: Store, private readonly docker: DockerCtl) {}
+/** Who stands behind a server: the MCP project or the vendor itself, Docker (built and signed images), or anyone else. */
+export function trustOf(input: { name?: string | null; image?: string | null; packageName?: string | null; source?: string | null }): Trust {
+  const image = (input.image || '').replace(/^docker\.io\//, '');
+  const name = input.name || '';
+  const pkg = input.packageName || '';
+  if (/^ghcr\.io\/github\//.test(image) || /^io\.modelcontextprotocol\b|^io\.github\.modelcontextprotocol\//.test(name) || pkg.startsWith('@modelcontextprotocol/') || pkg.startsWith('@notionhq/')) return 'official';
+  if (/^mcp\//.test(image)) return 'docker';
+  return 'community';
+}
+
+export interface McpHealth { status: 'connected' | 'starting' | 'idle' | 'down' | 'off'; detail: string; tools: number; restarts: number }
+export interface McpAgentTool { tool: Tool; serverId: string; serverName: string; connector: string | null }
+
+interface Live { client: McpClient; stop: () => Promise<void> }
+
+export class McpRuntime {
+  private readonly live = new Map<string, Live>();
+  private readonly starting = new Map<string, Promise<McpServer | null>>();
+  private readonly restarts = new Map<string, { count: number; timer: ReturnType<typeof setTimeout> | null }>();
+  private readonly stopping = new Set<string>();
+  /** Reconnect delays after an unexpected exit (ms). After the last one the server is marked down until used again. */
+  reconnectDelays = [1000, 2000, 5000, 15000, 30000];
+
+  constructor(private readonly store: Store, private readonly docker: DockerCtl, private readonly opts: { secretsFor?: (serverId: string) => Record<string, string>; cacheDir?: string } = {}) {}
 
   list() {
     return this.store.listMcp();
@@ -280,26 +306,34 @@ export class McpRuntime {
     return this.store.listMcp();
   }
 
-  install(report: VettingReport, approve: { acknowledgeRisk: boolean; acknowledgeCritical?: boolean; grants?: string[] }) {
+  install(report: VettingReport, approve: { acknowledgeRisk: boolean; acknowledgeCritical?: boolean; acknowledgeCommunity?: boolean; grants?: string[] }) {
     if (!approve.acknowledgeRisk) throw new Error('Installation needs an explicit approval.');
     if (report.level === 'critical' && !approve.acknowledgeCritical) throw new Error('Critical risk needs a second acknowledgement.');
+    const trust = trustOf({ name: report.name, image: report.spec.image, packageName: report.packageName, source: report.spec.source });
+    if (trust === 'community' && approve.acknowledgeCommunity !== true) throw new Error('This is a community server, not from the MCP project, the vendor or Docker. Confirm that you trust its publisher.');
     const grants = approve.grants ?? [];
-    if (grants.length && report.level !== 'low') {
-      /* grants are stored and shown; they do not skip the risk acknowledgement above */
-    }
     const id = nid('mcp');
     const server = serverFrom(id, report.spec, true);
     server.grants = grants;
     server.riskScore = report.score;
     server.riskLevel = report.level;
     server.reportId = report.id;
-    server.network = report.permissions.includes('network') || report.ecosystem === 'npm' || report.ecosystem === 'pypi' ? 'bridge' : 'none';
-    server.image = report.ecosystem === 'npm' ? 'node:22-alpine' : report.ecosystem === 'pypi' ? 'python:3.12-alpine' : 'alpine:3.20';
+    server.network = report.permissions.includes('network') || report.ecosystem === 'npm' || report.ecosystem === 'pypi' || report.ecosystem === 'docker' ? 'bridge' : 'none';
+    server.image = report.spec.image || (report.ecosystem === 'npm' ? 'node:22-alpine' : report.ecosystem === 'pypi' ? 'python:3.12-alpine' : 'alpine:3.20');
     this.store.saveVetting(report.id, report);
     return this.store.upsertMcp(server);
   }
 
-  async connect(id: string) {
+  /** Starts the server's container and does the MCP handshake (once at a time per server). */
+  connect(id: string): Promise<McpServer | null> {
+    const running = this.starting.get(id);
+    if (running) return running;
+    const task = this.start(id).finally(() => this.starting.delete(id));
+    this.starting.set(id, task);
+    return task;
+  }
+
+  private async start(id: string) {
     const server = this.store.getMcp(id);
     if (!server) throw new Error('MCP server not found.');
     if (!server.enabled) throw new Error('Enable the server after vetting.');
@@ -308,34 +342,154 @@ export class McpRuntime {
       this.store.upsertMcp({ ...server, lastError: 'Docker is required to start this MCP server.' });
       throw new Error('Docker is required to start this MCP server.');
     }
-    const cmd = containerCommand(server);
-    const spec = mcpContainerSpec({ id: server.id, image: server.image || 'node:22-alpine', cmd, env: server.env, network: server.network, mounts: server.grants });
+    await this.stopLive(id);
+    const image = server.image || 'node:22-alpine';
+    if (this.docker.hasImage && !(await this.docker.hasImage(image).catch(() => true))) await this.docker.pull(image);
+    const { cmd, mounts } = this.containerCommand(server);
+    const env = this.resolveEnv(server);
+    const spec = mcpContainerSpec({ id: server.id, image, cmd, env, network: server.network, mounts: [...server.grants, ...mounts] });
     const attached = await this.docker.attach(spec);
-    this.stops.set(id, attached.stop);
+    this.stopping.delete(id);
+    const client = new McpClient(attached.stdin, attached.stdout, attached.stderr, (reason) => this.onClosed(id, reason));
+    this.live.set(id, { client, stop: attached.stop });
     try {
-      const tools = await listTools(attached.stdin, attached.stdout);
-      this.store.upsertMcp({ ...server, tools, lastError: null });
+      await client.initialize();
+      const tools = await client.listTools();
+      this.store.upsertMcp({ ...this.store.getMcp(id)!, tools, lastError: null });
+      const state = this.restarts.get(id);
+      if (state) state.count = 0;
       return this.store.getMcp(id);
     } catch (error) {
-      await attached.stop();
-      const message = error instanceof Error ? error.message : 'MCP handshake failed.';
-      this.store.upsertMcp({ ...server, lastError: message });
+      this.stopping.add(id);
+      await this.stopLive(id);
+      const message = `${error instanceof Error ? error.message : 'MCP handshake failed.'}${client.stderrTail ? ` · ${client.stderrTail.trim().split('\n').at(-1)?.slice(0, 200)}` : ''}`;
+      this.store.upsertMcp({ ...this.store.getMcp(id)!, lastError: message });
       throw new Error(message);
     }
   }
 
-  async stop(id: string) {
-    const stop = this.stops.get(id);
-    if (stop) await stop();
-    this.stops.delete(id);
+  private onClosed(id: string, reason: string) {
+    const live = this.live.get(id);
+    if (live) { this.live.delete(id); void live.stop().catch(() => undefined); }
+    if (this.stopping.has(id)) return;
+    const server = this.store.getMcp(id);
+    if (!server?.enabled) return;
+    const state = this.restarts.get(id) ?? { count: 0, timer: null };
+    this.restarts.set(id, state);
+    this.store.upsertMcp({ ...server, lastError: `Disconnected: ${reason}` });
+    if (state.count >= this.reconnectDelays.length) return; // gave up for now; the next tool call tries again
+    const delay = this.reconnectDelays[state.count]!;
+    state.count += 1;
+    state.timer = setTimeout(() => { state.timer = null; void this.connect(id).catch(() => undefined); }, delay);
+    state.timer.unref?.();
   }
+
+  /** Calls one tool, starting (or restarting) the server first when needed. */
+  async call(id: string, tool: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<McpCallResult> {
+    let live = this.live.get(id);
+    if (!live?.client.alive) { await this.connect(id); live = this.live.get(id); }
+    if (!live) throw new Error('The MCP server did not start.');
+    return live.client.callTool(tool, args, signal);
+  }
+
+  health(id: string): McpHealth {
+    const server = this.store.getMcp(id);
+    const tools = (server?.tools ?? []).length;
+    const restarts = this.restarts.get(id)?.count ?? 0;
+    if (!server) return { status: 'off', detail: 'Removed.', tools: 0, restarts };
+    if (!server.enabled) return { status: 'off', detail: 'Switched off.', tools, restarts };
+    if (this.live.get(id)?.client.alive) return { status: 'connected', detail: `Connected · ${tools} tool${tools === 1 ? '' : 's'}`, tools, restarts };
+    if (this.starting.has(id)) return { status: 'starting', detail: 'Starting…', tools, restarts };
+    if (server.lastError) return { status: 'down', detail: server.lastError, tools, restarts };
+    return { status: 'idle', detail: tools ? 'Starts on first use.' : 'Not started yet.', tools, restarts };
+  }
+
+  /** Every enabled server's tools, as tools an agent can call (approval unless the server marks a tool read-only). */
+  agentTools(): McpAgentTool[] {
+    const out: McpAgentTool[] = [];
+    for (const server of this.store.listMcp()) {
+      if (!server.enabled) continue;
+      const connector = server.source?.startsWith('recommended:') ? server.source.split(':')[1] ?? null : null;
+      for (const raw of server.tools as McpTool[]) {
+        if (!raw?.name) continue;
+        const readOnly = raw.annotations?.readOnlyHint === true;
+        const tool: Tool = {
+          name: mcpToolName(server.name, raw.name),
+          description: `${server.name}: ${raw.description || raw.annotations?.title || raw.name}`.slice(0, 1000),
+          parameters: raw.inputSchema && typeof raw.inputSchema === 'object' ? raw.inputSchema : { type: 'object', properties: {} },
+          mutates: () => !readOnly,
+          approval: (args) => (readOnly ? null : `${server.name} → ${raw.name} ${JSON.stringify(args).slice(0, 240)}`),
+          execute: async (args, ctx) => {
+            const result = await this.call(server.id, raw.name, args as Record<string, unknown>, ctx.signal);
+            if (result.isError) throw new Error(result.text);
+            return result.text;
+          },
+        };
+        out.push({ tool, serverId: server.id, serverName: server.name, connector });
+      }
+    }
+    return out;
+  }
+
+  /** Starts every enabled server in the background (used at boot). */
+  startAll() {
+    for (const server of this.store.listMcp()) if (server.enabled && server.execution === 'container') void this.connect(server.id).catch(() => undefined);
+  }
+
+  async stop(id: string) {
+    this.stopping.add(id);
+    const state = this.restarts.get(id);
+    if (state?.timer) clearTimeout(state.timer);
+    await this.stopLive(id);
+  }
+
+  async closeAll() {
+    for (const id of [...this.live.keys()]) await this.stop(id);
+  }
+
+  private async stopLive(id: string) {
+    const live = this.live.get(id);
+    if (!live) return;
+    this.live.delete(id);
+    live.client.close('Stopped.');
+    await live.stop().catch(() => undefined);
+  }
+
+  /** Placeholders like {{secret:NAME}} and $NAME are filled from the vault (secrets typed into a form, never the chat). */
+  private resolveEnv(server: McpServer) {
+    const secrets = this.opts.secretsFor?.(server.id) ?? {};
+    const env: Record<string, string> = {};
+    for (const [key, value] of Object.entries(server.env)) {
+      env[key] = String(value)
+        .replace(/\{\{secret:([A-Z0-9_]+)\}\}/gi, (_, name: string) => secrets[name.toUpperCase()] ?? '')
+        .replace(/\$([A-Z][A-Z0-9_]*)/g, (match, name: string) => secrets[name] ?? match);
+    }
+    return env;
+  }
+
+  /** npm servers run from a pinned, pre-downloaded copy when there is one; images run their own entrypoint. */
+  private containerCommand(server: McpServer): { cmd: string[]; mounts: string[] } {
+    if (server.command === 'npm-cache') {
+      const [spec = '', bin = ''] = server.args;
+      const dir = this.opts.cacheDir ? npmCacheDir(this.opts.cacheDir, spec) : '';
+      const pkg = spec.replace(/@[^@/]+$/, '');
+      if (dir && fs.existsSync(path.join(dir, 'node_modules', pkg, bin))) return { cmd: ['node', `/mcp/node_modules/${pkg}/${bin}`], mounts: [`${dir}:/mcp:ro`] };
+      return { cmd: ['npx', '-y', spec], mounts: [] };
+    }
+    if (server.image && !server.command) return { cmd: server.args, mounts: [] };
+    return { cmd: containerCommand(server), mounts: [] };
+  }
+}
+
+export function npmCacheDir(cacheDir: string, spec: string) {
+  return path.join(cacheDir, spec.replace(/[^a-z0-9@._-]+/gi, '_'));
 }
 
 function serverFrom(id: string, spec: ImportedMcp, enabled: boolean): McpServer {
   return {
     id, name: spec.name, transport: spec.transport, command: spec.command ?? null, args: spec.args ?? [], url: spec.url ?? null,
     env: spec.env ?? {}, enabled, source: spec.source, execution: spec.transport === 'http' ? 'remote' : 'container', network: 'none',
-    grants: [], image: null, riskScore: null, riskLevel: null, reportId: null, lastError: null, tools: [], createdAt: now(),
+    grants: [], image: spec.image ?? null, riskScore: null, riskLevel: null, reportId: null, lastError: null, tools: [], createdAt: now(),
   };
 }
 
@@ -372,26 +526,6 @@ export class FrameParser {
     }
     return messages;
   }
-}
-
-async function listTools(stdin: NodeJS.WritableStream, stdout: NodeJS.ReadableStream) {
-  const parser = new FrameParser();
-  const pending = new Map<number, (value: unknown) => void>();
-  stdout.on('data', (chunk: Buffer) => {
-    for (const message of parser.push(chunk)) {
-      const rpc = message as { id?: number; result?: unknown };
-      if (rpc.id && pending.has(rpc.id)) pending.get(rpc.id)!(rpc.result);
-    }
-  });
-  const call = (id: number, method: string, params: unknown) => new Promise((resolve, reject) => {
-    pending.set(id, resolve);
-    stdin.write(encodeFrame({ jsonrpc: '2.0', id, method, params }));
-    setTimeout(() => reject(new Error(`${method} timed out`)), 20_000);
-  });
-  await call(1, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'local-agent', version: '0.1.0' } });
-  stdin.write(encodeFrame({ jsonrpc: '2.0', method: 'notifications/initialized' }));
-  const listed = await call(2, 'tools/list', {}) as { tools?: unknown[] };
-  return listed.tools ?? [];
 }
 
 export function spawnChecked(command: string, args: string[]) {
