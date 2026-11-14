@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
 import { toast, errorText } from '../lib/toast';
 import { api, post } from '../lib/api';
-import { Download, Plug, Plus, RefreshCw, Search, Trash2, Wrench } from 'lucide-react';
+import { Download, FlaskConical, Plug, Plus, RefreshCw, Search, Trash2, Wrench } from 'lucide-react';
 import { EmptyState, Menu, PageHeader, Section } from '../components/ui';
 
-interface Server { id: string; name: string; source: string | null; enabled: boolean; riskLevel: string | null; riskScore: number | null; lastError: string | null; execution: string; network: string }
+interface Server { id: string; name: string; source: string | null; enabled: boolean; riskLevel: string | null; riskScore: number | null; lastError: string | null; execution: string; network: string; tools?: { name: string }[] }
 interface Report {
   id: string; score: number; level: string; packageName?: string; publisher?: string; license?: string;
   downloads?: number | null; stars?: number | null; permissions: string[]; findings: { severity: string; detail: string }[];
@@ -25,6 +25,28 @@ export function Tools() {
   const [adding, setAdding] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [searching, setSearching] = useState(false);
+  const [testing, setTesting] = useState<string | null>(null);
+  const [results, setResults] = useState<Record<string, { ok: boolean; text: string }>>({});
+
+  async function testServer(server: Server) {
+    setTesting(server.id);
+    try {
+      const data = await post<{ server: Server | null }>(`/api/mcp/${server.id}/refresh`);
+      const tools = data.server?.tools || [];
+      setResults((rows) => ({ ...rows, [server.id]: { ok: true, text: `Works · ${tools.length} tool${tools.length === 1 ? '' : 's'}${tools.length ? `: ${tools.slice(0, 6).map((t) => t.name).join(', ')}${tools.length > 6 ? '…' : ''}` : ''}` } }));
+      await load();
+    } catch (error) { setResults((rows) => ({ ...rows, [server.id]: { ok: false, text: errorText(error) } })); }
+    finally { setTesting(null); }
+  }
+  async function testBuiltin(tool: 'web_search' | 'kb_search') {
+    setTesting(tool);
+    try {
+      const data = await post<{ results: { ok: boolean; ms: number; output?: string; error?: string }[] }>('/api/debug/tool-test', { tool });
+      const r = data.results[0];
+      setResults((rows) => ({ ...rows, [tool]: { ok: Boolean(r?.ok), text: r?.ok ? `Works · ${r.ms} ms` : (r?.error || r?.output || 'No results').slice(0, 160) } }));
+    } catch (error) { setResults((rows) => ({ ...rows, [tool]: { ok: false, text: errorText(error) } })); }
+    finally { setTesting(null); }
+  }
 
   async function load() { setServers((await api<{ servers: Server[] }>('/api/mcp')).servers); setLoaded(true); }
   async function search(event?: { preventDefault(): void }) {
@@ -50,11 +72,25 @@ export function Tools() {
               <span className="grow"><strong>{server.name}</strong><span className="faint">{server.enabled ? 'on' : 'off'} · {server.execution} · network {server.network} · risk {server.riskLevel || 'not vetted'}{server.source ? ` · from ${server.source}` : ''}</span>
                 {server.lastError && <span className="faint" style={{ color: 'var(--coral)' }}>{server.lastError}</span>}
               </span>
-              <button className="btn small" onClick={() => post(`/api/mcp/${server.id}/refresh`).then(load).then(() => toast(`Connected ${server.name}.`, 'ok')).catch((error) => toast(errorText(error), 'error'))}><Plug size={14} aria-hidden /> Connect</button>
+              {results[server.id] && <span className={results[server.id]!.ok ? 'test-result ok' : 'test-result bad'} role="status">{results[server.id]!.text}</span>}
+              <button className="btn small" disabled={testing === server.id} title="Start it and list its tools" onClick={() => void testServer(server)}><FlaskConical size={14} aria-hidden /> {testing === server.id ? 'Testing…' : 'Test'}</button>
               <Menu label={`Options for ${server.name}`} items={[
+                { label: 'Connect', icon: Plug, onSelect: () => void post(`/api/mcp/${server.id}/refresh`).then(load).then(() => toast(`Connected ${server.name}.`, 'ok')).catch((error) => toast(errorText(error), 'error')) },
                 { label: 'Reconnect', icon: RefreshCw, onSelect: () => void post(`/api/mcp/${server.id}/refresh`).then(load).catch((error) => toast(errorText(error), 'error')) },
                 { label: 'Remove', icon: Trash2, danger: true, separator: true, onSelect: () => { if (window.confirm(`Remove ${server.name}? Its container is deleted.`)) void api(`/api/mcp/${server.id}`, { method: 'DELETE' }).then(load); } },
               ]} />
+            </div>
+          ))}
+        </div>
+      </Section>
+      <Section title="Built-in tools" description="Always available to agents that allow them.">
+        <div className="item-list">
+          {([['web_search', 'Web search', 'Through your local SearXNG'], ['kb_search', 'Knowledge base', 'Your Library documents']] as const).map(([id, label, hint]) => (
+            <div key={id} className="item-row">
+              <span className="dot on" aria-hidden />
+              <span className="grow"><strong>{label}</strong><span className="faint">{hint}</span></span>
+              {results[id] && <span className={results[id]!.ok ? 'test-result ok' : 'test-result bad'} role="status">{results[id]!.text}</span>}
+              <button className="btn small" disabled={testing === id} onClick={() => void testBuiltin(id)}><FlaskConical size={14} aria-hidden /> {testing === id ? 'Testing…' : 'Test'}</button>
             </div>
           ))}
         </div>

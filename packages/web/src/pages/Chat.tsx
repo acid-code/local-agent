@@ -9,6 +9,7 @@ import { FileViewer, type QuotePick, type ViewerSource } from '../components/Fil
 import { MentionPicker, type MentionPick } from '../components/MentionPicker';
 import { CONTEXT_MARK, citationsIn, fileMeta, humanSize, kindOf, quoteBlock, rawUrl, saveFile, uploadFile, type Cite, type FileMeta } from '../lib/files';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { PullModel } from '../components/PullModel';
 import { PersonaPanel, useWorkspaces, type PanelAgent } from '../components/PersonaPanel';
 import { PersonaChip, WorkspaceChip, greetingFor, startersFor } from '../components/ChatChips';
 import { parseSources, toolSummary } from '@local-agent/shared';
@@ -561,7 +562,7 @@ export function Chat() {
               {persona ? <Face agent={persona} size={64} /> : <CuteArt />}
               <h2>{persona ? greetingFor(persona) : 'Create a persona to start.'}</h2>
               {modelsLoaded && usable.empty
-                ? <p className="muted">No model yet. <Link to="/setup">Set one up</Link>: pull a model in Ollama and press Scan, or add a Gemini key.</p>
+                ? <div className="no-model"><p className="muted">No model yet. Pull a local one here, or <Link to="/setup">set one up</Link> (Ollama or a Gemini key).</p>{canManage && <PullModel onDone={() => void modelState.refresh()} />}</div>
                 : <div className="starters">
                     {startersFor(persona, mode === 'code').map((prompt) => (
                       <button key={prompt} className="starter" onClick={() => { setDraft(prompt); input.current?.focus(); }}>{prompt}</button>
@@ -606,7 +607,7 @@ export function Chat() {
             const cites = citationsIn(visible || '').filter((cite) => cite.kind === 'file');
             return (
             <article key={message.id} id={`m-${message.id}`} data-mid={message.id} title={message.createdAt ? new Date(message.createdAt).toLocaleString() : undefined} className={message.role === 'user' ? 'msg user' : fromAgent ? `msg from-agent${streak ? ' cont' : ''}` : 'msg'} style={fromAgent ? { ['--accent' as string]: speaker.accent || '#e4b56a' } : undefined}>
-              {fromAgent ? !streak && <div className="who"><Face agent={speaker} size={28} /><span className="meta">{speaker.emoji ? `${speaker.emoji} ` : ''}{speaker.name}</span></div> : message.role !== 'user' && <div className="meta"><span>{message.role}</span></div>}
+              {fromAgent ? !streak && <div className="who"><Face agent={speaker} size={28} /><span className="meta">{speaker.emoji ? `${speaker.emoji} ` : ''}{speaker.name}</span></div> : message.role !== 'user' && message.role !== 'assistant' && <div className="meta"><span>{message.role}</span></div>}
               {message.routingNote && <div className="switch">{message.routingNote}</div>}
               <div dir="auto"><Markdown text={visible || ''} sourceId={message.id} /></div>
               {attached && <details className="attached-note"><summary className="faint">Context sent with this message ({Math.round(attached.length / 1000)}k characters)</summary><pre className="mono tool-output">{attached.slice(0, 4000)}{attached.length > 4000 ? '\n…' : ''}</pre></details>}

@@ -60,12 +60,12 @@ export function QuotaCard() {
   if (!quota) return null;
   return (
     <div className="card" id="quota">
-      <div className="card-head"><h3>Shared Gemini quota</h3><span className="faint">today · set by the owner</span></div>
+      <div className="card-head"><h3>Gemini usage today</h3><span className="faint">limits set by the owner</span></div>
       {!quota.cloudAllowed && <p className="muted">Your account uses local models only. Ask the owner if you want Gemini.</p>}
-      {quota.cloudAllowed && !quota.keyed && <p className="muted">Gemini is not connected on this machine yet, so chats use local models.</p>}
+      {quota.cloudAllowed && !quota.keyed && <p className="muted">Gemini not connected. The owner can add a key in setup; until then chats use local models.</p>}
       {quota.cloudAllowed && quota.keyed && quota.models.map((model) => (
         <div key={model.apiName} style={{ margin: '10px 0' }}>
-          <div className="row" style={{ justifyContent: 'space-between' }}><span>{model.name}</span><span className="faint">{model.rpdRemaining} of {model.rpdLimit} left</span></div>
+          <div className="row" style={{ justifyContent: 'space-between' }}><span>{model.name}</span><span className="faint">{model.rpdRemaining} of {model.rpdLimit} requests left (daily limit)</span></div>
           <div className="quota-bar"><span style={{ width: `${model.rpdLimit ? Math.max(0, Math.min(100, (model.rpdRemaining / model.rpdLimit) * 100)) : 0}%` }} /></div>
         </div>
       ))}

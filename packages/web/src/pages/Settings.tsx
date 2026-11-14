@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api, post } from '../lib/api';
 import { toast } from '../lib/toast';
 import { Appearance } from '../components/Appearance';
 import { AccountCard, People, QuotaCard } from '../components/People';
 import { ImageRole } from '../components/ImageRole';
 import { EmptyState, PageHeader, useHashTab } from '../components/ui';
+import { useUsableModels } from '../lib/models';
 import { Activity, Archive, Bug, Globe, KeyRound, Palette, ScrollText, ShieldCheck, Users, type LucideIcon } from 'lucide-react';
 
 interface Secret { id: string; name: string; handle: string; scope: string; revokedAt: string | null }
@@ -29,6 +31,18 @@ const TABS: { group: string; items: { id: string; label: string; icon: LucideIco
   ] },
 ];
 const TAB_IDS = TABS.flatMap((group) => group.items.map((item) => item.id));
+/** Extra words each section answers to in the settings search. */
+const KEYWORDS: Record<string, string> = {
+  appearance: 'theme dark light font wallpaper color bubbles density accent', people: 'members accounts users invite password quota',
+  health: 'ollama docker searxng ram memory status doctor', policy: 'approvals read-only kill switch tokens caps limits safety emergency',
+  vault: 'keys api gemini openrouter secrets token password', backups: 'snapshot restore export data',
+  audit: 'history log changes', debug: 'logs inspector replay tool test diagnostics', remote: 'tailscale phone lan network access',
+};
+const ELSEWHERE = [
+  { to: '/models', label: 'Models', words: 'models ollama gemini pull refresh scan limits quota image' },
+  { to: '/agents', label: 'Personas', words: 'personas agents prompt instructions tools skills face' },
+  { to: '/workspace', label: 'Workspaces', words: 'workspaces folders repos git clone sets' },
+];
 
 export function Settings({ role = 'owner' }: { role?: 'owner' | 'member' }) {
   if (role === 'member') {
@@ -55,6 +69,11 @@ function OwnerSettings() {
   const [revealed, setRevealed] = useState<{ id: string; value: string } | null>(null);
   const [revealing, setRevealing] = useState<string | null>(null);
   const [tab, setTab] = useHashTab(TAB_IDS, 'appearance');
+  const [find, setFind] = useState('');
+  const navigate = useNavigate();
+  const match = (text: string) => !find.trim() || find.trim().toLowerCase().split(/\s+/).every((word) => text.toLowerCase().includes(word));
+  const visible = TABS.map((group) => ({ ...group, items: group.items.filter((item) => match(`${item.label} ${item.blurb} ${KEYWORDS[item.id] || ''}`)) })).filter((group) => group.items.length);
+  const elsewhere = ELSEWHERE.filter((item) => find.trim() && match(`${item.label} ${item.words}`));
   const current = TABS.flatMap((group) => group.items).find((item) => item.id === tab)!;
   const [clis, setClis] = useState<string[]>([]);
   const [logs, setLogs] = useState<{ id: number; level: string; component: string; message: string; createdAt: string }[]>([]);
@@ -65,6 +84,7 @@ function OwnerSettings() {
   const [toolTests, setToolTests] = useState<{ tool: string; query: string; ok: boolean; ms: number; output: string; error?: string }[]>([]);
   const [runId, setRunId] = useState('');
   const [inspection, setInspection] = useState('');
+  const devModels = useUsableModels().models.dev.length > 0;
 
   async function load() {
     const data = await api<{ settings: SettingsShape; vault: Secret[]; audit: Audit[]; clis: string[] }>('/api/settings');
@@ -95,7 +115,10 @@ function OwnerSettings() {
           setTab(next);
           setTimeout(() => document.getElementById(`tab-${next}`)?.focus(), 0);
         }}>
-          {TABS.map((group) => (
+          <input type="search" className="settings-find" placeholder="Search settings" aria-label="Search settings" value={find} onChange={(event) => setFind(event.target.value)}
+            onKeyDown={(event) => { if (event.key === 'Enter') { const first = visible[0]?.items[0]; if (first) setTab(first.id); else if (elsewhere[0]) navigate(elsewhere[0].to); } if (event.key === 'Escape') setFind(''); event.stopPropagation(); }} />
+          {visible.length === 0 && elsewhere.length === 0 && <p className="faint settings-none">Nothing matches “{find}”.</p>}
+          {visible.map((group) => (
             <div key={group.group} role="presentation">
               <span className="nav-heading">{group.group}</span>
               {group.items.map((item) => (
@@ -105,6 +128,7 @@ function OwnerSettings() {
               ))}
             </div>
           ))}
+          {elsewhere.length > 0 && <div role="presentation"><span className="nav-heading">Other pages</span>{elsewhere.map((item) => <button key={item.to} type="button" onClick={() => navigate(item.to)}>{item.label} →</button>)}</div>}
         </nav>
         <div className="settings-body" id="settings-panel" role="tabpanel" aria-labelledby={`tab-${tab}`}>
           <h2>{current.label}</h2>
@@ -219,7 +243,7 @@ function OwnerSettings() {
         <div className="row">
           <input aria-label="Run id" value={runId} placeholder="run id" onChange={(event) => setRunId(event.target.value)} />
           <button className="btn" type="button" onClick={async () => setInspection(JSON.stringify(await api(`/api/debug/runs/${runId}`), null, 2))}>Inspect</button>
-          <button className="btn" type="button" onClick={async () => { const data = await post<{ run: { id: string } }>(`/api/debug/runs/${runId}/replay`); setInspection(`Replayed as ${data.run.id}`); }}>Replay on rehearsal</button>
+          {devModels && <button className="btn" type="button" onClick={async () => { try { const data = await post<{ run: { id: string } }>(`/api/debug/runs/${runId}/replay`); setInspection(`Replayed as ${data.run.id}`); } catch (error) { toast((error as Error).message, 'error'); } }}>Replay (dev)</button>}
         </div>
         {inspection && <pre className="command">{inspection.slice(0, 8000)}</pre>}
         <h3>Tool test</h3>

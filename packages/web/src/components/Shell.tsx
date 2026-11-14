@@ -15,7 +15,7 @@ const GROUPS: { title: string; items: NavItem[] }[] = [
   { title: 'Work', items: [
     { to: '/', label: 'Chats', icon: MessageSquare, hint: 'Talk to your agents' },
     { to: '/agents', label: 'Agents', icon: Users, hint: 'Personas, faces and voices' },
-    { to: '/workspace', label: 'Workspace', icon: GitBranch, hint: 'Folders, repos and git' },
+    { to: '/workspace', label: 'Workspaces', icon: GitBranch, hint: 'Folders, repos and git' },
     { to: '/library', label: 'Library', icon: BookOpen, hint: 'Knowledge and files' },
   ] },
   { title: 'Automation', items: [

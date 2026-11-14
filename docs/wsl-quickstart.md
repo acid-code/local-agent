@@ -11,7 +11,7 @@ Ubuntu on WSL2, one small Ollama model, the console in the Windows browser, and 
 
    From Windows PowerShell run `wsl --shutdown`, then open Ubuntu again.
 
-2. Install git and clone the repo. The server script installs git later, but clone needs it first:
+2. Install git and clone the repo. The repo is public, so the clone needs no GitHub login or token. The server script installs git later, but clone needs it first:
 
    ```bash
    sudo apt-get update
@@ -26,13 +26,19 @@ Ubuntu on WSL2, one small Ollama model, the console in the Windows browser, and 
    sudo bash scripts/install-server.sh --native --with-ollama
    ```
 
-   `--native` installs Node 22 when `node` is missing, runs `npm install` and `npm run build` in `/opt/local-agent`, and runs the app with Node under systemd. `--with-ollama` installs Ollama when `ollama` is missing. When Ollama is installed or that flag is set, the script writes `/etc/systemd/system/ollama.service.d/context.conf` with `OLLAMA_CONTEXT_LENGTH=32768`. It also installs Docker, the Compose plugin, git, and Mesa Vulkan when those packages are missing. The script adds your user to the `docker` group. This quickstart uses the Node service, so pull the model and open the console in this same terminal. A later `docker` command sees that group after a new WSL session (`wsl --shutdown` in PowerShell, then open Ubuntu again).
+   `--native` installs Node 22 when `node` is missing or older than 22.13 (it upgrades an old Node in place from NodeSource), runs `npm install` and `npm run build` in `/opt/local-agent`, and runs the app with Node under systemd. `--with-ollama` installs Ollama when `ollama` is missing, after installing `zstd`, which the Ollama installer needs to unpack. When Ollama is installed or that flag is set, the script writes `/etc/systemd/system/ollama.service.d/context.conf` with `OLLAMA_CONTEXT_LENGTH=32768`. It also installs Docker, the Compose plugin, git, and Mesa Vulkan when those packages are missing. The script adds your user to the `docker` group. This quickstart uses the Node service, so pull the model and open the console in this same terminal. A later `docker` command sees that group after a new WSL session (`wsl --shutdown` in PowerShell, then open Ubuntu again).
 
    It copies the tree to `/opt/local-agent` and writes `/opt/local-agent/.env` with `LA_HOST=0.0.0.0`, `LA_PORT=8787`, `DATA_DIR=/opt/local-agent/data`, `LA_COOKIE_SECRET`, and `OLLAMA_CONTEXT_LENGTH=32768`. The console listens on port 8787. The setup site listens on 8788 (`LA_SETUP_PORT` when set; 8788 is the default) and only on loopback and private LAN addresses.
 
    `systemctl is-active local-agent` prints `active` when the unit is up.
 
-   The script prints `Setup token (one time):`. The service also prints `Setup token (one time, LAN only):` once, in `journalctl -u local-agent --no-pager`. If both scrolled away before an owner exists:
+   The script prints `Setup token (one time):`. The service also prints `Setup token (one time, LAN only):` once in its journal. To read it again:
+
+   ```bash
+   sudo journalctl -u local-agent --no-pager | grep 'Setup token' | tail -1
+   ```
+
+   If it is gone and no owner exists yet:
 
    ```bash
    cd /opt/local-agent
@@ -49,11 +55,11 @@ Ubuntu on WSL2, one small Ollama model, the console in the Windows browser, and 
 
 5. On Windows, open `http://127.0.0.1:8788`. WSL forwards localhost, so the Windows browser reaches the setup site. Paste the token. The username is 1–32 characters from `a-z`, `A-Z`, `0-9`, `.`, `_`, and `-`. The password is at least 8 characters and must not be the token. Submit **Create owner**. Do this on port 8788 before using the console, so this page is the one that creates the account.
 
-6. The next screen is Local models. Click **Scan**. It calls `POST /api/setup/detect`, which probes `http://127.0.0.1:11434`. The box should list the Ollama URL and `qwen3:0.6b`. Click **Cloud keys**. Leave the Gemini and OpenRouter fields empty and click **Notifications**. Saving a Gemini key writes `GEMINI_API_KEY` and enables the Gemini provider. Leave Telegram and IMAP empty and click **Backups**, then **Defaults**.
+6. The next screen is Local models. Click **Scan**. It calls `POST /api/setup/detect`, which probes `http://127.0.0.1:11434`. A green line confirms Ollama and how many models it found, the box lists the Ollama URL and `qwen3:0.6b`, and the button below turns into **Next: cloud keys**. Click it. Leave the Gemini and OpenRouter fields empty and click **Notifications**. Saving a Gemini key writes `GEMINI_API_KEY` and enables the Gemini provider. Leave Telegram and IMAP empty and click **Backups**, then **Defaults**.
 
 7. On Defaults, set Fast, Main, Coder, Thinking, and Smart / cloud to `qwen3:0.6b`. Leave Embed as `nomic-embed-text`. Embed is the knowledge-base model, not a chat role; search uses a local hash until that model is pulled. Click **Save defaults**. That sends `PATCH /api/setup/defaults` with `autoFast`, `autoMain`, `autoCoder`, `autoThinking`, and `autoCloud`.
 
-8. Each start sets provider `prov_gemini` to enabled when `GEMINI_API_KEY` is in the environment or `data/secrets.env`, and to disabled when it is absent. Leaving that key blank is what keeps Gemini off after a restart. Smart / cloud set to `qwen3:0.6b` resolves that role to the local model. Port 8787 has its own `la_session` cookie; the setup cookie belongs to port 8788. To turn the provider off in the running process:
+8. Each start sets provider `prov_gemini` to enabled when `GEMINI_API_KEY` is in the environment or `data/secrets.env`, and to disabled when it is absent. Leaving that key blank is what keeps Gemini off after a restart. Smart / cloud set to `qwen3:0.6b` resolves that role to the local model. To turn the provider off in the running process:
 
    ```bash
    curl -sS -c /tmp/la.cookies -H 'content-type: application/json' \
@@ -66,7 +72,7 @@ Ubuntu on WSL2, one small Ollama model, the console in the Windows browser, and 
 
    The next start applies the key again.
 
-9. Open `http://127.0.0.1:8787` in the Windows browser and sign in with the owner password. The session cookie is `la_session` for that origin.
+9. Open `http://127.0.0.1:8787` in the Windows browser. You are already signed in: browsers share cookies across ports on the same host, so the `la_session` cookie from creating the owner on `127.0.0.1:8788` also works on `127.0.0.1:8787`. (Use the same host name on both ports; `localhost` and `127.0.0.1` are different hosts to the browser.) Otherwise sign in with the owner password.
 
 10. The Windows shell is unsigned. SmartScreen shows **More info**, then **Run anyway**. On first launch, enter the server URL. The app remembers it and loads that origin in its own window, with the same cookie login as the browser. Change the URL later from the **Server** menu. On this laptop the URL is `http://127.0.0.1:8787`. The portable file is `local-agent-portable.exe`. The NSIS installer is `local-agent-setup.exe`.
 
@@ -93,3 +99,11 @@ Ubuntu on WSL2, one small Ollama model, the console in the Windows browser, and 
     ```
 
     Use the firewall rule from the previous step. After a reboot the WSL address can change; run the two `netsh` commands again with the new address. The Windows browser can still use `http://127.0.0.1:8787`. The phone and the exe use the Wi-Fi address from `ipconfig`.
+
+13. To reach the console from anywhere with Tailscale (no router ports opened):
+
+    - Use mirrored networking (`networkingMode=mirrored` in `%UserProfile%\.wslconfig`, step 11), so WSL shares the Windows network stack and the Tailscale interface.
+    - Install Tailscale on Windows (or run `sudo bash scripts/install-server.sh --native --with-tailscale` inside Ubuntu, then `sudo tailscale up`). Sign in on your phone or other PC with the same Tailscale account.
+    - Allow port 8787 through the Windows firewall (the `New-NetFirewallRule` command in step 11 covers it).
+    - `tailscale ip -4` prints this machine's `100.x.y.z` address. On the phone or the exe, use `http://100.x.y.z:8787`.
+    - The setup site on 8788 stays LAN-only: it refuses Tailscale (`100.64.0.0/10`) and public clients, so finish setup from this laptop or the same Wi-Fi first.

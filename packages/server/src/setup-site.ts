@@ -472,10 +472,25 @@ const PAGE = `<!doctype html>
     }
     async function models() {
       step = 1;
-      show('<div class="card"><h2>Local models</h2><p>Scan this machine for Ollama. Nothing is pulled until you use the main setup checklist.</p><button id="scan">Scan</button><pre id="out"></pre><button id="next" class="ghost">Cloud keys</button></div>');
+      show('<div class="card"><h2>Local models</h2><p>Scan this machine for Ollama. Nothing is pulled until you use the main setup checklist.</p><button id="scan">Scan</button><p id="status" role="status"></p><pre id="out"></pre><button id="next" class="ghost">Skip to cloud keys</button></div>');
       document.querySelector('#scan').onclick = async () => {
-        const data = await api('/api/setup/detect', { method: 'POST', body: '{}' });
-        document.querySelector('#out').textContent = data.ollama ? (data.ollama + '\\n' + (data.models.join('\\n') || '(no models yet)')) : 'No Ollama answered on this machine.';
+        const scanBtn = document.querySelector('#scan'); const status = document.querySelector('#status'); const next = document.querySelector('#next');
+        scanBtn.disabled = true; scanBtn.textContent = 'Scanning…'; status.className = ''; status.textContent = '';
+        try {
+          const data = await api('/api/setup/detect', { method: 'POST', body: '{}' });
+          document.querySelector('#out').textContent = data.ollama ? (data.ollama + '\n' + (data.models.join('\n') || '(no models yet)')) : '';
+          if (data.ollama && data.models.length) {
+            status.className = 'ok'; status.textContent = '✓ Found Ollama with ' + data.models.length + ' model' + (data.models.length === 1 ? '' : 's') + '. You are ready for the next step.';
+            next.className = ''; next.textContent = 'Next: cloud keys'; next.focus();
+          } else if (data.ollama) {
+            status.className = 'warn'; status.textContent = 'Ollama answered but has no models yet. Run "ollama pull gemma4:e4b", then Scan again, or continue with a cloud key.';
+            next.textContent = 'Continue to cloud keys';
+          } else {
+            status.className = 'warn'; status.textContent = 'No Ollama answered on this machine. Install it (see the quickstart), or continue with a cloud key.';
+            next.textContent = 'Continue to cloud keys';
+          }
+        } catch (error) { status.className = 'warn'; status.textContent = error.message; }
+        finally { scanBtn.disabled = false; scanBtn.textContent = 'Scan again'; }
       };
       document.querySelector('#next').onclick = () => keys();
     }

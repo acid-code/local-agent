@@ -997,3 +997,17 @@ input[type="range"], input[type="checkbox"], input[type="radio"], progress { acc
   :root:not([data-flat="off"]) .msg.user { max-width: 88%; }
 }
 @media (prefers-reduced-motion: reduce) { .side-panel { animation: none; } }
+.pull-model { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.pull-model input { background: var(--bg); border: 1px solid var(--line-strong); border-radius: calc(8px * var(--round)); padding: 6px 10px; min-width: 180px; font-family: var(--mono); font-size: var(--t-meta); }
+.pull-line { max-width: 320px; font-size: calc(12px * var(--fs)); }
+details.more { margin-top: 12px; }
+details.more summary { cursor: pointer; color: var(--muted); font-size: var(--t-meta); margin-bottom: 8px; }
+table.limits { width: 100%; border-collapse: collapse; font-size: var(--t-meta); font-variant-numeric: tabular-nums; }
+table.limits caption { text-align: left; caption-side: bottom; padding-top: 8px; font-size: calc(12px * var(--fs)); }
+table.limits th, table.limits td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); font-weight: 400; }
+table.limits thead th { color: var(--faint); font-weight: 500; font-size: calc(12px * var(--fs)); }
+table.limits tbody th { color: var(--text); font-weight: 500; }
+@media (max-width: 720px) { table.limits thead { display: none; } table.limits tr { display: grid; grid-template-columns: 1fr 1fr; padding: 8px 0; border-bottom: 1px solid var(--line); } table.limits th, table.limits td { border: 0; padding: 2px 0; } table.limits tbody th { grid-column: 1 / -1; } }
+.no-model { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.test-result { font-size: calc(12px * var(--fs)); max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .test-result.ok { color: var(--moss); } .test-result.bad { color: var(--coral); }
+.settings-find { width: 100%; margin-bottom: 8px; background: var(--bg-2); border: 1px solid transparent; border-radius: calc(8px * var(--round)); padding: 6px 10px; font-size: var(--t-meta); } .settings-find:focus { border-color: var(--line-strong); outline: none; } .settings-none { font-size: var(--t-meta); padding: 0 8px; }
