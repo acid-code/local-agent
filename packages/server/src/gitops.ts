@@ -39,8 +39,9 @@ export interface GitStatus {
 }
 
 export async function gitStatus(cwd: string): Promise<GitStatus> {
-  const inside = await git(cwd, ['rev-parse', '--is-inside-work-tree']);
-  if (!ok(inside) || body(inside).trim() !== 'true') return { isRepo: false, branch: null, upstream: null, ahead: 0, behind: 0, remote: null, files: [], log: [], branches: [] };
+  // Only the root's own repo counts: a plain folder that happens to sit inside another checkout is not a repo.
+  const inside = fs.existsSync(path.join(cwd, '.git')) ? await git(cwd, ['rev-parse', '--is-inside-work-tree']) : '';
+  if (!inside || !ok(inside) || body(inside).trim() !== 'true') return { isRepo: false, branch: null, upstream: null, ahead: 0, behind: 0, remote: null, files: [], log: [], branches: [] };
   const raw = body(await git(cwd, ['status', '--porcelain=v1', '--branch', '-uall']));
   const lines = raw.split('\n').filter(Boolean);
   const head = lines[0]?.startsWith('## ') ? lines.shift()!.slice(3) : '';

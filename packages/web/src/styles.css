@@ -1100,3 +1100,5 @@ table.limits tbody th { color: var(--text); font-weight: 500; }
   .settings-nav a { white-space: nowrap; min-height: 40px; }
   .settings-find { min-width: 150px; margin: 0; }
 }
+.ws-pill-label { max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-pill-open .mono { max-width: 14ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

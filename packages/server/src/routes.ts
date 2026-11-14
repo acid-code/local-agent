@@ -462,6 +462,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const root = rootFor(req, (req.params as { root: string }).root);
     const file = String((req.query as { path?: string }).path || '');
     if (file && (file.startsWith('-') || !isInside(root.path, path.resolve(root.path, file)))) throw http(400, 'Bad path.');
+    if (!fs.existsSync(path.join(root.path, '.git'))) return { diff: '' };
     const staged = await git(root.path, ['diff', '--cached', '--', file || '.']);
     const work = await git(root.path, ['diff', '--', file || '.']);
     let untracked = '';
