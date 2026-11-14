@@ -137,13 +137,14 @@ export function locatePath(input: {
 }
 
 export function projectPath(roots: { label: string; path: string }[], project: string | undefined, workspace: string): string {
+  if (project === 'workspace') return workspace;
   if (project) {
     const hit = roots.find((root) => root.label === project || path.resolve(root.path) === path.resolve(project));
-    if (!hit) throw new Error(`Unknown project "${project}". Use ${roots.map((root) => root.label).join(', ') || 'the workspace'}.`);
+    if (!hit) throw new Error(`Unknown project "${project}". Use ${[...roots.map((root) => root.label), 'workspace'].join(', ')}.`);
     return hit.path;
   }
   if (roots.length === 1) return roots[0]!.path;
-  if (roots.length > 1) throw new Error(`Name the project: ${roots.map((root) => root.label).join(', ')}.`);
+  if (roots.length > 1) throw new Error(`Name the project: ${[...roots.map((root) => root.label), 'workspace'].join(', ')}.`);
   return workspace;
 }
 

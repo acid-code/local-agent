@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { ensureFilesTable } from './files.js';
 import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
 import fastifyStatic from '@fastify/static';
@@ -48,6 +49,7 @@ export async function buildApp(options: {
   const config = loadConfig({ dataDir: options.dataDir, port: options.port });
   const store = new Store(path.join(config.dataDir, 'local-agent.db'));
   seedCatalog(store, config.dataDir);
+  ensureFilesTable(store);
   const bus = new Bus();
   const docker = options.docker ?? new DockerCtl();
   const vectors = new VectorIndex(store.db);

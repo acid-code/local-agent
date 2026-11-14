@@ -4,6 +4,7 @@ import path from 'node:path';
 import { isInside } from '@local-agent/shared';
 import { locatePath, projectPath, type PathHit } from './workshops.js';
 import { addProjectNote, explainPull, git, pushApproval, tryLockRepo } from './repos.js';
+import { openPullRequest, validBranch } from './gitops.js';
 import type { Store } from './db.js';
 import type { Tool, ToolContext } from './tools.js';
 import { nid, now } from './util.js';
@@ -209,13 +210,14 @@ export const CODING_TOOLS: Tool[] = [
   },
   {
     name: 'git',
-    description: 'Git in one shared project: status, diff, fetch, branch, commit, pull (fast-forward only), push, force-push, revert. Pass project when several are open. Pull, push, force-push, and revert wait for approval. A push to main or a force-push says so in the approval.',
-    parameters: obj({ action: { type: 'string' }, project: { type: 'string' }, name: { type: 'string' }, message: { type: 'string' } }, ['action']),
-    mutates: (args) => !['status', 'diff', 'fetch'].includes(String(args.action)),
+    description: 'Git in one shared project or your own workspace (project "workspace"): status, diff, log, fetch, branch, checkout, commit, pull (fast-forward only), push, force-push, revert, open_pr (GitHub, needs a saved GITHUB_TOKEN; pass title, body, base). Pass project when several are open. Pull, push, force-push, revert, and open_pr wait for approval. A push to main or a force-push says so in the approval.',
+    parameters: obj({ action: { type: 'string' }, project: { type: 'string' }, name: { type: 'string' }, message: { type: 'string' }, title: { type: 'string' }, body: { type: 'string' }, base: { type: 'string' } }, ['action']),
+    mutates: (args) => !['status', 'diff', 'log', 'fetch'].includes(String(args.action)),
     approval: (args, ctx) => {
       const action = String(args.action || '');
       if (action === 'revert') return `Git revert${args.project ? ` in ${args.project}` : ''}`;
       if (action === 'pull') return `Pull ${args.project || 'the project'} (fast-forward only)`;
+      if (action === 'open_pr') return `Open a GitHub pull request${args.title ? `: ${String(args.title).slice(0, 80)}` : ''} into ${args.base || 'main'}`;
       if (action === 'push' || action === 'force-push') {
         try {
           const cwd = projectPath(ctx?.roots ?? [], args.project ? String(args.project) : undefined, ctx?.workspace || '.');
@@ -239,14 +241,25 @@ export const CODING_TOOLS: Tool[] = [
       }
       const cwd = projectPath(roots, named, ctx.workspace);
       const label = roots.find((root) => root.path === cwd)?.label;
-      if (label && !['status', 'diff', 'fetch'].includes(action)) {
+      if (label && !['status', 'diff', 'log', 'fetch'].includes(action)) {
         const lock = tryLockRepo(ctx.store, label, ctx.runId || 'manual', ctx.agent.id);
         if (!lock.ok) throw new Error(`${label} is being edited by ${lock.holder}. You can still read it.`);
       }
       if (action === 'status') return git(cwd, ['status', '--short', '--branch'], identity);
       if (action === 'diff') return git(cwd, ['diff', '--', '.'], identity);
       if (action === 'fetch') return git(cwd, ['fetch'], identity);
-      if (action === 'branch') return git(cwd, ['checkout', '-b', String(args.name || '').trim() || 'agent/task'], identity);
+      if (action === 'log') return git(cwd, ['log', '-15', '--oneline', '--decorate'], identity);
+      if (action === 'branch' || action === 'checkout') {
+        const name = String(args.name || '').trim() || (action === 'branch' ? 'agent/task' : '');
+        if (!validBranch(name)) throw new Error('Branch names look like agent/fix-login.');
+        return git(cwd, action === 'branch' ? ['checkout', '-b', name] : ['checkout', name], identity);
+      }
+      if (action === 'open_pr') {
+        return onceEffect(ctx, action, async () => {
+          const pr = await openPullRequest(cwd, identity?.token ?? null, ctx.fetchImpl, { title: String(args.title || args.message || 'Changes from local-agent'), body: args.body ? String(args.body) : '', base: args.base ? String(args.base) : undefined });
+          return `Opened PR #${pr.number}: ${pr.url}`;
+        });
+      }
       if (action === 'commit') {
         return onceEffect(ctx, action, async () => {
           await git(cwd, ['add', '-A'], identity);

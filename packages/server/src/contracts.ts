@@ -43,10 +43,13 @@ const toolSchemas: Record<string, z.ZodTypeAny> = {
     z.object({ itemId: z.string().min(1), status: z.string().optional(), text: z.string().optional() }),
   ]),
   git: z.object({
-    action: z.enum(['status', 'diff', 'fetch', 'branch', 'commit', 'pull', 'push', 'force-push', 'revert']),
+    action: z.enum(['status', 'diff', 'log', 'fetch', 'branch', 'checkout', 'commit', 'pull', 'push', 'force-push', 'revert', 'open_pr']),
     project: z.string().optional(),
     name: z.string().optional(),
     message: z.string().optional(),
+    title: z.string().optional(),
+    body: z.string().optional(),
+    base: z.string().optional(),
   }),
   consult_agent: z.object({ agent: z.string().min(1), question: z.string().min(1) }),
   apply_patch: z.object({

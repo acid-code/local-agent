@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
-import { Activity, BookOpen, Box, CalendarClock, Cpu, Gauge, ListChecks, LogOut, Menu, MessageSquare, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Radio, Settings, Sparkles, Users, Wrench, X } from 'lucide-react';
+import { Activity, GitBranch, BookOpen, Box, CalendarClock, Cpu, Gauge, ListChecks, LogOut, Menu, MessageSquare, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Radio, Settings, Sparkles, Users, Wrench, X } from 'lucide-react';
 import { Toaster } from './Toaster';
 import { api, post } from '../lib/api';
 import { Face, type FaceAgent } from './Face';
@@ -8,6 +8,7 @@ import { Face, type FaceAgent } from './Face';
 const LINKS = [
   ['/', 'Chats', MessageSquare],
   ['/agents', 'Agents', Users],
+  ['/workspace', 'Workspace', GitBranch],
   ['/runs', 'Runs', Activity],
   ['/tools', 'Tools', Wrench],
   ['/models', 'Models', Cpu],
