@@ -22,12 +22,12 @@ export interface Agent {
   routing: 'auto' | 'pinned'; strategy: StrategyName | null; toolAllowlist: string[]; memoryEnabled: boolean;
   workspacePath: string; avatarKind: 'initials' | 'builtin' | 'upload'; avatarRef: string; accent: string; emoji: string;
   pinned: boolean; hidden: boolean; sortOrder: number; lastReadAt: string | null; unread: number; workshopIds: string[];
-  createdAt: string; updatedAt: string;
+  createdAt: string; updatedAt: string; ownerId: string;
 }
 export interface Room { id: string; name: string; createdAt: string; agentIds: string[] }
 export interface Session {
   id: string; agentId: string | null; roomId: string | null; title: string; summary: string;
-  activeModelId: string | null; modelPin: string | null; archived: boolean; mode: 'chat' | 'code'; workshopId: string | null; createdAt: string; updatedAt: string;
+  activeModelId: string | null; modelPin: string | null; archived: boolean; mode: 'chat' | 'code'; workshopId: string | null; createdAt: string; updatedAt: string; ownerId: string;
 }
 export interface Message {
   id: string; sessionId: string; seq: number; role: string; content: string; toolCallId: string | null;
@@ -254,6 +254,20 @@ export class Store {
         PRIMARY KEY (repo_label, agent_id)
       );
     `);
+    // Accounts: the owner plus optional members. Every user-owned row carries owner_id ('owner' for the owner).
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS members (
+        id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, password_hash TEXT NOT NULL,
+        limits TEXT NOT NULL DEFAULT '{}', disabled INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS account_prefs (account_id TEXT PRIMARY KEY, theme TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL);
+    `);
+    for (const table of ['agents', 'chat_sessions', 'rooms', 'kb_collections', 'workshops', 'shared_repos', 'schedules', 'triggers', 'auth_sessions']) {
+      const cols = this.many<Raw>(`PRAGMA table_info(${table})`).map((row) => String(row.name));
+      const col = table === 'auth_sessions' ? 'account_id' : 'owner_id';
+      if (cols.length && !cols.includes(col)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} TEXT NOT NULL DEFAULT 'owner'`);
+    }
+    this.db.exec('CREATE INDEX IF NOT EXISTS sessions_owner ON chat_sessions(owner_id, archived, updated_at)');
     if (!this.one('SELECT id FROM settings WHERE id = 1')) {
       this.db.prepare('INSERT INTO settings (id, json, version, updated_at) VALUES (1, ?, 1, ?)').run(JSON.stringify(DEFAULT_SETTINGS), now());
     }
@@ -315,13 +329,13 @@ export class Store {
     return row ? { result: row.result } : null;
   }
 
-  createAuthSession(id: string, expiresAt: string) {
-    this.db.prepare('INSERT INTO auth_sessions (id, created_at, expires_at) VALUES (?, ?, ?)').run(id, now(), expiresAt);
+  createAuthSession(id: string, expiresAt: string, accountId = 'owner') {
+    this.db.prepare('INSERT INTO auth_sessions (id, created_at, expires_at, account_id) VALUES (?, ?, ?, ?)').run(id, now(), expiresAt, accountId);
   }
 
   getAuthSession(id: string) {
-    const row = this.one<Raw>('SELECT id, expires_at FROM auth_sessions WHERE id = ?', id);
-    return row ? { id: String(row.id), expiresAt: String(row.expires_at) } : null;
+    const row = this.one<Raw>('SELECT id, expires_at, account_id FROM auth_sessions WHERE id = ?', id);
+    return row ? { id: String(row.id), expiresAt: String(row.expires_at), accountId: String(row.account_id || 'owner') } : null;
   }
 
   deleteAuthSession(id: string) {
@@ -454,15 +468,15 @@ export class Store {
     return row ? mapModel(row) : null;
   }
 
-  createAgent(input: { name: string; description?: string; systemPrompt: string; modelId?: string | null; routing?: 'auto' | 'pinned'; strategy?: StrategyName | null; toolAllowlist: string[]; memoryEnabled?: boolean; workspacePath: string }): Agent {
+  createAgent(input: { name: string; description?: string; systemPrompt: string; modelId?: string | null; routing?: 'auto' | 'pinned'; strategy?: StrategyName | null; toolAllowlist: string[]; memoryEnabled?: boolean; workspacePath: string; ownerId?: string }): Agent {
     const id = nid('agt');
     let slug = slugify(input.name);
     if (this.one('SELECT id FROM agents WHERE slug = ?', slug)) slug = `${slug}-${id.slice(-4)}`;
     const ts = now();
-    this.db.prepare(`INSERT INTO agents (id, name, slug, description, system_prompt, model_id, routing, strategy, tool_allowlist, memory_enabled, workspace_path, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    this.db.prepare(`INSERT INTO agents (id, name, slug, description, system_prompt, model_id, routing, strategy, tool_allowlist, memory_enabled, workspace_path, created_at, updated_at, owner_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       id, input.name, slug, input.description ?? '', input.systemPrompt, input.modelId ?? null, input.routing ?? 'auto', input.strategy ?? null,
-      JSON.stringify(input.toolAllowlist), input.memoryEnabled === false ? 0 : 1, input.workspacePath, ts, ts,
+      JSON.stringify(input.toolAllowlist), input.memoryEnabled === false ? 0 : 1, input.workspacePath, ts, ts, input.ownerId ?? 'owner',
     );
     return this.getAgent(id)!;
   }
@@ -493,7 +507,9 @@ export class Store {
     this.db.prepare('UPDATE agents SET last_read_at = ? WHERE id = ?').run(now(), id);
   }
 
-  listAgents(): Agent[] {
+  /** Pass an account id to list only that account's personas. */
+  listAgents(ownerId?: string): Agent[] {
+    if (ownerId) return this.many<Raw>('SELECT * FROM agents WHERE owner_id = ? ORDER BY pinned DESC, sort_order ASC, name', ownerId).map((row) => this.hydrateAgent(row));
     return this.many<Raw>('SELECT * FROM agents ORDER BY pinned DESC, sort_order ASC, name').map((row) => this.hydrateAgent(row));
   }
 
@@ -513,8 +529,10 @@ export class Store {
     return row ? this.hydrateAgent(row) : null;
   }
 
-  getAgentByName(name: string): Agent | null {
-    const row = this.one<Raw>('SELECT * FROM agents WHERE lower(name) = lower(?) OR slug = ?', name, slugify(name));
+  getAgentByName(name: string, ownerId?: string): Agent | null {
+    const row = ownerId
+      ? this.one<Raw>('SELECT * FROM agents WHERE owner_id = ? AND (lower(name) = lower(?) OR slug = ?)', ownerId, name, slugify(name))
+      : this.one<Raw>('SELECT * FROM agents WHERE lower(name) = lower(?) OR slug = ?', name, slugify(name));
     return row ? this.hydrateAgent(row) : null;
   }
 
@@ -522,16 +540,17 @@ export class Store {
     this.db.prepare('DELETE FROM agents WHERE id = ?').run(id);
   }
 
-  createRoom(name: string, agentIds: string[]): Room {
+  createRoom(name: string, agentIds: string[], ownerId = 'owner'): Room {
     const id = nid('room');
     this.transaction(() => {
-      this.db.prepare('INSERT INTO rooms (id, name, created_at) VALUES (?, ?, ?)').run(id, name, now());
+      this.db.prepare('INSERT INTO rooms (id, name, created_at, owner_id) VALUES (?, ?, ?, ?)').run(id, name, now(), ownerId);
       for (const agentId of agentIds) this.db.prepare('INSERT INTO room_members (room_id, agent_id) VALUES (?, ?)').run(id, agentId);
     });
     return this.getRoom(id)!;
   }
 
-  listRooms(): Room[] {
+  listRooms(ownerId?: string): Room[] {
+    if (ownerId) return this.many<Raw>('SELECT * FROM rooms WHERE owner_id = ? ORDER BY created_at DESC', ownerId).map((row) => this.hydrateRoom(row));
     return this.many<Raw>('SELECT * FROM rooms ORDER BY created_at DESC').map((row) => this.hydrateRoom(row));
   }
 
@@ -545,26 +564,30 @@ export class Store {
     return { id: String(row.id), name: String(row.name), createdAt: String(row.created_at), agentIds: members.map((member) => String(member.agent_id)) };
   }
 
-  createSession(input: { agentId?: string | null; roomId?: string | null; title?: string }): Session {
+  createSession(input: { agentId?: string | null; roomId?: string | null; title?: string; ownerId?: string }): Session {
     const id = nid('ses');
     const ts = now();
-    this.db.prepare('INSERT INTO chat_sessions (id, agent_id, room_id, title, summary, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
-      id, input.agentId ?? null, input.roomId ?? null, input.title || 'New chat', '', ts, ts,
+    // A chat belongs to whoever owns its persona or room.
+    this.db.prepare(`INSERT INTO chat_sessions (id, agent_id, room_id, title, summary, created_at, updated_at, owner_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, (SELECT owner_id FROM agents WHERE id = ?), (SELECT owner_id FROM rooms WHERE id = ?), 'owner'))`).run(
+      id, input.agentId ?? null, input.roomId ?? null, input.title || 'New chat', '', ts, ts, input.ownerId ?? null, input.agentId ?? null, input.roomId ?? null,
     );
     return this.getSession(id)!;
   }
 
-  listSessions(): Session[] {
-    return this.pageSessions({ limit: 200 }).sessions;
+  listSessions(ownerId?: string): Session[] {
+    return this.pageSessions({ limit: 200, ownerId }).sessions;
   }
 
   /** Newest first. `cursor` is the nextCursor of the previous page. */
-  pageSessions(opts: { limit?: number; cursor?: string | null } = {}): { sessions: Session[]; nextCursor: string | null } {
+  pageSessions(opts: { limit?: number; cursor?: string | null; ownerId?: string } = {}): { sessions: Session[]; nextCursor: string | null } {
     const limit = Math.max(1, Math.min(500, Math.floor(opts.limit ?? 50)));
     const [updatedAt, id] = opts.cursor ? String(opts.cursor).split('|') : [];
+    const owner = opts.ownerId ? 'AND owner_id = ?' : '';
+    const ownerArg = opts.ownerId ? [opts.ownerId] : [];
     const rows = updatedAt && id
-      ? this.many<Raw>('SELECT * FROM chat_sessions WHERE archived = 0 AND (updated_at < ? OR (updated_at = ? AND id < ?)) ORDER BY updated_at DESC, id DESC LIMIT ?', updatedAt, updatedAt, id, limit + 1)
-      : this.many<Raw>('SELECT * FROM chat_sessions WHERE archived = 0 ORDER BY updated_at DESC, id DESC LIMIT ?', limit + 1);
+      ? this.many<Raw>(`SELECT * FROM chat_sessions WHERE archived = 0 ${owner} AND (updated_at < ? OR (updated_at = ? AND id < ?)) ORDER BY updated_at DESC, id DESC LIMIT ?`, ...ownerArg, updatedAt, updatedAt, id, limit + 1)
+      : this.many<Raw>(`SELECT * FROM chat_sessions WHERE archived = 0 ${owner} ORDER BY updated_at DESC, id DESC LIMIT ?`, ...ownerArg, limit + 1);
     const more = rows.length > limit;
     const page = rows.slice(0, limit);
     const last = page.at(-1);
@@ -1003,7 +1026,7 @@ function mapAgent(row: Raw): Agent {
     avatarKind: kind === 'builtin' || kind === 'upload' ? kind : 'initials', avatarRef: String(row.avatar_ref || ''), accent: String(row.accent || '#e4b56a'), emoji: String(row.emoji || ''),
     pinned: Boolean(row.pinned), hidden: Boolean(row.hidden), sortOrder: Number(row.sort_order || 0), lastReadAt: row.last_read_at ? String(row.last_read_at) : null,
     unread: 0, workshopIds: [],
-    createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+    createdAt: String(row.created_at), updatedAt: String(row.updated_at), ownerId: String(row.owner_id || 'owner'),
   };
 }
 
@@ -1013,6 +1036,7 @@ function mapSession(row: Raw): Session {
     title: String(row.title), summary: String(row.summary ?? ''), activeModelId: row.active_model_id ? String(row.active_model_id) : null,
     modelPin: row.model_pin ? String(row.model_pin) : null,
     archived: Boolean(row.archived), mode: row.mode === 'code' ? 'code' : 'chat', workshopId: row.workshop_id ? String(row.workshop_id) : null, createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+    ownerId: String(row.owner_id || 'owner'),
   };
 }
 

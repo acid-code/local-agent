@@ -9,11 +9,13 @@ import { nid, now } from './util.js';
 /** Somewhere git can run: an agent's workspace folder, or a shared repo / workshop project. */
 export interface GitRoot { id: string; label: string; path: string; kind: 'workspace' | 'project'; remote: string | null; workshops: string[] }
 
-export function listGitRoots(store: Store): GitRoot[] {
+/** The account's persona workspaces, plus shared projects for the owner. Members never see the owner's repos. */
+export function listGitRoots(store: Store, ownerId = 'owner'): GitRoot[] {
   const roots: GitRoot[] = [];
-  for (const agent of store.listAgents()) {
+  for (const agent of store.listAgents(ownerId)) {
     if (agent.workspacePath) roots.push({ id: `ws:${agent.id}`, label: `${agent.name} workspace`, path: agent.workspacePath, kind: 'workspace', remote: null, workshops: [] });
   }
+  if (ownerId !== 'owner') return roots;
   const shops = store.db.prepare('SELECT w.name, p.path FROM workshop_projects p JOIN workshops w ON w.id = p.workshop_id').all() as { name: string; path: string }[];
   for (const repo of listSharedRepos(store)) {
     roots.push({ id: `prj:${repo.label}`, label: repo.label, path: repo.path, kind: 'project', remote: repo.remote, workshops: shops.filter((row) => row.path === repo.path).map((row) => row.name) });
@@ -21,8 +23,8 @@ export function listGitRoots(store: Store): GitRoot[] {
   return roots;
 }
 
-export function gitRoot(store: Store, id: string): GitRoot {
-  const root = listGitRoots(store).find((item) => item.id === id);
+export function gitRoot(store: Store, id: string, ownerId = 'owner'): GitRoot {
+  const root = listGitRoots(store, ownerId).find((item) => item.id === id);
   if (!root) throw new Error('Unknown folder.');
   fs.mkdirSync(root.path, { recursive: true });
   return root;

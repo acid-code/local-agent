@@ -39,6 +39,7 @@ import { scanMachine } from './discovery.js';
 import { CrashError, InterruptedToolError, StopError, clampText, now } from './util.js';
 import type { Vault } from './vault.js';
 import { CITE_HINT, findContextTool, shareFileTool } from './files.js';
+import { MEMBER_DENIED_TOOLS, OWNER_ID, foreignPath, getAccount } from './accounts.js';
 
 export class Engine {
   private readonly inflight = new Map<string, { abort: AbortController; paused: boolean; resumePause: () => void }>();
@@ -77,7 +78,8 @@ export class Engine {
     let pinMiss: string | undefined;
     if (command?.unpin) this.store.updateSession(session.id, { modelPin: null });
     if (command?.pinName) {
-      const match = this.store.listModels().find((model) => model.enabled && (model.apiName === command.pinName || model.name === command.pinName || model.apiName.startsWith(command.pinName!) || model.name.startsWith(command.pinName!)));
+      const localOnly = this.localOnly(input.agentId);
+      const match = this.store.listModels().find((model) => model.enabled && (!localOnly || model.local) && (model.apiName === command.pinName || model.name === command.pinName || model.apiName.startsWith(command.pinName!) || model.name.startsWith(command.pinName!)));
       if (match) {
         this.store.updateSession(session.id, { modelPin: match.id });
         if (!command.rest) commandAck = `Pinned to ${match.name}.`;
@@ -338,7 +340,7 @@ export class Engine {
     if (!model) throw new Error('Selected model is gone.');
     let built = await this.buildMessages(current, agent, model);
     if (!this.reserveGemini(model, built.plan.estimatedTokens)) {
-      const fallback = this.candidates(settings).find((item) => item.local && item.providerKind !== 'rehearsal');
+      const fallback = this.candidates(settings, run.agentId).find((item) => item.local && item.providerKind !== 'rehearsal');
       if (!fallback) throw new Error('Gemini quota is used up and no local model is available.');
       model = this.store.getModel(fallback.id)!;
       current = this.store.updateRun(run.id, {
@@ -429,7 +431,7 @@ export class Engine {
         return;
       }
       if (isContextOverflowError(message) && current.cursor.budgetOverride && !current.cursor.contextEscalated) {
-        const bigger = this.candidates(this.store.getSettings()).filter((item) => item.practicalBudget > model.practicalBudget).sort((a, b) => b.practicalBudget - a.practicalBudget)[0];
+        const bigger = this.candidates(this.store.getSettings(), run.agentId).filter((item) => item.practicalBudget > model.practicalBudget).sort((a, b) => b.practicalBudget - a.practicalBudget)[0];
         this.store.updateStep(step.id, { status: 'failed', error: message, endedAt: now(), latencyMs: Date.now() - started });
         if (bigger) {
           this.store.addLog('warn', `Still over budget. Escalating to ${bigger.name}.`, undefined, 'router');
@@ -438,7 +440,7 @@ export class Engine {
         }
       }
       if (isProviderOutage(message) && !current.cursor.providerFallback) {
-        const local = this.candidates(this.store.getSettings()).find((item) => item.local && item.id !== model.id);
+        const local = this.candidates(this.store.getSettings(), run.agentId).find((item) => item.local && item.id !== model.id);
         this.store.updateStep(step.id, { status: 'failed', error: message, endedAt: now(), latencyMs: Date.now() - started });
         if (local) {
           const reason = `Switched to ${local.name} — ${model.name} returned ${message.match(/429|5\d\d/)?.[0] || 'an error'}.`;
@@ -641,7 +643,7 @@ export class Engine {
     const model = run.modelId ? this.store.getModel(run.modelId) : null;
     if (agent && model) await this.maybeFold(run.sessionId, agent, model).catch(() => undefined);
     if (agent && run.cursor.stage === 'implement') {
-      const labels = turnRoots(this.store, run).map((root) => root.label);
+      const labels = turnRoots(this.store, run, this.libraryDir).map((root) => root.label);
       for (const label of labels) addProjectNote(this.store, { label, agentId: agent.id, kind: 'change', body: `${agent.name} finished a change on ${label}.` });
     }
     const cursor = { ...this.store.getRun(run.id)!.cursor, phase: 'done' as const };
@@ -666,7 +668,7 @@ export class Engine {
         messageModelId: run.cursor.messageModelId,
         sessionModelId: session?.activeModelId,
         goodModelId: settings.goodModelId,
-        models: this.candidates(settings),
+        models: this.candidates(settings, agent.id),
         memAvailableGiB: memAvailableGiB(),
         busyLocalLarge: [...this.heldLarge.entries()].find(([id]) => id !== run.id)?.[1] ?? null,
         residentLarge: this.residentLarge,
@@ -694,8 +696,8 @@ export class Engine {
     return picked;
   }
 
-  private autoCandidates(settings: Settings): AutoCandidate[] {
-    return this.candidates(settings).map((model) => ({
+  private autoCandidates(settings: Settings, agentId?: string): AutoCandidate[] {
+    return this.candidates(settings, agentId).map((model) => ({
       id: model.id, name: model.name, apiName: model.apiName, local: model.local, embedding: false,
       sizeClass: model.sizeClass, providerKind: model.providerKind, quotaOpen: model.quotaOpen,
       practicalBudget: model.practicalBudget, enabled: model.enabled,
@@ -704,7 +706,7 @@ export class Engine {
 
   private autoDecision(text: string, run: RunRow, settings: Settings): RouteDecision {
     const session = this.store.getSession(run.sessionId);
-    const models = this.autoCandidates(settings);
+    const models = this.autoCandidates(settings, run.agentId);
     const unsupported = new Set(Object.entries(settings.toolSupport).filter(([, ok]) => ok === false).map(([name]) => name));
     // A model without tool calls still answers chat. Skip it only when this turn probably needs a tool.
     const needsTools = likelyNeedsTools(text, { kb: this.hasKnowledge(run.agentId), code: session?.mode === 'code' || Boolean(run.cursor.stage) });
@@ -723,13 +725,22 @@ export class Engine {
     };
   }
 
-  private candidates(settings: Settings): RouteCandidate[] {
+  /** Members whose cloud models are off only see local models. */
+  private localOnly(agentId?: string) {
+    const ownerId = agentId ? this.store.getAgent(agentId)?.ownerId : undefined;
+    if (!ownerId || ownerId === OWNER_ID) return false;
+    return getAccount(this.store, ownerId)?.limits.cloud === false;
+  }
+
+  private candidates(settings: Settings, agentId?: string): RouteCandidate[] {
     const providers = new Map(this.store.listProviders().map((provider) => [provider.id, provider]));
+    const localOnly = this.localOnly(agentId);
     const minute = new Date().toISOString().slice(0, 16);
     const day = quotaDay();
     return this.store.listModels().filter((model) => model.enabled && !model.embedding).flatMap((model) => {
       const provider = providers.get(model.providerId);
       if (!provider?.enabled) return [];
+      if (localOnly && !model.local) return [];
       // Gemini without a key is off, not out of quota.
       if (provider.kind === 'gemini' && !this.providerOverride && !process.env[provider.apiKeyEnv || 'GEMINI_API_KEY']) return [];
       let quotaOpen: boolean | undefined;
@@ -937,7 +948,7 @@ export class Engine {
   /** The next Auto tier after `model`, for a retry. */
   private nextTier(run: RunRow, model: ModelRow, needTools: boolean): ModelRow | undefined {
     const settings = this.store.getSettings();
-    const models = this.autoCandidates(settings);
+    const models = this.autoCandidates(settings, run.agentId);
     const exclude = new Set<string>();
     if (needTools) for (const item of models) if (this.toolSupportOf(item) === false) exclude.add(item.id);
     const pick = nextAutoTier({ role: run.cursor.autoRole, map: settings.autoModels, models, currentId: model.id, exclude });
@@ -988,6 +999,7 @@ export class Engine {
       for (const name of ['web_search', 'web_fetch', 'read_file', 'list_dir', 'grep', 'glob', 'plan', 'recall', 'consult_agent']) names.add(name);
     }
     if (stage === 'implement' || sessionMode === 'code') for (const tool of CODING_TOOLS) names.add(tool.name);
+    if (agent.ownerId !== OWNER_ID) for (const name of MEMBER_DENIED_TOOLS) names.delete(name);
     const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), ...this.extraTools];
     const seen = new Set<string>();
     return catalog.filter((tool) => {
@@ -1000,21 +1012,23 @@ export class Engine {
   private contextFor(run: RunRow, signal: AbortSignal): ToolContext {
     const agent = this.store.getAgent(run.agentId)!;
     const settings = this.store.getSettings();
+    const member = agent.ownerId !== OWNER_ID;
     return {
       agent, workspace: agent.workspacePath, signal, docker: this.docker, fetchImpl: this.fetchImpl, searxngUrl: settings.searxngUrl || process.env.SEARXNG_URL || '',
       sandbox: settings.sandbox, store: this.store, depth: run.cursor.depth ?? 0,
       sessionId: run.sessionId, runId: run.id, codeApproval: settings.codeApproval,
-      secretEnv: () => this.vault.envFor(agent.id, `run:${run.id}`),
+      secretEnv: () => (member ? {} : this.vault.envFor(agent.id, `run:${run.id}`)),
       libraryDir: this.libraryDir,
-      roots: turnRoots(this.store, run),
-      gitIdentity: { ...gitIdentity(this.store.getSettings()), token: this.vault.valueByName('GITHUB_TOKEN') },
+      roots: turnRoots(this.store, run, this.libraryDir),
+      // The owner's GitHub token, SSH key and vault never reach a member's persona.
+      gitIdentity: member ? { name: agent.name, email: 'agent@local-agent.invalid' } : { ...gitIdentity(this.store.getSettings()), token: this.vault.valueByName('GITHUB_TOKEN') },
       consult: (name, question) => this.consult(run, name, question),
     };
   }
 
   private async consult(run: RunRow, name: string, question: string) {
     if ((run.cursor.depth ?? 0) >= 1) throw new Error('Nested consultations stop at one level.');
-    const other = this.store.getAgentByName(name);
+    const other = this.store.getAgentByName(name, this.store.getAgent(run.agentId)?.ownerId ?? OWNER_ID);
     if (!other) throw new Error(`No persona named ${name}.`);
     const session = this.store.getSession(run.sessionId);
     if (session?.roomId) {
@@ -1237,7 +1251,7 @@ export class Engine {
 
 function senderFor(store: Store, fallback: string, call: ToolCall) {
   if (call.name !== 'consult_agent') return fallback;
-  const other = store.getAgentByName(String(parseArgs(call.arguments).agent || ''));
+  const other = store.getAgentByName(String(parseArgs(call.arguments).agent || ''), store.getAgent(fallback)?.ownerId ?? OWNER_ID);
   return other?.id || fallback;
 }
 
@@ -1315,8 +1329,10 @@ async function prepareRepos(store: Store, run: RunRow, stage: 'plan' | 'implemen
   };
 }
 
-function turnRoots(store: Store, run: RunRow) {
+function turnRoots(store: Store, run: RunRow, dataDir = '') {
   const session = store.getSession(run.sessionId);
+  // Shared projects and workshops are the owner's. A member's persona works in its own workspace only.
+  if ((store.getAgent(run.agentId)?.ownerId ?? OWNER_ID) !== OWNER_ID) return [];
   const write = run.cursor.stage === 'implement' || (session?.mode === 'code' && run.cursor.stage !== 'plan');
   const roots = new Map<string, { label: string; path: string; write: boolean }>();
   for (const repo of listSharedRepos(store)) roots.set(repo.path, { label: repo.label, path: repo.path, write });
@@ -1325,7 +1341,7 @@ function turnRoots(store: Store, run: RunRow) {
       roots.set(project.path, { label: project.label, path: project.path, write });
     }
   }
-  return [...roots.values()];
+  return [...roots.values()].filter((root) => !dataDir || !foreignPath(dataDir, OWNER_ID, root.path));
 }
 
 function skillScriptTool(): Tool {

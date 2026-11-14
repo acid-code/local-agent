@@ -5,11 +5,12 @@ import type { Tool } from './tools.js';
 import { extractDocxText, extractPdfText, readZipEntry } from './kb.js';
 import { locatePath } from './workshops.js';
 import { nid, now } from './util.js';
+import { OWNER_ID, accountDir } from './accounts.js';
 
 /** A file the owner uploaded or an agent produced. Stored under <data>/files/<id>/<name>. */
 export interface FileRow {
   id: string; sessionId: string | null; messageId: string | null; agentId: string | null;
-  name: string; mime: string; size: number; source: 'upload' | 'agent'; createdAt: string;
+  name: string; mime: string; size: number; source: 'upload' | 'agent'; createdAt: string; ownerId: string;
 }
 
 const MIME: Record<string, string> = {
@@ -36,6 +37,8 @@ export function ensureFilesTable(store: Store) {
     id TEXT PRIMARY KEY, session_id TEXT, message_id TEXT, agent_id TEXT, name TEXT NOT NULL, mime TEXT NOT NULL,
     size INTEGER NOT NULL, source TEXT NOT NULL, rel_path TEXT NOT NULL, text_index TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
   )`);
+  const cols = (store.db.prepare('PRAGMA table_info(files)').all() as { name: string }[]).map((row) => row.name);
+  if (!cols.includes('owner_id')) store.db.exec(`ALTER TABLE files ADD COLUMN owner_id TEXT NOT NULL DEFAULT 'owner'`);
 }
 
 function safeName(name: string) {
@@ -105,17 +108,22 @@ export function filesDir(dataDir: string) {
   return dir;
 }
 
-export function saveFile(store: Store, dataDir: string, input: { name: string; bytes: Buffer; sessionId?: string | null; messageId?: string | null; agentId?: string | null; source: 'upload' | 'agent'; mime?: string }): FileRow {
+export function saveFile(store: Store, dataDir: string, input: { name: string; bytes: Buffer; sessionId?: string | null; messageId?: string | null; agentId?: string | null; source: 'upload' | 'agent'; mime?: string; ownerId?: string }): FileRow {
   if (!input.bytes.length) throw new Error('That file is empty.');
   if (input.bytes.length > MAX_FILE_BYTES) throw new Error(`Files are limited to ${MAX_FILE_BYTES / 1024 / 1024} MB.`);
   const id = nid('file');
   const name = safeName(input.name);
-  const rel = path.join(id, name);
-  const full = path.join(filesDir(dataDir), rel);
+  // The file belongs to the chat's (or persona's) account. Members' files sit in their own folder.
+  const owner = input.ownerId
+    ?? (input.sessionId ? (store.db.prepare('SELECT owner_id FROM chat_sessions WHERE id = ?').get(input.sessionId) as { owner_id?: string } | undefined)?.owner_id : undefined)
+    ?? (input.agentId ? (store.db.prepare('SELECT owner_id FROM agents WHERE id = ?').get(input.agentId) as { owner_id?: string } | undefined)?.owner_id : undefined)
+    ?? OWNER_ID;
+  const rel = owner === OWNER_ID ? path.join(id, name) : path.join('users', owner, 'files', id, name);
+  const full = owner === OWNER_ID ? path.join(filesDir(dataDir), rel) : path.join(accountDir(dataDir, owner), 'files', id, name);
   fs.mkdirSync(path.dirname(full), { recursive: true });
   fs.writeFileSync(full, input.bytes);
-  store.db.prepare('INSERT INTO files (id, session_id, message_id, agent_id, name, mime, size, source, rel_path, text_index, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
-    id, input.sessionId ?? null, input.messageId ?? null, input.agentId ?? null, name, input.mime || mimeFor(name), input.bytes.length, input.source, rel, indexText(name, input.bytes), now(),
+  store.db.prepare('INSERT INTO files (id, session_id, message_id, agent_id, name, mime, size, source, rel_path, text_index, created_at, owner_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+    id, input.sessionId ?? null, input.messageId ?? null, input.agentId ?? null, name, input.mime || mimeFor(name), input.bytes.length, input.source, rel, indexText(name, input.bytes), now(), owner,
   );
   return getFile(store, id)!;
 }
@@ -123,6 +131,7 @@ export function saveFile(store: Store, dataDir: string, input: { name: string; b
 const mapFile = (row: Record<string, unknown>): FileRow => ({
   id: String(row.id), sessionId: (row.session_id as string) ?? null, messageId: (row.message_id as string) ?? null, agentId: (row.agent_id as string) ?? null,
   name: String(row.name), mime: String(row.mime), size: Number(row.size), source: row.source === 'agent' ? 'agent' : 'upload', createdAt: String(row.created_at),
+  ownerId: String(row.owner_id || OWNER_ID),
 });
 
 export function getFile(store: Store, id: string): FileRow | null {
@@ -131,10 +140,11 @@ export function getFile(store: Store, id: string): FileRow | null {
 }
 
 export function filePath(store: Store, dataDir: string, id: string): string | null {
-  const row = store.db.prepare('SELECT rel_path FROM files WHERE id = ?').get(id) as { rel_path: string } | undefined;
+  const row = store.db.prepare('SELECT rel_path, owner_id FROM files WHERE id = ?').get(id) as { rel_path: string; owner_id?: string } | undefined;
   if (!row) return null;
-  const root = filesDir(dataDir);
-  const full = path.resolve(root, row.rel_path);
+  const owner = row.owner_id || OWNER_ID;
+  const root = owner === OWNER_ID ? filesDir(dataDir) : path.resolve(accountDir(dataDir, owner), 'files');
+  const full = owner === OWNER_ID ? path.resolve(root, row.rel_path) : path.resolve(dataDir, row.rel_path);
   return full.startsWith(root + path.sep) && fs.existsSync(full) ? full : null;
 }
 
@@ -143,11 +153,11 @@ export function fileText(store: Store, id: string): string {
   return row?.text_index ?? '';
 }
 
-export function listFiles(store: Store, opts: { sessionId?: string | null; query?: string; limit?: number }): (FileRow & { snippet?: string })[] {
+export function listFiles(store: Store, opts: { sessionId?: string | null; query?: string; limit?: number; ownerId: string }): (FileRow & { snippet?: string })[] {
   const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
   const q = (opts.query || '').trim();
-  const where: string[] = [];
-  const args: (string | number)[] = [];
+  const where: string[] = ['owner_id = ?'];
+  const args: (string | number)[] = [opts.ownerId];
   if (opts.sessionId) { where.push('session_id = ?'); args.push(opts.sessionId); }
   if (q) { where.push('(name LIKE ? ESCAPE \'\\\' OR text_index LIKE ? ESCAPE \'\\\')'); const like = `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`; args.push(like, like); }
   const rows = store.db.prepare(`SELECT * FROM files ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY created_at DESC LIMIT ?`).all(...args, limit) as Record<string, unknown>[];
@@ -170,19 +180,19 @@ export function snippetOf(text: string, query: string, width = 160): string {
 }
 
 /** Search earlier messages: this chat first, then every chat when scope is "all". */
-export function searchMessages(store: Store, opts: { sessionId?: string | null; query: string; scope?: 'session' | 'all'; limit?: number }) {
+export function searchMessages(store: Store, opts: { sessionId?: string | null; query: string; scope?: 'session' | 'all'; limit?: number; ownerId: string }) {
   const q = opts.query.trim();
   if (!q) return [];
   const like = `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
   const limit = Math.min(opts.limit ?? 8, 30);
   const rows = (opts.scope === 'all' || !opts.sessionId
-    ? store.db.prepare(`SELECT m.id, m.session_id, m.role, m.content, m.created_at, s.title FROM messages m LEFT JOIN chat_sessions s ON s.id = m.session_id WHERE m.role IN ('user','assistant') AND m.content LIKE ? ESCAPE '\\' ORDER BY m.created_at DESC LIMIT ?`).all(like, limit)
-    : store.db.prepare(`SELECT m.id, m.session_id, m.role, m.content, m.created_at, s.title FROM messages m LEFT JOIN chat_sessions s ON s.id = m.session_id WHERE m.session_id = ? AND m.role IN ('user','assistant') AND m.content LIKE ? ESCAPE '\\' ORDER BY m.seq DESC LIMIT ?`).all(opts.sessionId, like, limit)) as Record<string, unknown>[];
+    ? store.db.prepare(`SELECT m.id, m.session_id, m.role, m.content, m.created_at, s.title FROM messages m JOIN chat_sessions s ON s.id = m.session_id WHERE s.owner_id = ? AND m.role IN ('user','assistant') AND m.content LIKE ? ESCAPE '\\' ORDER BY m.created_at DESC LIMIT ?`).all(opts.ownerId, like, limit)
+    : store.db.prepare(`SELECT m.id, m.session_id, m.role, m.content, m.created_at, s.title FROM messages m JOIN chat_sessions s ON s.id = m.session_id WHERE m.session_id = ? AND s.owner_id = ? AND m.role IN ('user','assistant') AND m.content LIKE ? ESCAPE '\\' ORDER BY m.seq DESC LIMIT ?`).all(opts.sessionId, opts.ownerId, like, limit)) as Record<string, unknown>[];
   return rows.map((row) => ({ id: String(row.id), sessionId: String(row.session_id), role: String(row.role), title: String(row.title || ''), createdAt: String(row.created_at), snippet: snippetOf(String(row.content), q) }));
 }
 
-export function getMessageRow(store: Store, id: string) {
-  const row = store.db.prepare('SELECT m.id, m.session_id, m.role, m.content, m.created_at, s.title FROM messages m LEFT JOIN chat_sessions s ON s.id = m.session_id WHERE m.id = ?').get(id) as Record<string, unknown> | undefined;
+export function getMessageRow(store: Store, id: string, ownerId: string) {
+  const row = store.db.prepare('SELECT m.id, m.session_id, m.role, m.content, m.created_at, s.title FROM messages m JOIN chat_sessions s ON s.id = m.session_id WHERE m.id = ? AND s.owner_id = ?').get(id, ownerId) as Record<string, unknown> | undefined;
   return row ? { id: String(row.id), sessionId: String(row.session_id), role: String(row.role), content: String(row.content), createdAt: String(row.created_at), title: String(row.title || '') } : null;
 }
 
@@ -197,23 +207,24 @@ export function findContextTool(): Tool {
     mutates: () => false,
     approval: () => null,
     async execute(args, ctx) {
+      const owner = ctx.agent.ownerId || OWNER_ID;
       const id = String(args.id || '').trim().replace(/^\[?(msg|file):/, '').replace(/[\]#].*$/, '');
       if (id) {
         if (id.startsWith('file_')) {
           const file = getFile(ctx.store, id);
-          if (!file) return `No file ${id}.`;
+          if (!file || file.ownerId !== owner) return `No file ${id}.`;
           const text = fileText(ctx.store, id);
           return `[file:${file.id}] ${file.name} (${file.mime}, ${file.size} bytes)\n${text ? text.slice(0, 12_000) : 'No readable text in this file. Describe it by name and type.'}`;
         }
-        const message = getMessageRow(ctx.store, id);
+        const message = getMessageRow(ctx.store, id, owner);
         if (!message) return `No message ${id}.`;
         return `[msg:${message.id}] ${message.role} in "${message.title}" at ${message.createdAt}\n${message.content.slice(0, 12_000)}`;
       }
       const query = String(args.query || '').trim();
       if (!query) throw new Error('Pass query or id.');
       const scope = args.scope === 'all' ? 'all' : 'session';
-      const messages = searchMessages(ctx.store, { sessionId: ctx.sessionId, query, scope });
-      const files = listFiles(ctx.store, { query, limit: 8 });
+      const messages = searchMessages(ctx.store, { sessionId: ctx.sessionId, query, scope, ownerId: owner });
+      const files = listFiles(ctx.store, { query, limit: 8, ownerId: owner });
       const lines = [
         ...messages.map((row) => `[msg:${row.id}] ${row.role}${row.sessionId !== ctx.sessionId ? ` in "${row.title}"` : ''}: ${row.snippet}`),
         ...files.map((file) => `[file:${file.id}] ${file.name}: ${file.snippet || file.mime}`),
@@ -237,7 +248,7 @@ export function shareFileTool(dataDir: () => string): Tool {
       const stat = fs.statSync(hit.full);
       if (!stat.isFile()) throw new Error('That is not a file.');
       if (stat.size > MAX_FILE_BYTES) throw new Error('That file is over 50 MB.');
-      const file = saveFile(ctx.store, dataDir(), { name: String(args.name || path.basename(hit.full)), bytes: fs.readFileSync(hit.full), sessionId: ctx.sessionId, agentId: ctx.agent.id, source: 'agent' });
+      const file = saveFile(ctx.store, dataDir(), { name: String(args.name || path.basename(hit.full)), bytes: fs.readFileSync(hit.full), sessionId: ctx.sessionId, agentId: ctx.agent.id, source: 'agent', ownerId: ctx.agent.ownerId || OWNER_ID });
       return `Shared [file:${file.id}] ${file.name} (${file.size} bytes). Mention [file:${file.id}] in the reply.`;
     },
   };
