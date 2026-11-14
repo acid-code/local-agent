@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
-import { Activity, BookOpen, Box, CalendarClock, Cpu, Gauge, ListChecks, Menu, MessageSquare, MoreHorizontal, Radio, Settings, Sparkles, Users, Wrench, X } from 'lucide-react';
+import { Activity, BookOpen, Box, CalendarClock, Cpu, Gauge, ListChecks, LogOut, Menu, MessageSquare, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Radio, Settings, Sparkles, Users, Wrench, X } from 'lucide-react';
 import { Toaster } from './Toaster';
 import { api, post } from '../lib/api';
 import { Face, type FaceAgent } from './Face';
@@ -31,6 +31,10 @@ export function Shell({ username, onLogout, children }: { username: string; onLo
   const [personas, setPersonas] = useState<Persona[]>([]);
   const [restartKeys, setRestartKeys] = useState<string[]>([]);
   const [arrange, setArrange] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem('la-sidebar') === 'collapsed');
+  useEffect(() => { localStorage.setItem('la-sidebar', collapsed ? 'collapsed' : 'open'); }, [collapsed]);
+  const isWide = () => window.matchMedia('(min-width: 981px)').matches;
+  const toggleSidebar = () => { if (isWide()) setCollapsed((value) => !value); else setOpen((value) => !value); };
   const navigate = useNavigate();
 
   async function loadPersonas() {
@@ -47,6 +51,10 @@ export function Shell({ username, onLogout, children }: { username: string; onLo
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
         setPalette(true);
+      }
+      if ((event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'b') {
+        event.preventDefault();
+        toggleSidebar();
       }
       if (event.key === 'Escape') { setPalette(false); setOpen(false); }
     };
@@ -83,9 +91,9 @@ export function Shell({ username, onLogout, children }: { username: string; onLo
   const filtered = actions.filter((item) => item.label.toLowerCase().includes(query.toLowerCase()));
 
   return (
-    <div className="app">
+    <div className={collapsed ? 'app collapsed' : 'app'}>
       {open && <div className="scrim drawer-scrim" onClick={() => setOpen(false)} />}
-      <aside className={open ? 'sidebar open' : 'sidebar'} aria-label="Main menu">
+      <aside id="main-sidebar" className={open ? 'sidebar open' : 'sidebar'} aria-label="Main menu">
         <div className="brand">
           <svg className="mark" viewBox="0 0 64 64" aria-hidden><circle cx="32" cy="32" r="18" fill="none" stroke="#e4b56a" strokeWidth="4"/><circle cx="32" cy="32" r="5" fill="#e4b56a"/></svg>
           <div className="word"><i>local</i><span>agent</span></div>
@@ -93,8 +101,8 @@ export function Shell({ username, onLogout, children }: { username: string; onLo
         </div>
         <nav className="nav">
           {LINKS.map(([to, label, Icon]) => (
-            <NavLink key={to} to={to} end={to === '/'} className={({ isActive }) => isActive ? 'active' : ''} onClick={() => setOpen(false)}>
-              <Icon /> {label}
+            <NavLink key={to} to={to} end={to === '/'} title={collapsed ? label : undefined} aria-label={label} className={({ isActive }) => isActive ? 'active' : ''} onClick={() => setOpen(false)}>
+              <Icon aria-hidden /> <span className="label">{label}</span>
             </NavLink>
           ))}
         </nav>
@@ -107,9 +115,9 @@ export function Shell({ username, onLogout, children }: { username: string; onLo
         <div className="persona-list">
           {personas.map((persona, index) => (
             <div key={persona.id} className="persona-row" style={{ ['--accent' as string]: persona.accent || '#e4b56a' }}>
-              <button className="persona-open" onClick={() => { navigate(`/?persona=${persona.id}`); setOpen(false); }}>
+              <button className="persona-open" title={persona.name} onClick={() => { navigate(`/?persona=${persona.id}`); setOpen(false); }}>
                 <Face agent={persona} size={28} />
-                <span>
+                <span className="label">
                   <strong dir="auto">{persona.emoji ? `${persona.emoji} ` : ''}{persona.name}</strong>
                   {persona.title && <small>{persona.title}</small>}
                 </span>
@@ -126,13 +134,14 @@ export function Shell({ username, onLogout, children }: { username: string; onLo
         </div>
         <div className="side-foot">
           <span className="ellipsis" title={username}>{username}</span>
-          <button className="btn ghost small" onClick={onLogout}>Sign out</button>
+          <button className="btn ghost small" onClick={onLogout} aria-label="Sign out" title="Sign out"><LogOut size={15} aria-hidden /><span className="label">Sign out</span></button>
         </div>
       </aside>
       <div className="main">
         {restartKeys.length > 0 && <p className="restart-note">Restart needed. secrets.env changed for {restartKeys.join(', ')}. This process is still using the values it loaded at startup.</p>}
         <header className="topbar">
           <button className="icon-btn menu-btn" aria-label="Menu" aria-expanded={open} onClick={() => setOpen((value) => !value)}><Menu size={20} /></button>
+          <button className="icon-btn collapse-btn" aria-controls="main-sidebar" aria-expanded={!collapsed} aria-label={collapsed ? 'Expand sidebar (Ctrl+B)' : 'Collapse sidebar (Ctrl+B)'} title={collapsed ? 'Expand sidebar (Ctrl+B)' : 'Collapse sidebar (Ctrl+B)'} onClick={() => setCollapsed((value) => !value)}>{collapsed ? <PanelLeftOpen size={19} /> : <PanelLeftClose size={19} />}</button>
           <button className="palette-btn" onClick={() => setPalette(true)}><span>Search or jump</span> <span className="kbd">Ctrl K</span></button>
           {pending > 0 && <button className="btn" onClick={() => navigate('/settings')}>{pending} secret request{pending === 1 ? '' : 's'}</button>}
         </header>

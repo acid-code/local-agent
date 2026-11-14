@@ -43,7 +43,21 @@ button { cursor: pointer; }
   * { animation: none !important; transition: none !important; }
 }
 
-.app { display: grid; grid-template-columns: 232px minmax(0, 1fr); height: 100dvh; overflow: hidden; }
+.app { display: grid; grid-template-columns: 232px minmax(0, 1fr); height: 100dvh; overflow: hidden; transition: grid-template-columns .2s ease; }
+.collapse-btn { display: inline-grid; }
+@media (min-width: 981px) {
+  .app.collapsed { grid-template-columns: 64px minmax(0, 1fr); }
+  .app.collapsed .sidebar { padding: 18px 8px 14px; overflow-x: hidden; }
+  .app.collapsed .label, .app.collapsed .word, .app.collapsed .persona-head, .app.collapsed .persona-ops, .app.collapsed .side-foot > .ellipsis, .app.collapsed .persona-open .badge { display: none; }
+  .app.collapsed .brand { justify-content: center; padding: 0; }
+  .app.collapsed .nav a { justify-content: center; padding: 10px 0; }
+  .app.collapsed .nav svg { width: 18px; height: 18px; }
+  .app.collapsed .persona-list { padding: 8px 0; align-items: center; }
+  .app.collapsed .persona-row { border: 0; background: transparent; }
+  .app.collapsed .persona-open { padding: 4px; justify-content: center; }
+  .app.collapsed .side-foot { justify-content: center; padding: 0; }
+  .app.collapsed .side-foot .btn { padding: 0; width: 36px; }
+}
 .sidebar {
   border-right: 1px solid var(--line);
   padding: 22px 14px 16px;
@@ -316,6 +330,7 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }
   .sidebar.open { transform: none; }
   .drawer-close { display: inline-grid; }
   .topbar .menu-btn { display: inline-grid; }
+  .topbar .collapse-btn { display: none; }
   .scrim { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); z-index: 25; }
   .drawer-scrim { display: block; z-index: 35; }
   .nav a { min-height: 44px; }
