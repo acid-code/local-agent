@@ -38,6 +38,7 @@ import { isMissingModelError, isToolUnsupportedError, ollamaCapabilities } from 
 import { scanMachine } from './discovery.js';
 import { CrashError, InterruptedToolError, StopError, clampText, now } from './util.js';
 import type { Vault } from './vault.js';
+import { CITE_HINT, findContextTool, shareFileTool } from './files.js';
 
 export class Engine {
   private readonly inflight = new Map<string, { abort: AbortController; paused: boolean; resumePause: () => void }>();
@@ -785,7 +786,7 @@ export class Engine {
     const hasKb = this.hasKnowledge(agent.id);
     const kbHint = hasKb ? '\n\nA knowledge base of the owner\'s documents is attached. When a question could be answered from it, call kb_search first and cite the numbered sources.' : '';
     const kbNote = hasKb ? await this.knowledgeNote(agent.id, user?.content ?? '') : '';
-    const system = `${agent.systemPrompt}${sharedRepoBrief(this.store)}${stageNote}${roleNote}${kbHint}`;
+    const system = `${agent.systemPrompt}${sharedRepoBrief(this.store)}${stageNote}${roleNote}${kbHint}${CITE_HINT}`;
     const preambleGuess = `${system}\n${notes.map((note) => note.content).join('\n')}`;
     if (model.providerId === 'prov_gemini' && estimateTokens(preambleGuess, 'gemini') > budget * 0.75) {
       const key = process.env.GEMINI_API_KEY;
@@ -981,11 +982,13 @@ export class Engine {
     names.add('kb_search');
     names.add('load_skill');
     names.add('repo_sync');
+    names.add('find_context');
+    names.add('share_file');
     if (stage === 'plan') {
       for (const name of ['web_search', 'web_fetch', 'read_file', 'list_dir', 'grep', 'glob', 'plan', 'recall', 'consult_agent']) names.add(name);
     }
     if (stage === 'implement' || sessionMode === 'code') for (const tool of CODING_TOOLS) names.add(tool.name);
-    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), ...this.extraTools];
+    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), ...this.extraTools];
     const seen = new Set<string>();
     return catalog.filter((tool) => {
       if (!names.has(tool.name) || seen.has(tool.name)) return false;
@@ -1004,7 +1007,7 @@ export class Engine {
       secretEnv: () => this.vault.envFor(agent.id, `run:${run.id}`),
       libraryDir: this.libraryDir,
       roots: turnRoots(this.store, run),
-      gitIdentity: gitIdentity(this.store.getSettings()),
+      gitIdentity: { ...gitIdentity(this.store.getSettings()), token: this.vault.valueByName('GITHUB_TOKEN') },
       consult: (name, question) => this.consult(run, name, question),
     };
   }

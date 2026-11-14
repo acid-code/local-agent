@@ -210,13 +210,18 @@ function labelFromRemote(url: string) {
   return cleaned.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-|-$/g, '');
 }
 
-export interface GitIdentity { name?: string; email?: string; sshKey?: string }
+export interface GitIdentity { name?: string; email?: string; sshKey?: string; token?: string | null }
 
 export function git(cwd: string, args: string[], identity?: GitIdentity) {
   const prefix: string[] = [];
   if (identity?.name) prefix.push('-c', `user.name=${identity.name}`);
   if (identity?.email) prefix.push('-c', `user.email=${identity.email}`);
-  const env = { ...process.env };
+  const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+  if (identity?.token) {
+    // The token stays in the environment of this one git process. It never lands in argv, config, or output.
+    env.LA_GIT_TOKEN = identity.token;
+    prefix.push('-c', 'credential.helper=', '-c', 'credential.helper=!f() { echo username=x-access-token; echo "password=$LA_GIT_TOKEN"; }; f');
+  }
   if (identity?.sshKey) env.GIT_SSH_COMMAND = `ssh -i ${identity.sshKey} -o IdentitiesOnly=yes`;
   return new Promise<string>((resolve, reject) => {
     const child = spawn('git', [...prefix, ...args], { cwd, env });
@@ -224,6 +229,6 @@ export function git(cwd: string, args: string[], identity?: GitIdentity) {
     child.stdout.on('data', (chunk) => { out += String(chunk); });
     child.stderr.on('data', (chunk) => { out += String(chunk); });
     child.on('error', reject);
-    child.on('close', (code) => resolve(`exit ${code ?? 1}\n${out.slice(0, 8_000)}`));
+    child.on('close', (code) => resolve(`exit ${code ?? 1}\n${(identity?.token ? out.split(identity.token).join('***') : out).slice(0, 8_000)}`));
   });
 }

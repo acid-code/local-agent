@@ -37,6 +37,11 @@ import { createWorkshop, getWorkshop, listWorkshops } from './workshops.js';
 import { ACCENT_DEFAULT, FACES, accentOk, avatarPath, saveAvatar } from './avatars.js';
 import type { Bus } from './bus.js';
 import type { Engine } from './engine.js';
+import { git } from './repos.js';
+import { isInside } from '@local-agent/shared';
+import { CONTEXT_MARK, expandMentions } from './mentions.js';
+import { cloneInto, gitRoot, gitStatus, listDir, listGitRoots, openPullRequest, pushBranch, readExcerpt, validBranch } from './gitops.js';
+import { MAX_FILE_BYTES, deleteFile, filePath, getFile, getMessageRow, listFiles, mimeFor, saveFile, searchMessages } from './files.js';
 import type { Store } from './db.js';
 import type { Vault } from './vault.js';
 
@@ -316,6 +321,153 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     return { room: store.createRoom(body.name, body.agentIds) };
   });
 
+  // Files: uploads and agent outputs.
+  app.post('/api/files', { bodyLimit: Math.ceil(MAX_FILE_BYTES * 1.4) + 4096 }, async (req) => {
+    const body = parse(z.object({ name: z.string().min(1).max(200), contentBase64: z.string().min(1), sessionId: z.string().optional() }), req.body);
+    if (body.sessionId && !store.getSession(body.sessionId)) throw http(404, 'Chat not found.');
+    try {
+      return { file: saveFile(store, config.dataDir, { name: body.name, bytes: Buffer.from(body.contentBase64, 'base64'), sessionId: body.sessionId ?? null, source: 'upload' }) };
+    } catch (error) {
+      throw http(400, error instanceof Error ? error.message : 'Could not save the file.');
+    }
+  });
+  app.get('/api/files', async (req) => {
+    const query = parse(z.object({ sessionId: z.string().optional(), q: z.string().optional(), limit: z.coerce.number().int().optional() }), req.query);
+    return { files: listFiles(store, { sessionId: query.sessionId, query: query.q, limit: query.limit }) };
+  });
+  app.get('/api/files/:id', async (req) => {
+    const file = getFile(store, (req.params as { id: string }).id);
+    if (!file) throw http(404, 'File not found.');
+    return { file };
+  });
+  app.get('/api/files/:id/raw', async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const file = getFile(store, id);
+    const full = file ? filePath(store, config.dataDir, id) : null;
+    if (!file || !full) throw http(404, 'File not found.');
+    const download = (req.query as { download?: string }).download === '1';
+    const mime = file.mime || mimeFor(file.name);
+    // Active types never render as pages on this origin.
+    const risky = /html|svg|xml|javascript/.test(mime);
+    const encoded = encodeURIComponent(file.name);
+    reply.header('content-type', risky && !download ? 'text/plain; charset=utf-8' : mime);
+    reply.header('content-disposition', `${download ? 'attachment' : 'inline'}; filename="${file.name.replace(/[^\x20-\x7e]|"/g, '_')}"; filename*=UTF-8''${encoded}`);
+    reply.header('content-security-policy', "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'");
+    reply.header('cache-control', 'private, max-age=3600');
+    reply.header('accept-ranges', 'bytes');
+    const size = fs.statSync(full).size;
+    const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range || ''));
+    if (range && (range[1] || range[2])) {
+      let start = range[1] ? Number(range[1]) : Math.max(0, size - Number(range[2]));
+      let end = range[1] && range[2] ? Number(range[2]) : size - 1;
+      end = Math.min(end, size - 1);
+      if (start > end || start >= size) { reply.header('content-range', `bytes */${size}`); return reply.code(416).send(); }
+      reply.code(206).header('content-range', `bytes ${start}-${end}/${size}`).header('content-length', String(end - start + 1));
+      return reply.send(fs.createReadStream(full, { start, end }));
+    }
+    reply.header('content-length', String(size));
+    return reply.send(fs.createReadStream(full));
+  });
+  app.delete('/api/files/:id', async (req) => {
+    if (!deleteFile(store, config.dataDir, (req.params as { id: string }).id)) throw http(404, 'File not found.');
+    return { ok: true };
+  });
+  app.get('/api/messages/:id', async (req) => {
+    const message = getMessageRow(store, (req.params as { id: string }).id);
+    if (!message) throw http(404, 'Message not found.');
+    return { message };
+  });
+  app.get('/api/context/search', async (req) => {
+    const query = parse(z.object({ q: z.string().min(1), sessionId: z.string().optional(), scope: z.enum(['session', 'all']).optional() }), req.query);
+    return { messages: searchMessages(store, { sessionId: query.sessionId, query: query.q, scope: query.scope ?? 'all', limit: 20 }), files: listFiles(store, { query: query.q, limit: 20 }) };
+  });
+  // Git and the workspace browser: agent workspaces and shared repos / workshop projects.
+  const gitToken = () => vault.valueByName('GITHUB_TOKEN') || null;
+  const ident = () => { const s = store.getSettings(); return { name: s.gitName, email: s.gitEmail, sshKey: s.gitSshKey || undefined, token: gitToken() }; };
+  const rootOf = (id: string) => { try { return gitRoot(store, id); } catch { throw http(404, 'Unknown folder.'); } };
+  app.get('/api/git/roots', async () => ({ roots: listGitRoots(store).map((root) => ({ ...root, remote: root.remote ? root.remote.replace(/(https?:\/\/)[^@/\s]+@/i, '$1***@') : null })), github: Boolean(gitToken()) }));
+  app.get('/api/git/:root/status', async (req) => ({ status: await gitStatus(rootOf((req.params as { root: string }).root).path) }));
+  app.get('/api/git/:root/diff', async (req) => {
+    const root = rootOf((req.params as { root: string }).root);
+    const file = String((req.query as { path?: string }).path || '');
+    if (file && (file.startsWith('-') || !isInside(root.path, path.resolve(root.path, file)))) throw http(400, 'Bad path.');
+    const staged = await git(root.path, ['diff', '--cached', '--', file || '.']);
+    const work = await git(root.path, ['diff', '--', file || '.']);
+    let untracked = '';
+    if (file && !/^exit 0\n\S/.test(work) && fs.existsSync(path.resolve(root.path, file))) {
+      const tracked = await git(root.path, ['ls-files', '--error-unmatch', '--', file]);
+      if (!/^exit 0\n/.test(tracked)) untracked = `New file ${file}\n` + readExcerpt(root.path, file).text.split('\n').map((line) => `+${line}`).join('\n');
+    }
+    const strip = (raw: string) => raw.replace(/^exit \d+\n/, '');
+    return { diff: [strip(staged), strip(work), untracked].filter((part) => part.trim()).join('\n').slice(0, 200_000) };
+  });
+  app.get('/api/git/:root/tree', async (req) => {
+    const root = rootOf((req.params as { root: string }).root);
+    try { return { entries: listDir(root.path, String((req.query as { path?: string }).path || '.')) }; } catch (error) { throw http(400, error instanceof Error ? error.message : 'Bad path.'); }
+  });
+  app.get('/api/git/:root/file', async (req) => {
+    const root = rootOf((req.params as { root: string }).root);
+    const q = req.query as { path?: string; start?: string; end?: string };
+    try { return { file: readExcerpt(root.path, String(q.path || ''), { start: Number(q.start) || undefined, end: Number(q.end) || undefined }) }; } catch (error) { throw http(400, error instanceof Error ? error.message : 'Bad path.'); }
+  });
+  app.post('/api/git/clone', async (req) => {
+    const body = parse(z.object({ url: z.string().min(1), label: z.string().optional(), workshopId: z.string().optional() }), req.body);
+    try { return await cloneInto(store, config.dataDir, body); } catch (error) { throw http(400, error instanceof Error ? error.message : 'Clone failed.'); }
+  });
+  app.post('/api/git/:root/action', async (req) => {
+    const root = rootOf((req.params as { root: string }).root);
+    const body = parse(z.object({
+      action: z.enum(['init', 'fetch', 'pull', 'commit', 'branch', 'checkout', 'push', 'open_pr', 'remote']),
+      message: z.string().optional(), name: z.string().optional(), url: z.string().optional(), title: z.string().optional(), body: z.string().optional(), base: z.string().optional(),
+      paths: z.array(z.string()).optional(), confirmMain: z.boolean().optional(),
+    }), req.body);
+    const cwd = root.path;
+    const strip = (raw: string) => raw.replace(/^exit \d+\n/, '');
+    const fail = (raw: string, what: string) => { if (!/^exit 0\n/.test(raw)) throw http(400, `${what} failed.\n${strip(raw).slice(0, 1200)}`); return strip(raw); };
+    if (body.action === 'init') return { output: fail(await git(cwd, ['init', '-b', 'main']), 'git init') };
+    if (body.action === 'fetch') return { output: fail(await git(cwd, ['fetch', '--prune'], ident()), 'Fetch') };
+    if (body.action === 'pull') {
+      const out = await git(cwd, ['pull', '--ff-only'], ident());
+      if (!/^exit 0\n/.test(out)) throw http(409, /diverg|fast-forward|CONFLICT/i.test(out) ? 'Pull stopped: the histories diverged. Nothing was merged.' : `Pull failed.\n${strip(out).slice(0, 1200)}`);
+      return { output: strip(out) };
+    }
+    if (body.action === 'commit') {
+      const message = (body.message || '').trim();
+      if (!message) throw http(400, 'Write a commit message.');
+      const paths = (body.paths || []).filter((p) => p && !p.startsWith('-') && isInside(cwd, path.resolve(cwd, p)));
+      fail(await git(cwd, ['add', '-A', '--', ...(paths.length ? paths : ['.'])]), 'Staging');
+      const out = await git(cwd, ['commit', '-m', message], ident());
+      if (/nothing to commit/i.test(out)) throw http(400, 'Nothing to commit.');
+      return { output: fail(out, 'Commit') };
+    }
+    if (body.action === 'branch' || body.action === 'checkout') {
+      const name = (body.name || '').trim();
+      if (!validBranch(name)) throw http(400, 'Branch names look like feature/login-fix.');
+      return { output: fail(await git(cwd, body.action === 'branch' ? ['checkout', '-b', name] : ['checkout', name]), body.action === 'branch' ? 'New branch' : 'Checkout') };
+    }
+    if (body.action === 'remote') {
+      const url = (body.url || '').trim();
+      if (!url || /[\s;&|`$]/.test(url)) throw http(400, 'Give a remote URL.');
+      const has = await git(cwd, ['remote', 'get-url', 'origin']);
+      return { output: fail(await git(cwd, /^exit 0\n/.test(has) ? ['remote', 'set-url', 'origin', url] : ['remote', 'add', 'origin', url]), 'Setting origin') };
+    }
+    if (body.action === 'push') {
+      try {
+        const pushed = await pushBranch(cwd, ident(), { allowMain: body.confirmMain === true });
+        if (!pushed.ok) throw http(409, pushed.output.slice(0, 1500));
+        return { output: pushed.output, branch: pushed.branch };
+      } catch (error) {
+        if ((error as { statusCode?: number }).statusCode) throw error;
+        throw http(400, error instanceof Error ? error.message : 'Push failed.');
+      }
+    }
+    try {
+      const pr = await openPullRequest(cwd, gitToken(), fetchImpl, { title: (body.title || '').trim() || 'Changes from local-agent', body: body.body, base: body.base });
+      return { pr };
+    } catch (error) {
+      throw http(400, error instanceof Error ? error.message : 'Could not open the PR.');
+    }
+  });
   app.get('/api/workshops', async () => ({ workshops: listWorkshops(store) }));
   app.post('/api/workshops', async (req) => {
     const body = parse(z.object({
@@ -370,14 +522,22 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const id = (req.params as { id: string }).id;
     const session = store.getSession(id);
     if (!session) throw http(404, 'Chat not found.');
-    const body = parse(z.object({ content: z.string().min(1), agentId: z.string().optional(), modelId: z.string().optional(), imageUrl: z.string().optional() }), req.body);
+    const body = parse(z.object({
+      content: z.string().min(1), agentId: z.string().optional(), modelId: z.string().optional(), imageUrl: z.string().optional(),
+      mentions: z.array(z.union([
+        z.object({ kind: z.literal('path'), root: z.string().min(1), path: z.string(), start: z.number().int().positive().optional(), end: z.number().int().positive().optional() }),
+        z.object({ kind: z.literal('file'), id: z.string().min(1) }),
+      ])).max(12).optional(),
+    }), req.body);
     const modelId = body.modelId ? chatModelId(store, body.modelId) : undefined;
     if (!body.content.trim()) throw http(400, 'Type a message first.');
     const agentId = body.agentId || session.agentId;
     if (!agentId) throw http(400, 'Choose a persona.');
     if (engine.sessionBusy(id)) throw http(409, 'A reply is still running in this chat. Wait for it or press Stop, then send again.');
     const offers = vault.capture(null, body.content);
-    const run = await engine.startTurn({ sessionId: id, agentId, content: vault.redact(body.content), imageUrl: body.imageUrl, modelId });
+    const context = body.mentions?.length ? expandMentions(store, body.mentions) : '';
+    const content = context ? `${body.content}${CONTEXT_MARK}${context}` : body.content;
+    const run = await engine.startTurn({ sessionId: id, agentId, content: vault.redact(content), imageUrl: body.imageUrl, modelId });
     return { run, offers };
   });
   app.get('/api/sessions/:id/plan', async (req) => ({ plan: readPlan(store, (req.params as { id: string }).id) }));
