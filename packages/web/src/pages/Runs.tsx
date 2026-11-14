@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api, post } from '../lib/api';
+import { EmptyState, PageHeader } from '../components/ui';
+import { Activity } from 'lucide-react';
 
 interface Run { id: string; status: string; modelId: string | null; routingNote: string | null; inputTokens: number; outputTokens: number; costUsd: number; error: string | null; startedAt: string }
 interface Step { id: string; index: number; kind: string; name: string; status: string; input: unknown; output: unknown; latencyMs: number; tokensIn: number; tokensOut: number; error: string | null }
@@ -24,11 +26,10 @@ export function Runs() {
 
   return (
     <div className="page">
-      <h1>Runs</h1>
-      <p className="lede">A run is a persisted state machine. If the process dies, it resumes from the last checkpoint instead of hanging. Retry from an earlier checkpoint does not pretend to undo files that already changed — use the edit checkpoint for that.</p>
+      <PageHeader title="Runs" description="Every reply is a run with checkpoints. If the process stops, it resumes from the last checkpoint. Retrying from an earlier one does not undo file changes; use the edit checkpoint for that." />
       <div className="runs-grid">
         <div className="run-list">
-          {runs.length === 0 && <p className="faint">No runs yet. Every chat reply becomes one.</p>}
+          {runs.length === 0 && <EmptyState icon={Activity} title="No runs yet" action={<a className="btn" href="/">Start a chat</a>}>Every chat reply, schedule and trigger becomes a run you can inspect here.</EmptyState>}
           {runs.map((item) => (
             <button key={item.id} className={item.id === selected ? 'run-item active' : 'run-item'} onClick={() => { setSelected(item.id); if (window.innerWidth <= 980) setTimeout(() => document.getElementById('run-detail')?.scrollIntoView({ behavior: 'smooth' }), 50); }}>
               <span className="mono ellipsis">{item.id}</span>

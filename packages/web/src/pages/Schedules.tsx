@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, post } from '../lib/api';
+import { EmptyState, PageHeader } from '../components/ui';
+import { CalendarClock, Plus } from 'lucide-react';
 
 interface Schedule { id: string; name: string; cron: string; prompt: string; enabled: boolean; nextRunAt: string | null; lastStatus: string | null }
 interface Agent { id: string; name: string }
@@ -11,6 +13,7 @@ export function Schedules() {
   const [cron, setCron] = useState('0 8 * * *');
   const [prompt, setPrompt] = useState('Summarize anything I should remember today.');
   const [agentId, setAgentId] = useState('');
+  const [adding, setAdding] = useState(false);
 
   async function load() {
     setRows((await api<{ schedules: Schedule[] }>('/api/schedules')).schedules);
@@ -22,15 +25,17 @@ export function Schedules() {
 
   return (
     <div className="page">
-      <h1>Schedules</h1>
-      <p className="lede">Five-field cron, one prompt, one persona. A missed run while the box was off fires once on the next tick, then waits for the following time. It does not replay a backlog.</p>
-      <form className="card" onSubmit={async (event) => { event.preventDefault(); await post('/api/schedules', { agentId, name, cron, prompt }); await load(); }}>
+      <PageHeader title="Schedules" description="Run a prompt on a timetable with one persona. A run missed while the box was off fires once when it is back; it never replays a backlog." actions={<button className="btn primary" aria-expanded={adding} onClick={() => setAdding((v) => !v)}><Plus size={16} aria-hidden /> New schedule</button>} />
+      {adding && (
+      <form className="card section" onSubmit={async (event) => { event.preventDefault(); await post('/api/schedules', { agentId, name, cron, prompt }); await load(); setAdding(false); }}>
         <label className="field"><span>Persona</span><select value={agentId} onChange={(event) => setAgentId(event.target.value)}>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label>
         <label className="field"><span>Name</span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
         <label className="field"><span>Cron</span><input value={cron} onChange={(event) => setCron(event.target.value)} /></label>
         <label className="field"><span>Prompt</span><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} /></label>
         <button className="btn primary">Save routine</button>
       </form>
+      )}
+      {!adding && rows.length === 0 && <EmptyState icon={CalendarClock} title="No schedules yet" action={<button className="btn primary" onClick={() => setAdding(true)}>New schedule</button>}>A schedule sends a prompt to a persona on a timetable, like a morning summary at 8:00.</EmptyState>}
       {rows.map((row) => (
         <article key={row.id} className="card">
           <h3>{row.name}</h3>

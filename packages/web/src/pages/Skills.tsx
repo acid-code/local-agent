@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, post } from '../lib/api';
+import { EmptyState, PageHeader } from '../components/ui';
+import { Plus, Sparkles } from 'lucide-react';
 
 interface Skill { slug: string; name: string; description: string; version: number; enabled?: boolean }
 interface Agent { id: string; name: string }
@@ -22,6 +24,7 @@ export function Skills() {
   const [sample, setSample] = useState('Summarize this paper for me.');
   const [fits, setFits] = useState<Fit[]>([]);
   const [bundle, setBundle] = useState('');
+  const [adding, setAdding] = useState(false);
 
   async function load() {
     setSkills((await api<{ skills: Skill[] }>('/api/skills')).skills);
@@ -31,20 +34,22 @@ export function Skills() {
 
   return (
     <div className="page">
-      <h1>Skills</h1>
-      <p className="lede">A skill is a folder: SKILL.md with a name and a when-to-use description, plus optional scripts and assets. Every persona sees the catalog. A persona loads a skill when the description fits, unless you turn that skill off for them.</p>
-      <form className="card" onSubmit={async (event) => { event.preventDefault(); const saved = await post<{ skill: Skill }>('/api/skills', { skillMd: markdown, slug: slug || undefined }); setSlug(saved.skill.slug); await load(); await open(saved.skill.slug); }}>
+      <PageHeader title="Skills" description="A skill is a SKILL.md with a when-to-use description, plus optional scripts. Personas load one when it fits, unless you turn it off for them." actions={<button className="btn primary" aria-expanded={adding} onClick={() => setAdding((v) => !v)}><Plus size={16} aria-hidden /> New skill</button>} />
+      {adding && (
+      <form className="card section" onSubmit={async (event) => { event.preventDefault(); const saved = await post<{ skill: Skill }>('/api/skills', { skillMd: markdown, slug: slug || undefined }); setSlug(saved.skill.slug); await load(); setAdding(false); await open(saved.skill.slug); }}>
         <label className="field"><span>Slug, optional</span><input value={slug} onChange={(event) => setSlug(event.target.value)} placeholder="summarize-a-paper" /></label>
         <label className="field"><span>SKILL.md</span><textarea value={markdown} rows={14} onChange={(event) => setMarkdown(event.target.value)} /></label>
         <button className="btn primary">Save version</button>
       </form>
+      )}
+      {!adding && skills.length === 0 && <EmptyState icon={Sparkles} title="No skills yet" action={<button className="btn primary" onClick={() => setAdding(true)}>New skill</button>}>Write a SKILL.md: a name, when to use it, and the steps. Every persona sees the catalog.</EmptyState>}
       {skills.map((skill) => (
         <article key={skill.slug} className="card">
           <h3>{skill.name}</h3>
           <p className="muted">{skill.description}</p>
           <p className="faint mono">{skill.slug} · v{skill.version}</p>
           <div className="row">
-            <button className="btn" onClick={() => void open(skill.slug)}>Edit</button>
+            <button className="btn" onClick={() => { setAdding(true); void open(skill.slug); }}>Edit</button>
             <button className="btn" onClick={async () => {
               const data = await api<{ skillMd: string; files: { path: string; content: string }[] }>(`/api/skills/${skill.slug}/export`);
               setBundle(JSON.stringify(data, null, 2));
