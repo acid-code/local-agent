@@ -81,6 +81,8 @@ export function Chat() {
   const [panel, setPanel] = useState<null | 'persona' | 'settings' | 'workspace' | 'files' | 'context'>(null);
   // Bumps when a background helper finishes, so the chat and its context panel refresh.
   const [helperTick, setHelperTick] = useState(0);
+  // Tool calls waiting for a yes/no (e.g. creating a timer). Shown as a card above the composer.
+  const [asks, setAsks] = useState<{ id: string; runId: string; toolName: string; reason: string }[]>([]);
   const [chatWs, setChatWs] = useState<{ items: { kind: 'root' | 'set'; id: string }[]; roots: ChatRoot[]; sets: { id: string; name: string; roots: string[] }[] }>({ items: [], roots: [], sets: [] });
   const [wsRoot, setWsRoot] = useState<string | null>(null);
   const [chatQuery, setChatQuery] = useState('');
@@ -141,6 +143,17 @@ export function Chat() {
     } catch (error) {
       if (!isAbort(error) && gate.current()) toast((error as Error).message, 'error');
     }
+  }
+
+  async function loadAsks(run: string | null) {
+    if (!run) { setAsks([]); return; }
+    try { const data = await api<{ approvals: { id: string; runId: string; toolName: string; reason: string }[] }>('/api/approvals'); setAsks(data.approvals.filter((row) => row.runId === run)); }
+    catch { /* the card shows on the next status */ }
+  }
+  useEffect(() => { if (status === 'awaiting_approval') void loadAsks(runId); else setAsks([]); }, [status, runId]);
+  async function decide(id: string, decision: 'approve' | 'deny') {
+    setAsks((rows) => rows.filter((row) => row.id !== id));
+    try { await post(`/api/approvals/${id}`, { decision }); } catch (error) { toast(errorText(error), 'error'); void loadAsks(runId); }
   }
 
   // While helpers run in the background, check now and then; when the last one ends, its result is in the chat.
@@ -269,6 +282,7 @@ export function Chat() {
         setLoadingNote(data.status === 'loading' || data.status === 'waiting' ? String(data.detail || (data.status === 'waiting' ? 'Waiting' : 'Loading model')) : '');
       }
       if (data.type === 'secret' && data.request) setSecret(data.request);
+      if (data.type === 'approval' || (data.type === 'status' && data.status === 'awaiting_approval')) void loadAsks(runId);
       if (data.type === 'done') {
         setLoadingNote('');
         setStatus(data.run?.status || 'completed');
@@ -685,6 +699,18 @@ export function Chat() {
               {!persona && <Link className="btn primary" to="/agents?new=1">New persona</Link>}
             </div>
           )}
+          {asks.map((ask) => (
+            <div key={ask.id} className="approval-card" role="alertdialog" aria-label="Approval needed">
+              <div className="grow">
+                <small className="faint">Needs your OK · {ask.toolName}</small>
+                <p dir="auto">{ask.reason}</p>
+              </div>
+              <div className="row">
+                <button className="btn ghost" onClick={() => void decide(ask.id, 'deny')}>Deny</button>
+                <button className="btn primary" onClick={() => void decide(ask.id, 'approve')}><Check size={15} aria-hidden /> Approve</button>
+              </div>
+            </div>
+          ))}
           {offers.length > 0 && (
             <div className="banner">
               A key-shaped string was moved out of the message. Save it in the vault?

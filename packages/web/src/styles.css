@@ -1211,3 +1211,7 @@ table.limits tbody th { color: var(--text); font-weight: 500; }
 .chat-files .pane-list li a { color: var(--text); text-decoration: none; }
 .chat-files .pane-list li a:hover { text-decoration: underline; }
 .chat-files-chat { max-width: 160px; }
+/* A tool call waiting for a yes/no, above the composer. */
+.approval-card { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 8px 0; padding: 12px 14px; border: 1px solid var(--line); border-left: 3px solid var(--brass); border-radius: calc(10px * var(--round)); background: var(--bg-2); }
+.approval-card p { margin: 2px 0 0; font-size: calc(14px * var(--fs)); }
+.approval-card .row { gap: 8px; }
