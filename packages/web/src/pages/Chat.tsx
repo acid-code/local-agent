@@ -364,6 +364,7 @@ export function Chat() {
           <button className={trace ? 'btn ghost on' : 'btn ghost'} aria-pressed={trace} aria-label="Trace" onClick={() => setTrace((value) => !value)}><ListTree size={16} /> <span>Trace</span></button>
         </div>
         <div className="messages" ref={box}>
+          <div className="messages-inner">
           {setupLeft.length > 0 && (
             <div className="card first-run">
               <h3>Finish setup</h3>
@@ -461,6 +462,7 @@ export function Chat() {
               <pre className="command">{edit.diff}</pre>
             </div>
           ))}
+          </div>
         </div>
         <div className="composer">
           <form onSubmit={send}>
