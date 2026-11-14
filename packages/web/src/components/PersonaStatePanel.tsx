@@ -108,7 +108,7 @@ export function PersonaStatePanel({ agent, sessions, tick, onClose, onOpenSessio
                 <div className="state-meter" role="meter" aria-label="Memory in use" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(100 - (memory.availableGiB / memory.totalGiB) * 100)}>
                   <span style={{ width: `${Math.round(100 - (memory.availableGiB / memory.totalGiB) * 100)}%` }} />
                 </div>
-                <p className="faint state-detail">{memory.availableGiB.toFixed(1)} GB free of {memory.totalGiB.toFixed(0)} GB · disk {humanSize(resources!.current.disk.freeBytes)} free{resources!.current.gpu?.name ? ` · ${resources!.current.gpu.name}` : ' · no GPU'}</p>
+                <p className="faint state-detail">{memory.availableGiB.toFixed(1)} GB free of {memory.totalGiB.toFixed(0)} GB · disk {(resources!.current.disk.freeBytes / 1024 ** 3).toFixed(0)} GB free{resources!.current.gpu?.name ? ` · ${resources!.current.gpu.name}` : ' · no GPU'}</p>
               </>
             ) : <p className="faint state-empty">Runs on this computer. Details are on the owner's Resources page.</p>}
           </section>

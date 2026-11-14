@@ -335,7 +335,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   app.get('/api/agents', async (req) => ({
     agents: store.listAgents(me(req)).map((agent) => {
       const last = lastMessage.get(agent.id) as { content: string; role: string; at: string } | undefined;
-      return { ...agent, lastMessage: last ? { text: last.content.replace(/\s+/g, ' ').slice(0, 120), role: last.role, at: last.at } : null };
+      return { ...agent, lastMessage: last ? { text: last.content.replace(/[*_`#>]+/g, '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\s+/g, ' ').trim().slice(0, 120), role: last.role, at: last.at } : null };
     }),
     templates: TEMPLATES, faces: FACES,
   }));

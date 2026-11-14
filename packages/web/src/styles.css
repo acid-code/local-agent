@@ -1338,3 +1338,8 @@ table.limits tbody th { color: var(--text); font-weight: 500; }
 .connector-row strong .badge + .badge { margin-left: 4px; }
 .connector-meta { font-size: calc(12px * var(--fs)); }
 .ok-badge { color: var(--moss); border-color: rgba(var(--moss-rgb), 0.4); }
+.connector-row .grow > span { display: block; }
+.chat.v2 .thread-head .btn { white-space: nowrap; flex: none; }
+.chat.v2 .thread-head .thread-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav-more[open] .nav { max-height: 34dvh; }
+.sidebar:has(.nav-more[open]) .persona-list { min-height: 180px; }

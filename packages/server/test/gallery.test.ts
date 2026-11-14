@@ -96,7 +96,7 @@ describe('gallery and first login', () => {
     expect(assistant.lastMessage).toBeNull();
     const session = built.store.createSession({ agentId: assistant.id, title: 'Plans', ownerId: 'owner' });
     built.store.insertMessage({ sessionId: session.id, role: 'user', content: 'Plan my week', toolCallId: null, toolName: null, toolCalls: null, agentId: null, runId: null, imageUrl: null, routingNote: null });
-    built.store.insertMessage({ sessionId: session.id, role: 'assistant', content: 'Here is a   plan\nfor Monday.', toolCallId: null, toolName: null, toolCalls: null, agentId: assistant.id, runId: null, imageUrl: null, routingNote: null });
+    built.store.insertMessage({ sessionId: session.id, role: 'assistant', content: '**Here** is a   plan\nfor [Monday](https://example.com).', toolCallId: null, toolName: null, toolCalls: null, agentId: assistant.id, runId: null, imageUrl: null, routingNote: null });
     const after = (await built.app.inject({ method: 'GET', url: '/api/agents', cookies: built.owner })).json().agents[0];
     expect(after.lastMessage).toMatchObject({ role: 'assistant', text: 'Here is a plan for Monday.' });
     const theirs = (await built.app.inject({ method: 'GET', url: '/api/agents', cookies: built.member })).json().agents;
