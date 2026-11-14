@@ -259,6 +259,9 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 .health-detail { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 14px; }
 .restart-note { margin: 0; padding: 8px 16px; background: rgba(228, 181, 106, 0.12); color: var(--brass-2); font-size: 13px; border-bottom: 1px solid rgba(228, 181, 106, 0.3); }
 .drawer-close { display: none; margin-left: auto; }
+.swatch { width: 32px; height: 32px; border: 2px solid transparent; padding: 0; }
+.swatch[aria-pressed=true] { border-color: var(--text); box-shadow: 0 0 0 2px var(--bg); }
+.page > .card, .page > form.card, .page > .checklist, .page > .lede { max-width: 980px; }
 .sidebar > * { flex-shrink: 0; }
 .runs-grid { display: grid; grid-template-columns: minmax(240px, 320px) minmax(0, 1fr); gap: 16px; align-items: start; }
 .run-list { display: flex; flex-direction: column; gap: 2px; max-height: calc(100dvh - 220px); overflow: auto; }
@@ -349,6 +352,7 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }
   .icon-btn, .icon-btn.round { min-width: 44px; width: 44px; height: 44px; }
   .btn.small { min-height: 40px; }
   .persona-ops .btn { min-height: 40px; }
+  .swatch { width: 40px; height: 40px; }
   .model-pill select { height: 40px; }
   .input, .card input:not([type=checkbox]):not([type=radio]):not([type=range]), .card select, .card textarea, .page .row > input, .page .row > select, .field input, .field select, .field textarea { min-height: 44px; font-size: 16px; }
 }

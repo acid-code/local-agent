@@ -79,6 +79,8 @@ export function Chat() {
   }
 
   async function openSession(id: string) {
+    // Restore this chat's unsent draft in the same render as the switch, so the save effect never wipes it.
+    if (!new URLSearchParams(window.location.search).get('share')) setDraft(localStorage.getItem(draftKey(id)) || '');
     setCurrent(id);
     const data = await api<{ session: Session; messages: Message[]; plan: Plan | null; edits: Edit[] }>(`/api/sessions/${id}`);
     setMessages(data.messages);
@@ -89,7 +91,6 @@ export function Chat() {
     setStreaming('');
     setThinking('');
     setRunError(null);
-    if (!new URLSearchParams(window.location.search).get('share')) setDraft(localStorage.getItem(draftKey(id)) || '');
     if (data.session.agentId) await post(`/api/agents/${data.session.agentId}/read`, {}).catch(() => undefined);
   }
 
@@ -172,6 +173,7 @@ export function Chat() {
         if (data.run?.modelId) setLastModel(models.find((model) => model.id === data.run.modelId)?.name || String(data.run.modelId));
         if (data.run?.status === 'failed' && data.run?.error) setRunError(String(data.run.error));
         if (current) void openSession(current);
+        void refreshLists().catch(() => undefined);
         source.close();
       }
     };
@@ -256,7 +258,10 @@ export function Chat() {
 
   async function control(action: string) {
     if (!runId) return;
-    try { await post(`/api/runs/${runId}/control`, { action }); } catch (error) { toast(errorText(error), 'error'); }
+    try {
+      await post(`/api/runs/${runId}/control`, { action });
+      if (action === 'stop') toast('Stopped.', 'info');
+    } catch (error) { toast(errorText(error), 'error'); }
   }
 
   function retry() {
