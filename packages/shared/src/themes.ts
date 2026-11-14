@@ -1,7 +1,7 @@
 /** Appearance presets and the math that turns a saved choice into CSS variables. Shared so tests can check contrast. */
 
-export type FontId = 'outfit' | 'nunito' | 'quicksand' | 'fredoka' | 'system';
-export type HeadingId = 'fraunces' | 'fredoka' | 'nunito' | 'quicksand';
+export type FontId = 'inter' | 'outfit' | 'nunito' | 'quicksand' | 'fredoka' | 'system';
+export type HeadingId = 'inter' | 'fraunces' | 'fredoka' | 'nunito' | 'quicksand';
 
 export interface ThemePreset {
   id: string;
@@ -28,16 +28,16 @@ export interface ThemePreset {
 
 export const THEMES: ThemePreset[] = [
   {
-    id: 'dark', name: 'Dark', blurb: 'The original console: ink black with brass.', scheme: 'dark',
-    bg: '#090a0c', bg2: '#111318', bg3: '#181b22', bg4: '#222733', text: '#f4f0e6', muted: '#b7b1a6', faint: '#8f897f',
-    accent: '#e4b56a', accentText: '#f3d7a6', moss: '#9dccb4', coral: '#e39486', sky: '#9ec0e0', codeBg: '#0c0e12',
-    font: 'outfit', heading: 'fraunces', round: 1, cute: false, emoji: '✦', glow: ['228,181,106', '158,192,224'],
+    id: 'dark', name: 'Dark', blurb: 'Calm graphite with a quiet brass accent.', scheme: 'dark',
+    bg: '#0e0f11', bg2: '#16181b', bg3: '#1d2024', bg4: '#2a2e33', text: '#e8eaed', muted: '#9aa0a6', faint: '#868c92',
+    accent: '#d9a95b', accentText: '#e6c08a', moss: '#81c995', coral: '#f28b82', sky: '#8ab4f8', codeBg: '#121417',
+    font: 'inter', heading: 'inter', round: 1, cute: false, emoji: '✦', glow: ['14,15,17', '14,15,17'],
   },
   {
-    id: 'light', name: 'Light', blurb: 'Warm paper, ink text, quiet brass.', scheme: 'light',
-    bg: '#f7f5f0', bg2: '#ffffff', bg3: '#efebe3', bg4: '#e2dccf', text: '#1f1b16', muted: '#554e47', faint: '#6b635a',
-    accent: '#94600f', accentText: '#7a4c06', moss: '#2f6b4f', coral: '#a83c2a', sky: '#2f5f8f', codeBg: '#f3efe7',
-    font: 'outfit', heading: 'fraunces', round: 1, cute: false, emoji: '✦', glow: ['199,150,70', '120,160,200'],
+    id: 'light', name: 'Light', blurb: 'Clean paper white, ink text, quiet brass.', scheme: 'light',
+    bg: '#f8f8f9', bg2: '#ffffff', bg3: '#f0f1f3', bg4: '#e3e5e8', text: '#1f2328', muted: '#5f6368', faint: '#63676d',
+    accent: '#8a5a12', accentText: '#7a4c06', moss: '#1e7a46', coral: '#b3261e', sky: '#1a5fb4', codeBg: '#f3f4f6',
+    font: 'inter', heading: 'inter', round: 1, cute: false, emoji: '✦', glow: ['248,248,249', '248,248,249'],
   },
   {
     id: 'sakura', name: 'Sakura', blurb: 'Pastel pink, soft petals, round corners.', scheme: 'light',
@@ -155,6 +155,7 @@ export function pickPreset(choice: ThemeChoice, systemDark: boolean): ThemePrese
 }
 
 const FONT_STACKS: Record<FontId | HeadingId, string> = {
+  inter: '"Inter Variable", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif',
   outfit: '"Outfit Variable", "Outfit", "Avenir Next", system-ui, sans-serif',
   nunito: '"Nunito Variable", "Nunito", "Avenir Next", system-ui, sans-serif',
   quicksand: '"Quicksand Variable", "Quicksand", "Avenir Next", system-ui, sans-serif',
@@ -163,7 +164,7 @@ const FONT_STACKS: Record<FontId | HeadingId, string> = {
   system: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
 };
 export const FONT_OPTIONS: { id: FontId; name: string }[] = [
-  { id: 'outfit', name: 'Outfit' }, { id: 'nunito', name: 'Nunito (rounded)' }, { id: 'quicksand', name: 'Quicksand (airy)' }, { id: 'fredoka', name: 'Fredoka (bubbly)' }, { id: 'system', name: 'System' },
+  { id: 'inter', name: 'Inter (default)' }, { id: 'outfit', name: 'Outfit' }, { id: 'nunito', name: 'Nunito (rounded)' }, { id: 'quicksand', name: 'Quicksand (airy)' }, { id: 'fredoka', name: 'Fredoka (bubbly)' }, { id: 'system', name: 'System' },
 ];
 
 /** CSS custom properties for a choice. Accent overrides keep AA contrast for text and buttons. */
@@ -184,7 +185,8 @@ export function themeVars(choice: ThemeChoice, systemDark: boolean): { preset: T
     '--brass': accent, '--brass-rgb': hexToRgb(accent).join(','), '--brass-2': accentText, '--ink': onColor(accent),
     '--moss': preset.moss, '--moss-rgb': hexToRgb(preset.moss).join(','), '--coral': preset.coral, '--coral-rgb': hexToRgb(preset.coral).join(','),
     '--sky': preset.sky, '--sky-rgb': hexToRgb(preset.sky).join(','), '--code-bg': preset.codeBg,
-    '--shadow': light ? '0 18px 50px rgba(60, 40, 60, 0.12)' : '0 24px 80px rgba(0, 0, 0, 0.45)',
+    '--shadow': light ? '0 8px 28px rgba(20, 24, 32, 0.10)' : '0 12px 36px rgba(0, 0, 0, 0.45)',
+    '--flat': preset.cute ? '0' : '1',
     '--glow-1': preset.glow[0], '--glow-2': preset.glow[1],
     '--sans': FONT_STACKS[font], '--serif': FONT_STACKS[preset.heading],
     '--round': String(Math.max(0, Math.min(2, round))),

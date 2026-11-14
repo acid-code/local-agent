@@ -3,13 +3,12 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import { App } from './App';
 import 'katex/dist/katex.min.css';
+import '@fontsource-variable/inter';
+import '@fontsource-variable/jetbrains-mono';
 import '@fontsource-variable/outfit';
-import '@fontsource-variable/fraunces';
 import '@fontsource-variable/nunito';
 import '@fontsource-variable/quicksand';
 import '@fontsource-variable/fredoka';
-import '@fontsource/ibm-plex-mono/400.css';
-import '@fontsource/ibm-plex-mono/500.css';
 import './styles.css';
 import { bootTheme } from './lib/theme';
 

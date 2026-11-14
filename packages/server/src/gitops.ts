@@ -82,14 +82,18 @@ export function cloneSource(url: string): string | null {
   return null;
 }
 
-export async function cloneInto(store: Store, dataDir: string, input: { url: string; label?: string; workshopId?: string | null }) {
+export async function cloneInto(store: Store, dataDir: string, input: { url: string; label?: string; workshopId?: string | null; parentDir?: string | null }) {
   const src = cloneSource(input.url);
   if (!src) throw new Error('Use an https or SSH remote, or an absolute path to a repo on this machine.');
   const label = (input.label || src.replace(/\.git\/?$/, '').split(/[/:]/).filter(Boolean).pop() || 'repo').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32) || 'repo';
   if (!/^[a-z][a-z0-9-]{0,31}$/.test(label)) throw new Error('Pick a label like server or apk.');
-  const dest = path.join(reposDir(dataDir), label);
-  if (fs.existsSync(dest) && fs.readdirSync(dest).length) throw new Error(`${label} already exists. Pick another label.`);
-  const out = await git(reposDir(dataDir), ['clone', '--', src, label]);
+  // Clone into a folder the user picked, or the app's repo cache by default.
+  const parent = input.parentDir?.trim() ? input.parentDir.trim() : reposDir(dataDir);
+  if (!path.isAbsolute(parent)) throw new Error('Clone location must be an absolute folder, like /home/you/src.');
+  fs.mkdirSync(parent, { recursive: true });
+  const dest = path.join(parent, label);
+  if (fs.existsSync(dest) && fs.readdirSync(dest).length) throw new Error(`${dest} already exists. Pick another label or location.`);
+  const out = await git(parent, ['clone', '--', src, label]);
   if (!ok(out) || !fs.existsSync(path.join(dest, '.git'))) throw new Error(`Clone failed.\n${body(out).slice(0, 600)}`);
   registerSharedRepo(store, { label, path: dest, remote: /^(https:\/\/|ssh:\/\/|git@)/.test(src) ? src : null });
   if (input.workshopId) {

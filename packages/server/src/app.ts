@@ -74,7 +74,7 @@ export async function buildApp(options: {
   }
 
   const app = Fastify({ bodyLimit: 8 * 1024 * 1024, logger: false });
-  app.addContentTypeParser(/^audio\//, { parseAs: 'buffer' }, (_req, body, done) => done(null, body));
+  app.addContentTypeParser(/^(audio|video)\//, { parseAs: 'buffer', bodyLimit: 25 * 1024 * 1024 }, (_req, body, done) => done(null, body));
   app.addHook('preParsing', async (req, _reply, payload) => {
     if (!req.url.startsWith('/api/hooks/')) return payload;
     const chunks: Buffer[] = [];

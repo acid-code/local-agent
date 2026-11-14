@@ -40,6 +40,7 @@ import { CrashError, InterruptedToolError, StopError, clampText, now } from './u
 import type { Vault } from './vault.js';
 import { CITE_HINT, findContextTool, shareFileTool } from './files.js';
 import { generateImage, imageTool, localStatus } from './images.js';
+import { NO_MODEL_MESSAGE } from './usable-models.js';
 import { BudgetError, type Lease, type MemoryBudget } from './memory.js';
 import { MEMBER_DENIED_TOOLS, OWNER_ID, foreignPath, getAccount } from './accounts.js';
 
@@ -698,6 +699,7 @@ export class Engine {
 
   private choose(agent: Agent, run: RunRow): RouteDecision {
     const settings = this.store.getSettings();
+    if (!this.candidates(settings, agent.id).length) throw new Error(NO_MODEL_MESSAGE);
     const session = this.store.getSession(run.sessionId);
     const messages = this.store.listMessages(run.sessionId);
     const user = (run.cursor.userMessageId && messages.find((message) => message.id === run.cursor.userMessageId))

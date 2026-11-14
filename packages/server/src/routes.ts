@@ -20,7 +20,7 @@ import { telegramQueue } from './notify.js';
 import { ollamaLoaded } from './ollama.js';
 import { doctorChecks, geminiStateOf, missingRoleModels, redactValue, searchLogs, zipStore, LOG_COMPONENTS, type LogComponent } from './debug.js';
 import { previewPrune, runPrune, snapshotResources } from './resources.js';
-import { speak, transcribe, voiceStatus, KOKORO_COMMAND, WHISPER_COMMAND } from './voice.js';
+import { speak, transcribe, voiceStatus, VoiceError, KOKORO_COMMAND, WHISPER_COMMAND } from './voice.js';
 import { formatSearch, listWorkspace, readWorkspaceFile, searxngHealth, searxngQuery } from './tools.js';
 import {
   KbInputError, createCollection, deleteCollection, deleteDocument, embedRoleWarning, listDocuments, formatCitations, ingestBuffer, ingestFolder, kbUsage, listCollections, ollamaEmbedder, searchKnowledge,
@@ -48,6 +48,8 @@ import { MEMBER_DENIED_TOOLS, OWNER_ID, accountOf, foreignPath, mustOwn, ownerOf
 import { memberByUsername } from './accounts.js';
 import { registerAccounts } from './members.js';
 import { registerMedia } from './media.js';
+import { usableModels } from './usable-models.js';
+import { registerWorkspaceRoutes } from './workspaces.js';
 import { budgetConfig, budgetReport, type MemoryBudget } from './memory.js';
 import { localStatus } from './images.js';
 
@@ -70,6 +72,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
 
   app.get('/api/health', async () => ({ ok: true, version: VERSION }));
   registerAccounts(app, { store, config });
+  registerWorkspaceRoutes(app, { store });
   registerMedia(app, { store, dataDir: config.dataDir, vault, fetchImpl, memory: () => engine.memory });
 
   app.get('/api/auth/me', async (req) => {
@@ -492,7 +495,8 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     try { return { file: readExcerpt(root.path, String(q.path || ''), { start: Number(q.start) || undefined, end: Number(q.end) || undefined }) }; } catch (error) { throw http(400, error instanceof Error ? error.message : 'Bad path.'); }
   });
   app.post('/api/git/clone', async (req) => {
-    const body = parse(z.object({ url: z.string().min(1), label: z.string().optional(), workshopId: z.string().optional() }), req.body);
+    const body = parse(z.object({ url: z.string().min(1), label: z.string().optional(), workshopId: z.string().optional(), parentDir: z.string().max(500).optional() }), req.body);
+    if (body.parentDir && accountOf(req).role === 'member') throw http(403, 'Only the owner can pick a clone location.');
     try { return await cloneInto(store, config.dataDir, body); } catch (error) { throw http(400, error instanceof Error ? error.message : 'Clone failed.'); }
   });
   app.post('/api/git/:root/action', async (req) => {
@@ -594,8 +598,10 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     return { session, messages: store.listMessages(id), summaries: store.listSummaries(id), plan: readPlan(store, id), edits: listEdits(store, id), archived: store.listArchived(id), workshop };
   });
   app.patch('/api/sessions/:id', async (req) => {
-    const body = parse(z.object({ title: z.string().optional(), mode: z.enum(['chat', 'code']).optional(), modelPin: z.string().nullable().optional() }), req.body);
+    const body = parse(z.object({ title: z.string().optional(), mode: z.enum(['chat', 'code']).optional(), modelPin: z.string().nullable().optional(), agentId: z.string().optional(), workshopId: z.string().nullable().optional() }), req.body);
+    if (body.workshopId) { mustOwn(store, req, 'workshop', body.workshopId, 'Workspace set not found.'); body.mode = body.mode ?? 'code'; }
     mustOwn(store, req, 'session', (req.params as { id: string }).id, 'Chat not found.');
+    if (body.agentId) mustOwn(store, req, 'agent', body.agentId, 'Persona not found.');
     if (body.modelPin) body.modelPin = allowedModel(req, chatModelId(store, body.modelPin));
     return { session: store.updateSession((req.params as { id: string }).id, body) };
   });
@@ -706,9 +712,17 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const day = geminiQuotaDay();
     const quota = FREE_TIER_SNAPSHOT.map((row) => {
       const used = store.quotaUse(row.apiName, day);
-      return { ...row, availability: quotaAvailability(row, { rpm: used.rpmWindow === minute ? used.rpm : 0, tpm: used.tpmWindow === minute ? used.tpm : 0, rpd: used.rpd }) };
+      const local = { rpm: used.rpmWindow === minute ? used.rpm : 0, tpm: used.tpmWindow === minute ? used.tpm : 0, rpd: used.rpd };
+      // Usage is only what this install sent; the numbers in the snapshot are documented limits.
+      return { ...row, rpm: { ...row.rpm, used: local.rpm }, tpm: { ...row.tpm, used: local.tpm }, rpd: { ...row.rpd, used: local.rpd }, availability: quotaAvailability(row, local) };
     });
-    return { models: store.listModels(), providers: store.listProviders(), resident: lastScan?.resident ?? [], quota, quotaObservedAt: FREE_TIER_OBSERVED_AT };
+    const geminiConnected = Boolean(process.env.GEMINI_API_KEY);
+    return { models: store.listModels(), providers: store.listProviders(), resident: lastScan?.resident ?? [], quota, quotaObservedAt: FREE_TIER_OBSERVED_AT, geminiConnected };
+  });
+  /** What the model pickers may offer this account right now (Auto is always on top in the UI). */
+  app.get('/api/models/usable', async (req) => {
+    const account = accountOf(req);
+    return { ...usableModels(store, { cloudAllowed: account.role !== 'member' || account.limits.cloud }), canManage: account.role !== 'member' };
   });
   app.post('/api/models/scan', async () => {
     lastScan = await scanMachine(fetchImpl, docker, store);
@@ -898,16 +912,27 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     return { ok: true, detail: 'Restore is staged. The process is exiting so it can come back on the snapshot. systemd or the supervisor should start it again.' };
   });
   app.get('/api/voice', async () => voiceStatus(fetchImpl));
-  app.post('/api/voice/transcribe', async (req) => {
-    const audio = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body as ArrayBuffer);
-    const text = await transcribe(fetchImpl, audio, String(req.headers['content-type'] || 'audio/webm'));
-    return { text };
+  app.post('/api/voice/transcribe', async (req, reply) => {
+    const raw = req.body as unknown;
+    const audio = Buffer.isBuffer(raw) ? raw : raw instanceof ArrayBuffer ? Buffer.from(raw) : Buffer.alloc(0);
+    try {
+      const text = await transcribe(fetchImpl, audio, String(req.headers['content-type'] || 'audio/webm'));
+      return { text };
+    } catch (error) {
+      if (error instanceof VoiceError) return reply.code(error.statusCode).send({ error: error.message, code: error.code, hint: error.hint });
+      throw error;
+    }
   });
   app.post('/api/voice/speak', async (req, reply) => {
     const body = parse(z.object({ text: z.string().min(1).max(2000) }), req.body);
-    const audio = await speak(fetchImpl, body.text);
-    reply.header('content-type', audio.type);
-    return reply.send(audio.bytes);
+    try {
+      const audio = await speak(fetchImpl, body.text);
+      reply.header('content-type', audio.type);
+      return reply.send(audio.bytes);
+    } catch (error) {
+      if (error instanceof VoiceError) return reply.code(error.statusCode).send({ error: error.message, code: error.code, hint: error.hint });
+      throw error;
+    }
   });
   app.get('/api/push/key', async () => ({ publicKey: notifier.publicKey() }));
   app.post('/api/push/subscribe', async (req) => {

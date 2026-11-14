@@ -1,22 +1,25 @@
 import { CuteArt } from '../components/CuteArt';
 import { useEffect, useRef, useState } from 'react';
-import { AtSign, Brain, Check, ChevronDown, Copy, Download, Eye, FileText, Folder, ListTree, Menu, Mic, Paperclip, Pencil, Quote, RotateCcw, Send, Square, Trash2, Wrench, X } from 'lucide-react';
+import { Menu as DropMenu } from '../components/ui';
+import { ModelPicker, useUsableModels } from '../lib/models';
+import { browserDictationSupported, startDictation } from '../lib/dictation';
+import { AtSign, Brain, Check, ChevronDown, Code2, Copy, Download, Eye, FileText, Folder, FolderGit2, ListTree, Menu, MessageSquarePlus, Pin, PinOff, Search, Mic, Paperclip, Pencil, Quote, RotateCcw, Send, Square, Trash2, Wrench, X } from 'lucide-react';
 import { CiteContext, type CiteHandlers } from '../components/Markdown';
 import { FileViewer, type QuotePick, type ViewerSource } from '../components/FileViewer';
 import { MentionPicker, type MentionPick } from '../components/MentionPicker';
 import { CONTEXT_MARK, citationsIn, fileMeta, humanSize, kindOf, quoteBlock, rawUrl, saveFile, uploadFile, type Cite, type FileMeta } from '../lib/files';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { PersonaPanel, useWorkspaces, type PanelAgent } from '../components/PersonaPanel';
+import { PersonaChip, WorkspaceChip, greetingFor, startersFor } from '../components/ChatChips';
 import { parseSources, toolSummary } from '@local-agent/shared';
 import { toast, errorText } from '../lib/toast';
 import { api, post } from '../lib/api';
 import { Markdown } from '../components/Markdown';
 import { Face, type FaceAgent } from '../components/Face';
 
-interface Session { id: string; title: string; agentId: string | null; mode: 'chat' | 'code'; workshopId?: string | null; modelPin?: string | null }
-interface ModelChoice { id: string; name: string; embedding?: boolean; enabled?: boolean }
-interface ProjectDraft { label: string; path: string }
-interface Agent extends FaceAgent { id: string; name: string }
-interface Message { id: string; role: string; content: string; agentId?: string | null; toolName?: string | null; routingNote?: string | null; toolCalls?: { name: string }[] | null }
+interface Session { id: string; title: string; agentId: string | null; mode: 'chat' | 'code'; workshopId?: string | null; modelPin?: string | null; updatedAt?: string }
+type Agent = PanelAgent & FaceAgent;
+interface Message { id: string; role: string; content: string; createdAt?: string; agentId?: string | null; toolName?: string | null; routingNote?: string | null; toolCalls?: { name: string }[] | null }
 interface Step { id: string; kind: string; name: string; status: string; latencyMs?: number; output?: unknown; error?: string | null }
 interface Plan { id: string; items: { id: string; text: string; status: string }[] }
 interface Edit { id: string; label: string; diff: string; revertedAt: string | null }
@@ -44,11 +47,12 @@ export function Chat() {
   const [recording, setRecording] = useState(false);
   const [voiceNote, setVoiceNote] = useState('');
   const recorder = useRef<MediaRecorder | null>(null);
+  const dictationStop = useRef<(() => void) | null>(null);
+  const whisperUp = useRef<boolean | null>(null);
+  const held = useRef(false);
   const [mode, setMode] = useState<'chat' | 'code'>('chat');
-  const [projects, setProjects] = useState<ProjectDraft[]>([{ label: 'server', path: '' }, { label: 'apk', path: '' }]);
-  const [shopName, setShopName] = useState('Server and app');
-  const [shopNote, setShopNote] = useState('');
-  const [models, setModels] = useState<ModelChoice[]>([]);
+  const modelState = useUsableModels();
+  const { models: usable, all: models, loaded: modelsLoaded } = modelState;
   const [modelPin, setModelPin] = useState<string | null>(null);
   const [loadingNote, setLoadingNote] = useState('');
   const [meter, setMeter] = useState<{ used: number; budget: number } | null>(null);
@@ -70,6 +74,11 @@ export function Chat() {
   const [selQuote, setSelQuote] = useState<{ x: number; y: number; text: string; id: string } | null>(null);
   const [dragging, setDragging] = useState(false);
   const pendingJump = useRef<string | null>(null);
+  const [panel, setPanel] = useState<null | 'persona' | 'workspace'>(null);
+  const [chatQuery, setChatQuery] = useState('');
+  const [pins, setPins] = useState<string[]>(() => { try { return JSON.parse(localStorage.getItem('la-pinned-chats') || '[]'); } catch { return []; } });
+  const ws = useWorkspaces();
+  const navigate = useNavigate();
   const active = ['running', 'loading', 'waiting', 'paused', 'awaiting_approval'].includes(status);
 
   async function refreshLists() {
@@ -108,7 +117,6 @@ export function Chat() {
 
   const location = useLocation();
   useEffect(() => {
-    api<{ models: ModelChoice[] }>('/api/models').then((data) => setModels(data.models)).catch(() => undefined);
     const share = new URLSearchParams(location.search).get('share');
     if (share) setDraft(share);
     const persona = new URLSearchParams(location.search).get('persona');
@@ -145,6 +153,7 @@ export function Chat() {
   // Esc stops a running reply (when no dialog or menu has focus).
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      if (event.key === '/' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); (document.querySelector('.persona-chip') as HTMLButtonElement | null)?.click(); return; }
       if (event.key !== 'Escape') return;
       if (rail) { setRail(false); return; }
       if (active && runId) { event.preventDefault(); void control('stop'); }
@@ -200,22 +209,10 @@ export function Chat() {
     return () => source.close();
   }, [runId]);
 
-  async function createWorkshop(event: { preventDefault(): void }) {
-    event.preventDefault();
-    const filled = projects.filter((project) => project.path.trim());
-    try {
-      const created = await post<{ session: Session }>('/api/workshops', { name: shopName, projects: filled });
-      setShopNote('');
-      await refreshLists();
-      await openSession(created.session.id);
-    } catch (error) {
-      setShopNote(error instanceof Error ? error.message : 'Could not open the workshop.');
-    }
-  }
-
   async function createChat(nextMode: 'chat' | 'code'): Promise<string | undefined> {
-    if (!agents[0]) return undefined;
-    const created = await post<{ session: Session }>('/api/sessions', { agentId: agents[0].id, mode: nextMode, title: nextMode === 'code' ? 'Coding session' : 'New chat' });
+    const persona = sessions.find((session) => session.id === current)?.agentId || agents[0]?.id;
+    if (!persona) return undefined;
+    const created = await post<{ session: Session }>('/api/sessions', { agentId: persona, mode: nextMode, title: nextMode === 'code' ? 'Coding session' : 'New chat' });
     await refreshLists();
     await openSession(created.session.id);
     return created.session.id;
@@ -256,34 +253,66 @@ export function Chat() {
     setStatus('running');
   }
 
+  const appendSpoken = (text: string) => setDraft((value) => `${value} ${text}`.trim());
+  const noVoiceHelp = 'No speech model on this machine. Start Whisper from Setup → Voice, or use Chrome/Edge for built-in dictation.';
   async function holdTalk(start: boolean) {
-    if (start) {
-      let stream: MediaStream;
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      } catch (error) {
-        setVoiceNote(error instanceof Error ? error.message : 'Microphone unavailable.');
+    held.current = start;
+    if (!start) {
+      if (dictationStop.current) { dictationStop.current(); dictationStop.current = null; }
+      recorder.current?.stop();
+      recorder.current = null;
+      setRecording(false);
+      return;
+    }
+    // Decide once whether the server can transcribe; otherwise use the browser's own dictation.
+    if (whisperUp.current === null) whisperUp.current = await api<{ whisper: boolean }>('/api/voice').then((data) => data.whisper).catch(() => false);
+    if (!held.current) return;
+    if (!whisperUp.current || !navigator.mediaDevices?.getUserMedia) {
+      if (browserDictationSupported()) {
+        setVoiceNote('Listening (browser dictation)…');
+        dictationStop.current = startDictation(appendSpoken, (message) => { setVoiceNote(message); toast(message, 'error'); });
+        setRecording(true);
         return;
       }
-      const rec = new MediaRecorder(stream);
-      const chunks: Blob[] = [];
-      rec.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
-      rec.onstop = async () => {
-        stream.getTracks().forEach((track) => track.stop());
-        const blob = new Blob(chunks, { type: rec.mimeType || 'audio/webm' });
-        const response = await fetch('/api/voice/transcribe', { method: 'POST', headers: { 'content-type': blob.type }, body: blob });
-        const data = await response.json();
-        if (!response.ok) setVoiceNote(data.error || 'Voice is not available.');
-        else setDraft((value) => `${value} ${data.text || ''}`.trim());
-        if (!response.ok) toast(data.error || 'Voice is not available.', 'error');
-      };
-      rec.start();
-      recorder.current = rec;
-      setRecording(true);
-    } else {
-      recorder.current?.stop();
-      setRecording(false);
+      const message = !navigator.mediaDevices?.getUserMedia ? 'The microphone needs HTTPS or http://localhost in this browser.' : noVoiceHelp;
+      setVoiceNote(message);
+      toast(message, 'error');
+      return;
     }
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (error) {
+      const message = error instanceof DOMException && error.name === 'NotAllowedError' ? 'Microphone permission was denied. Allow it in the browser’s site settings.' : error instanceof Error ? error.message : 'Microphone unavailable.';
+      setVoiceNote(message);
+      toast(message, 'error');
+      return;
+    }
+    if (!held.current) { stream.getTracks().forEach((track) => track.stop()); return; }
+    const rec = new MediaRecorder(stream);
+    const chunks: Blob[] = [];
+    rec.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
+    rec.onstop = async () => {
+      stream.getTracks().forEach((track) => track.stop());
+      const blob = new Blob(chunks, { type: (rec.mimeType || 'audio/webm').split(';')[0] });
+      if (!blob.size) { setVoiceNote('Nothing recorded. Hold the button while you speak.'); return; }
+      setVoiceNote('Transcribing…');
+      try {
+        const response = await fetch('/api/voice/transcribe', { method: 'POST', headers: { 'content-type': blob.type || 'audio/webm' }, body: blob });
+        const data = await response.json().catch(() => ({})) as { text?: string; error?: string; code?: string; hint?: string };
+        if (response.ok) { appendSpoken(data.text || ''); setVoiceNote(''); return; }
+        if (data.code === 'no_stt') whisperUp.current = false;
+        const message = [data.error || 'Voice is not available.', data.hint].filter(Boolean).join(' ');
+        setVoiceNote(message);
+        toast(data.code === 'no_stt' && browserDictationSupported() ? `${data.error} Hold the mic again to use browser dictation.` : message, 'error');
+      } catch {
+        setVoiceNote('Could not reach the server to transcribe.');
+      }
+    };
+    rec.start();
+    recorder.current = rec;
+    setVoiceNote('Recording… release to transcribe.');
+    setRecording(true);
   }
 
   async function control(action: string) {
@@ -388,70 +417,129 @@ export function Chat() {
     }
   }
 
+  const persona = agents.find((agent) => agent.id === currentSession?.agentId) || agents[0];
+  const canManage = usable.canManage !== false;
+  function note(text: string) {
+    setMessages((rows) => [...rows, { id: `div-${Date.now()}`, role: 'divider', content: text }]);
+  }
+  async function switchPersona(id: string) {
+    const next = agents.find((agent) => agent.id === id);
+    if (!next) return;
+    if (!current) { await createChatWith(id); return; }
+    try {
+      await api(`/api/sessions/${current}`, { method: 'PATCH', body: JSON.stringify({ agentId: id }) });
+      setSessions((rows) => rows.map((row) => (row.id === current ? { ...row, agentId: id } : row)));
+      note(`${next.name} answers from here on`);
+    } catch (error) { toast(errorText(error), 'error'); }
+  }
+  async function createChatWith(agentId: string) {
+    const created = await post<{ session: Session }>('/api/sessions', { agentId, title: 'New chat' });
+    await refreshLists();
+    await openSession(created.session.id);
+  }
+  async function newPersona() {
+    try {
+      const created = await post<{ agent: Agent }>('/api/agents', { name: 'New persona', systemPrompt: 'You are a helpful assistant. Be brief and concrete.', toolAllowlist: ['remember', 'recall', 'web_search'] });
+      if (current) await api(`/api/sessions/${current}`, { method: 'PATCH', body: JSON.stringify({ agentId: created.agent.id }) });
+      else await post('/api/sessions', { agentId: created.agent.id, title: 'New chat' }).then((res) => setCurrent((res as { session: Session }).session.id));
+      await refreshLists();
+      setPanel('persona');
+      toast('Persona created. Name it and pick its tools here.', 'ok');
+    } catch (error) { toast(errorText(error), 'error'); }
+  }
+  async function attachWorkspace(id: string | null) {
+    const target = current || await createChat('code').catch(() => undefined);
+    if (!target) return;
+    try {
+      await api(`/api/sessions/${target}`, { method: 'PATCH', body: JSON.stringify({ workshopId: id }) });
+      setSessions((rows) => rows.map((row) => (row.id === target ? { ...row, workshopId: id, mode: id ? 'code' : row.mode } : row)));
+      if (id) setMode('code');
+      const set = ws.sets.find((item) => item.id === id);
+      note(set ? `Working in ${set.name}` : 'Workspace detached');
+    } catch (error) { toast(errorText(error), 'error'); }
+  }
+  function togglePin(id: string) {
+    setPins((rows) => { const next = rows.includes(id) ? rows.filter((row) => row !== id) : [id, ...rows]; localStorage.setItem('la-pinned-chats', JSON.stringify(next)); return next; });
+  }
+  const filtered = sessions.filter((session) => !chatQuery.trim() || session.title.toLowerCase().includes(chatQuery.trim().toLowerCase()));
+  const pinnedRows = filtered.filter((session) => pins.includes(session.id));
+  const groups = new Map<string, Session[]>();
+  for (const session of filtered) {
+    if (pins.includes(session.id)) continue;
+    const key = session.agentId || '';
+    groups.set(key, [...(groups.get(key) || []), session]);
+  }
+  const renderSession = (session: Session) => (
+    <div key={session.id} className={session.id === current ? 'session-item active' : 'session-item'}>
+      {renaming === session.id ? (
+        <form className="rename" onSubmit={(event) => { event.preventDefault(); void saveTitle(session.id); }}>
+          <input autoFocus dir="auto" aria-label="Chat title" value={titleDraft} onChange={(event) => setTitleDraft(event.target.value)} onBlur={() => void saveTitle(session.id)} onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(null); } }} />
+        </form>
+      ) : (
+        <button className="session-open" onClick={() => { void openSession(session.id); setRail(false); }} title={session.title}>
+          <strong dir="auto">{session.title}</strong>
+          <span className="faint">{session.workshopId ? 'Workspace · ' : session.mode === 'code' ? 'Coding · ' : ''}{relativeTime(session.updatedAt)}</span>
+        </button>
+      )}
+      <span className="session-ops">
+        <DropMenu label={`Options for ${session.title}`} items={[
+          { label: 'Rename', icon: Pencil, onSelect: () => { setRenaming(session.id); setTitleDraft(session.title); } },
+          { label: pins.includes(session.id) ? 'Unpin' : 'Pin', icon: pins.includes(session.id) ? PinOff : Pin, onSelect: () => togglePin(session.id) },
+          { label: 'Delete chat', icon: Trash2, danger: true, separator: true, onSelect: () => void removeChat(session.id) },
+        ]} />
+      </span>
+    </div>
+  );
+
   return (
     <CiteContext.Provider value={citeHandlers}>
-    <div className={trace ? 'chat with-trace' : 'chat'}>
+    <div className={`chat${trace ? ' with-trace' : ''}${panel ? ' with-panel' : ''}`} style={persona?.accent ? { ['--persona' as string]: persona.accent } : undefined}>
       {viewer && <FileViewer source={viewer.source} anchor={viewer.anchor} onClose={() => setViewer(null)} onQuote={addQuote} />}
       {selQuote && <button className="sel-quote" style={{ left: selQuote.x, top: selQuote.y }} onMouseDown={(event) => event.preventDefault()} onClick={() => { addQuote({ ref: `msg:${selQuote.id}`, text: selQuote.text, label: 'selection' }); setSelQuote(null); window.getSelection()?.removeAllRanges(); }}><Quote size={14} /> Quote</button>}
-      {(rail || trace) && <div className="scrim" onClick={() => { setRail(false); setTrace(false); }} />}
+      {(rail || trace || panel) && <div className="scrim" onClick={() => { setRail(false); setTrace(false); setPanel(null); }} />}
       <aside className={rail ? 'rail open' : 'rail'} aria-label="Chats">
         <div className="sheet-head">
           <strong>Chats</strong>
           <button className="icon-btn" aria-label="Close chats" onClick={() => setRail(false)}><X size={18} /></button>
         </div>
         <div className="row rail-actions">
-          <button className="btn primary" onClick={() => { void createChat('chat'); setRail(false); }}>New chat</button>
-          <button className="btn" onClick={() => { void createChat('code'); setRail(false); }}>Code</button>
+          <span className="split">
+            <button className="btn primary" title="Start a new chat with the first agent" onClick={() => { void createChat('chat'); setRail(false); }}><MessageSquarePlus size={16} aria-hidden /> New chat</button>
+            <DropMenu label="More ways to start" icon={ChevronDown} align="start" items={[
+              { label: 'New chat', icon: MessageSquarePlus, hint: 'Talk', onSelect: () => { void createChat('chat'); setRail(false); } },
+              { label: 'New coding session', icon: Code2, hint: 'Edits files', onSelect: () => { void createChat('code'); setRail(false); } },
+              { label: 'Chat in a workspace…', icon: FolderGit2, hint: 'Folders and repos', onSelect: () => { setRail(false); setPanel('workspace'); } },
+            ]} />
+          </span>
         </div>
+        <label className="rail-search"><Search size={15} aria-hidden /><input type="search" placeholder="Search chats" aria-label="Search chats" value={chatQuery} onChange={(event) => setChatQuery(event.target.value)} /></label>
         <div className="session-list">
-          {sessions.map((session) => (
-            <div key={session.id} className={session.id === current ? 'session-item active' : 'session-item'}>
-              {renaming === session.id ? (
-                <form className="rename" onSubmit={(event) => { event.preventDefault(); void saveTitle(session.id); }}>
-                  <input autoFocus dir="auto" aria-label="Chat title" value={titleDraft} onChange={(event) => setTitleDraft(event.target.value)} onBlur={() => void saveTitle(session.id)} onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); setRenaming(null); } }} />
-                </form>
-              ) : (
-                <button className="session-open" onClick={() => { void openSession(session.id); setRail(false); }} title={session.title}>
-                  <strong dir="auto">{session.title}</strong>
-                  <span className="faint">{session.workshopId ? 'Workshop' : session.mode === 'code' ? 'Coding' : 'Chat'}</span>
-                </button>
-              )}
-              <span className="session-ops">
-                <button className="icon-btn" aria-label={`Rename ${session.title}`} title="Rename" onClick={() => { setRenaming(session.id); setTitleDraft(session.title); }}><Pencil size={15} /></button>
-                <button className="icon-btn danger" aria-label={`Delete ${session.title}`} title="Delete" onClick={() => void removeChat(session.id)}><Trash2 size={15} /></button>
-              </span>
-            </div>
-          ))}
-          {sessions.length === 0 && <p className="faint">No chats yet. Start one with New chat.</p>}
-          {nextCursor && <button className="btn" type="button" onClick={() => void loadMoreSessions()}>Older chats</button>}
+          {pinnedRows.length > 0 && <><p className="list-heading">Pinned</p>{pinnedRows.map(renderSession)}</>}
+          {[...groups.entries()].map(([agentId, rows]) => {
+            const owner = agents.find((agent) => agent.id === agentId);
+            return <div key={agentId || 'none'} className="session-group">{(groups.size > 1 || pinnedRows.length > 0) && <p className="list-heading">{owner ? <><Face agent={owner} size={16} /> {owner.name}</> : 'Other'}</p>}{rows.map(renderSession)}</div>;
+          })}
+          {sessions.length === 0 && <p className="faint">No chats yet. Press New chat to start one.</p>}
+          {sessions.length > 0 && filtered.length === 0 && <p className="faint">No chat titles match “{chatQuery}”.</p>}
+          {nextCursor && <button className="btn ghost small" type="button" onClick={() => void loadMoreSessions()}>Older chats</button>}
         </div>
-        {agents.length < 2 && <p className="muted">Create two personas under Agents. The house operator and the researcher are one click each.</p>}
-        <details className="card workshop">
-          <summary><strong>Workshop</strong> <span className="faint">several projects, one coding chat</span><ChevronDown size={16} /></summary>
-          <form onSubmit={createWorkshop}>
-            <p className="faint">The turn goes to a model that can code.</p>
-            <input className="input" value={shopName} onChange={(event) => setShopName(event.target.value)} placeholder="Name" aria-label="Workshop name" />
-            {projects.map((project, index) => (
-              <div key={index} className="project-row">
-                <input className="input" value={project.label} onChange={(event) => setProjects((rows) => rows.map((row, i) => i === index ? { ...row, label: event.target.value } : row))} placeholder="label" aria-label="Project label" />
-                <input className="input" value={project.path} onChange={(event) => setProjects((rows) => rows.map((row, i) => i === index ? { ...row, path: event.target.value } : row))} placeholder="/home/asaf/src/server" aria-label="Project path" />
-              </div>
-            ))}
-            <div className="row">
-              <button className="btn" type="button" onClick={() => setProjects((rows) => [...rows, { label: '', path: '' }])}>Add project</button>
-              <button className="btn primary" type="submit">Open workshop</button>
-            </div>
-            {shopNote && <p className="muted">{shopNote}</p>}
-          </form>
-        </details>
       </aside>
       <section className="thread">
         <div className="thread-head">
           <button className="btn ghost chats-btn" aria-label="Show chats" onClick={() => setRail(true)}><Menu size={16} /> <span>Chats</span></button>
+          {persona && <button className="persona-name" title="Persona settings" aria-expanded={panel === 'persona'} onClick={() => setPanel(panel === 'persona' ? null : 'persona')}><Face agent={persona} size={22} /><span>{persona.name}</span></button>}
           <strong className="thread-title" dir="auto" title={currentSession?.title}>{currentSession?.title || 'No chat open'}</strong>
           {status && status !== 'completed' && <span className={`badge ${status === 'failed' ? 'bad' : active ? 'warn' : ''}`}>{status}</span>}
           {mode === 'code' && <span className="badge warn">{currentSession?.workshopId ? 'workshop' : 'coding'}</span>}
-          <button className={trace ? 'btn ghost on' : 'btn ghost'} aria-pressed={trace} aria-label="Trace" onClick={() => setTrace((value) => !value)}><ListTree size={16} /> <span>Trace</span></button>
+          <button className={trace ? 'btn ghost on' : 'btn ghost'} aria-pressed={trace} title="Show what the agent did: model, tools, timings" onClick={() => setTrace((value) => !value)}><ListTree size={16} aria-hidden /> <span>Trace</span></button>
+          {currentSession && <DropMenu label="Chat options" items={[
+            { label: 'Rename chat', icon: Pencil, onSelect: () => { setRail(true); setRenaming(currentSession.id); setTitleDraft(currentSession.title); } },
+            { label: trace ? 'Hide trace' : 'Show trace', icon: ListTree, onSelect: () => setTrace((value) => !value) },
+            { label: 'Persona settings', icon: Pencil, onSelect: () => setPanel('persona') },
+            { label: 'Workspaces', icon: FolderGit2, onSelect: () => setPanel('workspace') },
+            { label: 'New chat', icon: MessageSquarePlus, onSelect: () => void createChat('chat') },
+            { label: 'Delete chat', icon: Trash2, danger: true, separator: true, onSelect: () => void removeChat(currentSession.id) },
+          ]} />}
         </div>
         <div className={dragging ? 'messages dragging' : 'messages'} ref={box} onMouseUp={onSelectText} onTouchEnd={() => setTimeout(onSelectText, 50)} onScroll={() => selQuote && setSelQuote(null)}
           onDragOver={(event) => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); setDragging(true); } }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); void dropFiles(event.dataTransfer.files); }}>
@@ -469,15 +557,17 @@ export function Chat() {
             </div>
           )}
           {messages.length === 0 && (
-            <div className="card empty-card">
-              <CuteArt />
-              <h3>{current ? 'Say something to start.' : 'No chat open.'}</h3>
-              <p className="muted">Ask a question, or try one of these. With no model connected, Rehearsal still streams and calls tools.</p>
-              <div className="row">
-                {['list files', 'remember that this box has 48 GB', '/image a cosy reading nook, watercolor'].map((prompt) => (
-                  <button key={prompt} className="btn" onClick={() => { setDraft(prompt); input.current?.focus(); }}>{prompt}</button>
-                ))}
-              </div>
+            <div className="empty-chat">
+              {persona ? <Face agent={persona} size={64} /> : <CuteArt />}
+              <h2>{persona ? greetingFor(persona) : 'Create a persona to start.'}</h2>
+              {modelsLoaded && usable.empty
+                ? <p className="muted">No model yet. <Link to="/setup">Set one up</Link>: pull a model in Ollama and press Scan, or add a Gemini key.</p>
+                : <div className="starters">
+                    {startersFor(persona, mode === 'code').map((prompt) => (
+                      <button key={prompt} className="starter" onClick={() => { setDraft(prompt); input.current?.focus(); }}>{prompt}</button>
+                    ))}
+                  </div>}
+              {!persona && <Link className="btn primary" to="/agents?new=1">New persona</Link>}
             </div>
           )}
           {offers.length > 0 && (
@@ -499,9 +589,14 @@ export function Chat() {
               </div>
             </form>
           )}
-          {messages.map((message) => {
+          {messages.map((message, index) => {
             const speaker = message.agentId ? agents.find((agent) => agent.id === message.agentId) : undefined;
             const fromAgent = message.role !== 'user' && message.role !== 'tool' && speaker;
+            // The persona mark and name show only on the first reply of a streak.
+            let previous: Message | undefined;
+            for (let i = index - 1; i >= 0; i -= 1) { if (messages[i]!.role !== 'tool') { previous = messages[i]; break; } }
+            const streak = Boolean(fromAgent && previous && previous.role === 'assistant' && previous.agentId === message.agentId);
+            if (message.role === 'divider') return <div key={message.id} className="settings-divider" role="note"><span>{message.content}</span></div>;
             if (message.role === 'tool') return <ToolCard key={message.id} name={message.toolName} content={message.content} />;
             const calls = (message.toolCalls || []).map((call) => call.name).filter(Boolean);
             if (message.role === 'assistant' && !message.content.trim() && calls.length) {
@@ -510,8 +605,8 @@ export function Chat() {
             const [visible, attached] = message.content.split(CONTEXT_MARK);
             const cites = citationsIn(visible || '').filter((cite) => cite.kind === 'file');
             return (
-            <article key={message.id} id={`m-${message.id}`} data-mid={message.id} className={message.role === 'user' ? 'msg user' : fromAgent ? 'msg from-agent' : 'msg'} style={fromAgent ? { ['--accent' as string]: speaker.accent || '#e4b56a' } : undefined}>
-              {fromAgent ? <div className="who"><Face agent={speaker} size={28} /><span className="meta">{speaker.emoji ? `${speaker.emoji} ` : ''}{speaker.name}</span></div> : message.role !== 'user' && <div className="meta"><span>{message.role}</span></div>}
+            <article key={message.id} id={`m-${message.id}`} data-mid={message.id} title={message.createdAt ? new Date(message.createdAt).toLocaleString() : undefined} className={message.role === 'user' ? 'msg user' : fromAgent ? `msg from-agent${streak ? ' cont' : ''}` : 'msg'} style={fromAgent ? { ['--accent' as string]: speaker.accent || '#e4b56a' } : undefined}>
+              {fromAgent ? !streak && <div className="who"><Face agent={speaker} size={28} /><span className="meta">{speaker.emoji ? `${speaker.emoji} ` : ''}{speaker.name}</span></div> : message.role !== 'user' && <div className="meta"><span>{message.role}</span></div>}
               {message.routingNote && <div className="switch">{message.routingNote}</div>}
               <div dir="auto"><Markdown text={visible || ''} sourceId={message.id} /></div>
               {attached && <details className="attached-note"><summary className="faint">Context sent with this message ({Math.round(attached.length / 1000)}k characters)</summary><pre className="mono tool-output">{attached.slice(0, 4000)}{attached.length > 4000 ? '\n…' : ''}</pre></details>}
@@ -591,19 +686,17 @@ export function Chat() {
               if (at) setPicker({ query: at[2] || '' }); else if (picker && !upto.includes('@')) setPicker(null);
             }} onPaste={(event) => { if (event.clipboardData.files.length) { event.preventDefault(); void dropFiles(event.clipboardData.files); } }} onKeyDown={(event) => { if (picker && event.key === 'Escape') { event.preventDefault(); setPicker(null); return; } if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(event); } }} />
             <div className="composer-bar">
-              <label className="model-pill" title={modelPin ? `Pinned to ${pinnedName}` : lastModel ? `Auto picks per message. Last reply: ${lastModel}` : 'Auto picks a model per message'}>
-                <select aria-label="Model" value={modelPin || ''} onChange={async (event) => {
-                  const value = event.target.value || null;
+              <PersonaChip agents={agents} active={persona} onSwitch={(id) => void switchPersona(id)} onEdit={() => setPanel('persona')} onNew={() => void newPersona()} />
+              <WorkspaceChip sets={ws.sets} workspaces={ws.workspaces} activeId={currentSession?.workshopId} canManage={canManage} onAttach={(id) => void attachWorkspace(id)} onAdd={() => setPanel('workspace')} />
+              <span title={modelPin ? `Pinned to ${pinnedName}` : lastModel ? `Auto picks per message. Last reply: ${lastModel}` : 'Auto picks a model per message'}>
+                <ModelPicker state={modelState} value={modelPin} autoLabel={lastModel && !modelPin ? `Auto · ${lastModel}` : 'Auto'} onChange={async (value) => {
+                  const previous = modelPin;
                   setModelPin(value);
                   try {
                     if (current) await api(`/api/sessions/${current}`, { method: 'PATCH', body: JSON.stringify({ modelPin: value }) });
-                  } catch (error) { toast(errorText(error), 'error'); setModelPin(modelPin); }
-                }}>
-                  <option value="">{lastModel && !modelPin ? `Auto · ${lastModel}` : 'Auto'}</option>
-                  {models.filter((model) => !model.embedding && model.enabled !== false).map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
-                </select>
-                <ChevronDown size={14} aria-hidden />
-              </label>
+                  } catch (error) { toast(errorText(error), 'error'); setModelPin(previous); }
+                }} />
+              </span>
               {meter && <span className="context-meter" aria-label="Context used" title="Context used / budget">{Math.round((meter.used / Math.max(1, meter.budget)) * 100)}% ctx</span>}
               <span className="spacer" />
               <button className="icon-btn round" type="button" aria-label="Reference a file, folder, or upload (@)" title="Reference files (@) or upload" onClick={() => setPicker(picker ? null : { query: '' })}><Paperclip size={18} /></button>
@@ -617,6 +710,12 @@ export function Chat() {
           {(voiceNote || loadingNote) ? <p className="composer-hint faint">{voiceNote || loadingNote}</p> : <p className="composer-hint faint"><span className="kbd-hint">Enter to send · Shift+Enter for a new line · Esc to stop</span></p>}
         </div>
       </section>
+      {panel && <PersonaPanel agent={persona || null} tab={panel} onTab={setPanel} onClose={() => setPanel(null)} ws={ws} canManage={canManage}
+        onSaved={(agent, what) => {
+          setAgents((rows) => rows.map((row) => (row.id === agent.id ? { ...row, ...agent } : row)));
+          setMessages((rows) => { const last = rows[rows.length - 1]; const text = 'Settings changed · applies to the next message'; return last?.role === 'divider' && last.content === text ? rows : rows.length ? [...rows, { id: `div-${Date.now()}`, role: 'divider', content: text }] : rows; });
+          void what;
+        }} />}
       <aside className={trace ? 'trace open' : 'trace'} aria-label="Trace">
         <div className="sheet-head">
           <strong>Trace</strong>
@@ -691,4 +790,17 @@ function ToolCard({ name, content }: { name?: string | null; content: string }) 
       ) : <pre className="mono tool-output" dir="auto">{content}</pre>}
     </details>
   );
+}
+
+function relativeTime(iso?: string): string {
+  if (!iso) return '';
+  const diff = Date.now() - new Date(iso).getTime();
+  const minutes = Math.round(diff / 60000);
+  if (minutes < 1) return 'now';
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.round(hours / 24);
+  if (days < 7) return `${days}d`;
+  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }

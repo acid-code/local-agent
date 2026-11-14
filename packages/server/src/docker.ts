@@ -10,6 +10,47 @@ export interface ContainerSummary {
   state: string;
   status: string;
   labels: Record<string, string>;
+  /** What local-agent uses it for. Only managed containers are ever listed. */
+  role: ManagedRole;
+}
+
+/** Every container local-agent starts carries these, so the app only ever shows or touches its own. */
+export const MANAGED_LABEL = 'com.local-agent.managed';
+export const ROLE_LABEL = 'com.local-agent.role';
+export type ManagedRole = 'search' | 'mcp' | 'tool' | 'sandbox' | 'image' | 'app';
+const ROLES = new Set<ManagedRole>(['search', 'mcp', 'tool', 'sandbox', 'image', 'app']);
+/** Labels older versions used (local-agent.role=...). */
+const LEGACY_ROLE: Record<string, ManagedRole> = { searxng: 'search', mcp: 'mcp', sandbox: 'sandbox', shell: 'tool', 'agent-run': 'tool', whisper: 'tool', kokoro: 'tool', 'image-build': 'image' };
+/** docker compose project names of this app (the repo folder name by default). */
+const COMPOSE_PROJECTS = () => new Set(['local-agent', ...(process.env.LA_COMPOSE_PROJECT ? [process.env.LA_COMPOSE_PROJECT] : [])]);
+
+export function withManagedLabels(labels: Record<string, string> = {}): Record<string, string> {
+  const legacy = labels['local-agent.role'] ?? labels['local-agent'];
+  const given = labels[ROLE_LABEL] as ManagedRole | undefined;
+  const role = given && ROLES.has(given) ? given : (legacy && LEGACY_ROLE[legacy]) || 'tool';
+  return { ...labels, [MANAGED_LABEL]: 'true', [ROLE_LABEL]: role };
+}
+
+/** The role of a container local-agent owns, or null for anything else on the machine. */
+export function managedRole(container: { name: string; labels: Record<string, string> }): ManagedRole | null {
+  const labels = container.labels ?? {};
+  if (labels[MANAGED_LABEL] === 'true') {
+    const role = labels[ROLE_LABEL] as ManagedRole;
+    return ROLES.has(role) ? role : 'tool';
+  }
+  const legacy = labels['local-agent.role'] ?? labels['local-agent'];
+  if (legacy) return LEGACY_ROLE[legacy] ?? 'tool';
+  const project = labels['com.docker.compose.project'];
+  if (project && COMPOSE_PROJECTS().has(project)) {
+    const service = labels['com.docker.compose.service'] || '';
+    return /searx/.test(service) ? 'search' : /whisper|kokoro|voice/.test(service) ? 'tool' : 'app';
+  }
+  const name = (container.name || '').replace(/^\//, '');
+  if (name === 'local-agent-searxng') return 'search';
+  if (name === 'local-agent-whisper' || name === 'local-agent-kokoro') return 'tool';
+  if (name.startsWith('la-mcp-')) return 'mcp';
+  if (name.startsWith('la-sbx-')) return 'sandbox';
+  return null;
 }
 
 export interface RunSpec {
@@ -71,33 +112,47 @@ export class DockerCtl {
     return this.client;
   }
 
+  /** Containers local-agent owns. Other containers on the machine are never listed. */
   async list(): Promise<ContainerSummary[]> {
     const rows = await this.api().listContainers({ all: true });
-    return rows.map((row) => ({
-      id: row.Id,
-      name: (row.Names?.[0] || '').replace(/^\//, ''),
-      image: row.Image,
-      state: row.State,
-      status: row.Status,
-      labels: row.Labels ?? {},
-    }));
+    const out: ContainerSummary[] = [];
+    for (const row of rows) {
+      const name = (row.Names?.[0] || '').replace(/^\//, '');
+      const labels = row.Labels ?? {};
+      const role = managedRole({ name, labels });
+      if (role) out.push({ id: row.Id, name, image: row.Image, state: row.State, status: row.Status, labels, role });
+    }
+    return out;
+  }
+
+  /** Refuse to act on a container local-agent does not own. Accepts an id, id prefix, or name. */
+  async assertManaged(id: string): Promise<ContainerSummary> {
+    const key = String(id || '').replace(/^\//, '');
+    const match = key ? (await this.list()).find((row) => row.id === key || (key.length >= 6 && row.id.startsWith(key)) || row.name === key) : undefined;
+    if (!match) throw Object.assign(new Error('That container is not managed by local-agent, so it cannot be changed here.'), { statusCode: 403 });
+    return match;
   }
 
   async inspect(id: string) {
-    return this.api().getContainer(id).inspect();
+    const row = await this.assertManaged(id);
+    return this.api().getContainer(row.id).inspect();
   }
 
   async logs(id: string) {
+    await this.assertManaged(id);
     const buffer = await this.api().getContainer(id).logs({ stdout: true, stderr: true, tail: 200 });
     return demux(Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer));
   }
 
   async start(id: string) {
-    await this.api().getContainer(id).start();
+    const row = await this.assertManaged(id);
+    await this.api().getContainer(row.id).start();
   }
 
   async remove(id: string) {
-    await this.api().getContainer(id).remove({ force: true });
+    const row = await this.assertManaged(id);
+    if (row.role === 'app') throw Object.assign(new Error('That is local-agent itself. Stop it with docker compose instead.'), { statusCode: 403 });
+    await this.api().getContainer(row.id).remove({ force: true });
   }
 
   async removeImage(id: string) {
@@ -116,7 +171,7 @@ export class DockerCtl {
       Image: spec.Image,
       Cmd: spec.Cmd,
       name: spec.name,
-      Labels: spec.Labels,
+      Labels: withManagedLabels(spec.Labels),
       Env: spec.Env,
       ExposedPorts: spec.ExposedPorts,
       HostConfig: spec.HostConfig,
@@ -138,7 +193,7 @@ export class DockerCtl {
   /** Run a container to completion and copy one file out of it (used to build a native binary without a local compiler). */
   async runAndCopyOut(spec: RunSpec, filePath: string, timeoutMs = 30 * 60_000): Promise<{ code: number; output: string; file: Buffer | null }> {
     await this.pull(spec.Image).catch(() => undefined);
-    const container = await this.api().createContainer({ Image: spec.Image, Cmd: spec.Cmd, Env: spec.Env, Labels: spec.Labels, name: spec.name });
+    const container = await this.api().createContainer({ Image: spec.Image, Cmd: spec.Cmd, Env: spec.Env, Labels: withManagedLabels(spec.Labels), name: spec.name });
     try {
       await container.start();
       const result = await Promise.race([
@@ -163,7 +218,7 @@ export class DockerCtl {
       Cmd: spec.Cmd,
       Env: spec.Env,
       WorkingDir: spec.WorkingDir,
-      Labels: spec.Labels,
+      Labels: withManagedLabels(spec.Labels),
       HostConfig: spec.HostConfig,
       name: spec.name,
       AttachStdout: true,
@@ -188,7 +243,7 @@ export class DockerCtl {
       Cmd: ['sleep', 'infinity'],
       name,
       WorkingDir: '/work',
-      Labels: { 'local-agent.role': 'sandbox', 'local-agent.agent': agentId },
+      Labels: withManagedLabels({ 'local-agent.role': 'sandbox', 'local-agent.agent': agentId }),
       HostConfig: {
         Memory: 512 * 1024 * 1024,
         NanoCpus: 1_000_000_000,
@@ -209,7 +264,7 @@ export class DockerCtl {
       Cmd: spec.Cmd,
       Env: spec.Env,
       WorkingDir: spec.WorkingDir,
-      Labels: spec.Labels,
+      Labels: withManagedLabels(spec.Labels),
       HostConfig: spec.HostConfig,
       name: spec.name,
       OpenStdin: true,
@@ -287,7 +342,7 @@ export function mcpContainerSpec(input: {
     Cmd: input.cmd,
     Env: Object.entries(input.env).map(([key, value]) => `${key}=${value}`),
     name: `la-mcp-${input.id.slice(0, 18)}`,
-    Labels: { 'local-agent.role': 'mcp', 'local-agent.mcp': input.id },
+    Labels: withManagedLabels({ 'local-agent.role': 'mcp', 'local-agent.mcp': input.id }),
     OpenStdin: true,
     HostConfig: {
       Memory: (input.memoryMb ?? 512) * 1024 * 1024,

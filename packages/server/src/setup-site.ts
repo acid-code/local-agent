@@ -15,6 +15,7 @@ import { embedRoleWarning } from './kb.js';
 import type { Settings } from './settings.js';
 import type { Vault } from './vault.js';
 import { registerImageAdmin } from './media.js';
+import { usableModels } from './usable-models.js';
 import fs from 'node:fs';
 import { accountDir, createMember, listMembers } from './accounts.js';
 
@@ -238,7 +239,7 @@ function publicState(store: Store, vault: Vault) {
   const settings = store.getSettings();
   return {
     username: store.getOwner()?.username ?? null,
-    models: store.listModels().filter((model) => model.enabled).map((model) => ({ id: model.id, name: model.name, local: model.local })),
+    models: [...usableModels(store, { cloudAllowed: true }).local, ...usableModels(store, { cloudAllowed: true }).cloud.filter((model) => !model.disabled)].map((model) => ({ id: model.id, name: model.name, local: model.local })),
     secrets: [...VAULT_KEYS].map((key) => ({ key, set: Boolean(vault.active(key) || process.env[key]) })),
     settings: publicSettings(settings),
   };

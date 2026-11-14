@@ -599,12 +599,12 @@ export class Store {
     return row ? mapSession(row) : null;
   }
 
-  updateSession(id: string, patch: Partial<Pick<Session, 'title' | 'summary' | 'activeModelId' | 'modelPin' | 'archived' | 'mode' | 'workshopId'>>) {
+  updateSession(id: string, patch: Partial<Pick<Session, 'title' | 'summary' | 'activeModelId' | 'modelPin' | 'archived' | 'mode' | 'workshopId' | 'agentId'>>) {
     const current = this.getSession(id);
     if (!current) return null;
     const next = { ...current, ...patch, updatedAt: now() };
-    this.db.prepare('UPDATE chat_sessions SET title=?, summary=?, active_model_id=?, model_pin=?, archived=?, mode=?, workshop_id=?, updated_at=? WHERE id=?').run(
-      next.title, next.summary, next.activeModelId, next.modelPin, next.archived ? 1 : 0, next.mode, next.workshopId, next.updatedAt, id,
+    this.db.prepare('UPDATE chat_sessions SET title=?, summary=?, active_model_id=?, model_pin=?, archived=?, mode=?, workshop_id=?, agent_id=?, updated_at=? WHERE id=?').run(
+      next.title, next.summary, next.activeModelId, next.modelPin, next.archived ? 1 : 0, next.mode, next.workshopId, next.agentId, next.updatedAt, id,
     );
     return this.getSession(id);
   }
