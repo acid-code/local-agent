@@ -3,6 +3,7 @@ import { api, post } from '../lib/api';
 import { toast } from '../lib/toast';
 import { Appearance } from '../components/Appearance';
 import { AccountCard, People, QuotaCard } from '../components/People';
+import { ImageRole } from '../components/ImageRole';
 
 interface Secret { id: string; name: string; handle: string; scope: string; revokedAt: string | null }
 interface Audit { id: number; action: string; actor: string; createdAt: string }
@@ -15,6 +16,7 @@ export function Settings({ role = 'owner' }: { role?: 'owner' | 'member' }) {
         <h1>Settings</h1>
         <p className="lede">Make it yours. Your look, chats, personas and files belong to your account only.</p>
         <Appearance />
+        <ImageRole />
         <QuotaCard />
         <AccountCard />
       </div>

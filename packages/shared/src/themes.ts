@@ -89,6 +89,14 @@ export interface ThemeChoice {
   bubbles?: 'classic' | 'soft' | 'minimal';
   font?: string;
   decor?: boolean;
+  /** 'none', a bundled wallpaper id, or 'upload' for the account's own photo. */
+  wallpaper?: string;
+  wallpaperMode?: 'pattern' | 'scene';
+  wallpaperOpacity?: number;
+  wallpaperBlur?: number;
+  wallpaperDim?: number;
+  /** Bumped on each upload so caches pick up the new photo. */
+  wallpaperVersion?: number;
 }
 
 export const DEFAULT_THEME: ThemeChoice = { preset: 'dark', followSystem: false, lightPreset: 'light', darkPreset: 'dark', accent: null, fontScale: 1, density: 'cozy', bubbles: 'classic' };
@@ -169,7 +177,7 @@ export function themeVars(choice: ThemeChoice, systemDark: boolean): { preset: T
   const light = preset.scheme === 'light';
   const vars: Record<string, string> = {
     '--bg': preset.bg, '--bg-2': preset.bg2, '--bg-3': preset.bg3, '--bg-4': preset.bg4,
-    '--bg-rgb': hexToRgb(preset.bg).join(','), '--bg-2-rgb': hexToRgb(preset.bg2).join(','),
+    '--bg-rgb': hexToRgb(preset.bg).join(','), '--bg-2-rgb': hexToRgb(preset.bg2).join(','), '--bg-3-rgb': hexToRgb(preset.bg3).join(','),
     '--text': preset.text, '--text-rgb': hexToRgb(preset.text).join(','), '--muted': preset.muted, '--faint': preset.faint,
     '--line': `rgba(${hexToRgb(preset.text).join(',')}, ${light ? 0.11 : 0.08})`,
     '--line-strong': `rgba(${hexToRgb(preset.text).join(',')}, ${light ? 0.2 : 0.16})`,

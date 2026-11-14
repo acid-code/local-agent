@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, post } from '../lib/api';
+import { ImageRole } from '../components/ImageRole';
 
 interface Model { id: string; name: string; apiName: string; contextWindow: number; practicalBudget: number; strategy: string; tokenizer: string; sizeClass: string; local: boolean; notes: string; source: string; freeTier: boolean | null }
 interface Quota { displayName: string; category: string; chat: boolean; rpm: { used: number; limit: number | null }; tpm: { used: number; limit: number | null }; rpd: { used: number; limit: number | null }; availability: { open: boolean; reason?: string } }
@@ -28,6 +29,7 @@ export function Models() {
       <p className="lede">The default is the local model. Gemini is used only for a hard question, a synthesis that does not fit the local budget, or after repeated local failures. Daily and per-minute caps are enforced. When a cap is hit, the turn stays local. Argon and Carbon are closed on the free tier.</p>
       {observed && <p className="faint">Reading captured {new Date(observed).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem' })} Asia/Jerusalem.</p>}
       <button className="btn" onClick={async () => { await post('/api/models/scan'); await load(); }}>Scan local servers</button>
+      <div style={{ marginTop: 16 }}><ImageRole /></div>
       <div className="grid" style={{ marginTop: 16 }}>
         {chatQuota.map((row) => (
           <article key={row.displayName} className="card">

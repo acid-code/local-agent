@@ -8,6 +8,7 @@
   --bg-4: #222733;
   --bg-rgb: 9,10,12;
   --bg-2-rgb: 17,19,24;
+  --bg-3-rgb: 24,27,34;
   --text-rgb: 244,240,230;
   --line: rgba(243, 236, 223, 0.08);
   --line-strong: rgba(243, 236, 223, 0.16);
@@ -637,3 +638,34 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 :root[data-decor="on"] .empty-card { text-align: center; }
 :root[data-decor="on"] .empty-card .row { justify-content: center; }
 .toggle { display: inline-flex; gap: 8px; align-items: center; }
+
+/* ---------- Wallpapers ---------- */
+#wallpaper { position: fixed; inset: calc(var(--wp-blur, 0px) * -2); z-index: 0; pointer-events: none; background-position: center; opacity: var(--wp-opacity, 0.85); filter: blur(var(--wp-blur, 0px)); }
+:root[data-wallpaper="on"] body::after { content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none; background: rgba(var(--bg-rgb), var(--wp-dim, 0.3)); }
+:root[data-wallpaper="on"] #root { position: relative; z-index: 1; }
+:root[data-wallpaper="on"] body { background: var(--bg); }
+/* Keep text on solid ground: panels get a frosted backing, plain replies get a soft card. */
+:root[data-wallpaper="on"] .sidebar, :root[data-wallpaper="on"] .rail, :root[data-wallpaper="on"] .topbar, :root[data-wallpaper="on"] .chat-head { background: rgba(var(--bg-2-rgb), 0.86); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
+:root[data-wallpaper="on"] .bottom-nav { background: rgba(var(--bg-2-rgb), 0.92); }
+:root[data-wallpaper="on"] .msg:not(.user):not(.from-agent) { background: rgba(var(--bg-2-rgb), 0.9); border: 1px solid var(--line); border-radius: calc(16px * var(--round)); padding: 12px 14px; }
+:root[data-wallpaper="on"] .msg.from-agent { background: color-mix(in srgb, var(--accent, var(--brass)) 10%, rgba(var(--bg-2-rgb), 0.92)); }
+:root[data-wallpaper="on"] .msg.user { background: rgba(var(--bg-3-rgb), 0.94); }
+:root[data-wallpaper="on"][data-bubbles="soft"] .msg.user { background: color-mix(in srgb, var(--brass) 16%, rgba(var(--bg-2-rgb), 0.95)); }
+:root[data-wallpaper="on"][data-bubbles="soft"] .msg:not(.user) .prose { background: transparent; border: 0; padding: 0; box-shadow: none; }
+:root[data-wallpaper="on"] .page > .card, :root[data-wallpaper="on"] .card { background: rgba(var(--bg-2-rgb), 0.94); }
+:root[data-wallpaper="on"] .composer form { background: rgba(var(--bg-2-rgb), 0.96); }
+:root[data-wallpaper="on"] .page h1, :root[data-wallpaper="on"] .page > .lede { text-shadow: 0 0 12px rgba(var(--bg-rgb), 0.9), 0 0 2px rgba(var(--bg-rgb), 0.9); }
+.wall-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 10px; }
+.wall-card { padding: 0; border: 2px solid transparent; border-radius: calc(14px * var(--round)); overflow: hidden; background: var(--bg-3); box-shadow: 0 0 0 1px var(--line-strong); text-align: left; }
+.wall-card[aria-pressed="true"] { border-color: var(--brass); box-shadow: 0 0 0 3px rgba(var(--brass-rgb), 0.25); }
+.wall-thumb { display: grid; place-items: center; height: 74px; background-position: center; background-color: var(--bg-3); color: var(--muted); font-size: calc(22px * var(--fs)); }
+.wall-name { display: block; padding: 6px 8px; font-size: calc(12.5px * var(--fs)); background: var(--bg-2); }
+.slider-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.slider-row input[type="range"] { flex: 1; min-width: 0; }
+.slider-row output { width: 44px; text-align: right; color: var(--faint); font-size: calc(12.5px * var(--fs)); }
+/* Generated and shared images show big. */
+.file-card.image-card { flex-direction: column; align-items: stretch; width: min(360px, 100%); padding: 6px; }
+.file-card.image-card .file-card-main { flex-direction: column; align-items: stretch; padding: 0; }
+.file-card.image-card .file-preview { width: 100%; height: auto; max-height: 420px; object-fit: contain; border-radius: calc(10px * var(--round)); background: var(--bg-3); }
+.file-card.image-card .image-card-bar { display: flex; align-items: center; gap: 2px; padding: 4px 2px 0 6px; min-width: 0; }
+.file-card.image-card .image-card-bar .file-card-text { flex: 1; }

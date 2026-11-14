@@ -474,7 +474,7 @@ export function Chat() {
               <h3>{current ? 'Say something to start.' : 'No chat open.'}</h3>
               <p className="muted">Ask a question, or try one of these. With no model connected, Rehearsal still streams and calls tools.</p>
               <div className="row">
-                {['list files', 'remember that this box has 48 GB', 'search local agents'].map((prompt) => (
+                {['list files', 'remember that this box has 48 GB', '/image a cosy reading nook, watercolor'].map((prompt) => (
                   <button key={prompt} className="btn" onClick={() => { setDraft(prompt); input.current?.focus(); }}>{prompt}</button>
                 ))}
               </div>
@@ -641,6 +641,18 @@ function FileCard({ id, onOpen }: { id: string; onOpen: () => void }) {
   useEffect(() => { void fileMeta(id).then(setMeta); }, [id]);
   if (meta === null) return <div className="file-card missing"><FileText size={18} /><span className="faint">File {id} is gone.</span></div>;
   const kind = meta ? kindOf(meta.name, meta.mime) : 'binary';
+  if (meta && kind === 'image') {
+    return (
+      <div className="file-card image-card">
+        <button className="file-card-main" onClick={onOpen} title="Preview"><img src={rawUrl(id)} alt={meta.name} className="file-preview" loading="lazy" /></button>
+        <div className="image-card-bar">
+          <span className="file-card-text"><strong className="ellipsis" dir="auto">{meta.name}</strong><span className="faint">{humanSize(meta.size)}</span></span>
+          <button className="icon-btn" aria-label="Preview" title="Preview" onClick={onOpen}><Eye size={16} /></button>
+          <button className="icon-btn" aria-label="Download" title="Download" onClick={() => saveFile(rawUrl(id), meta.name, meta.mime)}><Download size={16} /></button>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="file-card">
       <button className="file-card-main" onClick={onOpen} title="Preview">
