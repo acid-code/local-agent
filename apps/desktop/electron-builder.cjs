@@ -1,4 +1,4 @@
-// electron-builder loads electron-builder.js from the project dir (it wins over package.json "build"). The version is derived on every build so it always increases:
+// electron-builder loads electron-builder.cjs (not .js: Windows would run a .js named like the command) from the project dir (it wins over package.json "build"). The version is derived on every build so it always increases:
 // 0.2.<GitHub run number + 100> on CI, 0.2.<commit count> locally. The commit and build time go into the packaged
 // package.json so the in-app updater can tell whether the latest GitHub release is newer.
 const { execSync } = require('child_process');

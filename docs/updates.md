@@ -1,7 +1,7 @@
 # App updates
 
 **Versions** always increase: `0.2.<n>` where n is the GitHub run number + 100 on CI (commit count locally).
-Android: `versionCode = n`, `versionName = 0.2.n` (apps/mobile/android/app/build.gradle). Windows: electron-builder.js.
+Android: `versionCode = n`, `versionName = 0.2.n` (apps/mobile/android/app/build.gradle). Windows: apps/desktop/electron-builder.cjs.
 
 **Android** release builds are signed with one fixed key from the repo secrets `ANDROID_KEYSTORE_BASE64`,
 `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`, so a new APK installs over the old one.
