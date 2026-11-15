@@ -1,136 +1,108 @@
 # local-agent
 
-A self-hosted agent platform for a Linux mini PC. You chat with it from a laptop on the LAN, or from a phone over Tailscale. It runs personas against local OpenAI-compatible servers (Ollama, llama.cpp, LM Studio, vLLM) and, when you allow it, Gemini or OpenRouter. The point of the product is that you can see every step and stop it.
+Your own AI assistant that runs at home on a small computer (the "mini PC"). You talk to it from your phone or laptop.
+Your chats and files stay on your computer, not in someone else's cloud. It speaks English and Hebrew.
 
-## Why this stack
+This guide takes you from a new mini PC in its box to the app open on your phone. It takes about an hour, mostly
+waiting for downloads. Copy each command exactly: select it, copy, paste it into the terminal, press Enter.
 
-TypeScript, end to end.
+**Words you will see**
+- **Terminal**: a window where you type commands. On Ubuntu press `Ctrl+Alt+T` to open one.
+- **sudo**: runs a command as administrator. It asks for your computer password; nothing shows while you type it. That is normal.
+- **Model**: the "brain" the assistant uses. You download it once and it runs on the mini PC.
+- **Tailscale**: a free app that connects your phone to your mini PC safely from anywhere, like a private cable.
 
-- One language for the runtime and the UI, so a trace event, a tool call, and a chat message share types.
-- Fastify streams tokens over server-sent events and a WebSocket without a second process.
-- Node 22’s built-in `node:sqlite` stores sessions, checkpoints, and vectors. `sqlite-vec` is loaded when the extension is present; otherwise search is exact cosine over the same blobs.
-- The MCP ecosystem’s reference client speaks JSON-RPC. So does this server. Python is a better fit for training loops. This box is a control plane.
+## Steps
 
-React, Vite, and Tailwind sit in `packages/web`. The server serves the built files in production. Dev mode runs Vite on port 5173 and the API on 8787.
+**1. Plug in the mini PC.** Connect a screen, keyboard, mouse, the network cable (or Wi-Fi later) and power. Turn it on.
+*You should see:* the maker's logo, then Windows or a setup screen.
 
-Day to day setup for the mini PC, the laptop, and the phone, including where API keys live, is in [SETUP.md](SETUP.md).
+**2. Install Ubuntu (the Linux system).** On another computer, download [Ubuntu 24.04 LTS Desktop](https://ubuntu.com/download/desktop)
+and write it to a USB stick (8 GB or more) with [balenaEtcher](https://etcher.balena.io). Plug the stick into the mini PC,
+restart it and keep pressing `F7` (or `F11`/`Esc`, depending on the maker) to pick the USB stick. Choose
+"Install Ubuntu", then "Erase disk and install Ubuntu". Pick a username (for example `asaf`) and a password you will remember.
+*You should see:* the Ubuntu desktop after a restart.
 
-## Run it
+**3. Give the graphics chip a small memory slice.** Restart and keep pressing `Del` to open the BIOS (the settings
+screen before the system starts). Find **UMA Frame Buffer Size** (often under Advanced → AMD CBS or Graphics) and set it to
+**2G**. Save and exit (`F10`). Why: the assistant borrows memory for graphics only when it needs it; [details](docs/models.md#uma-frame-buffer-and-gtt).
+*You should see:* Ubuntu starts as before. If you cannot find the setting, skip this step.
 
-Docker, from this directory:
-
-```bash
-cp .env.example .env
-docker compose up --build
-```
-
-Open `http://<the-mini-pc>:8787`. The first screen creates the owner account. Nothing else is reachable until that exists.
-
-Without Docker, for development:
-
-```bash
-npm install
-npm run dev
-```
-
-The API is `http://127.0.0.1:8787`. The UI is `http://127.0.0.1:5173`.
-
-On the mini PC, `sudo bash scripts/install-server.sh --dry-run` prints every command, and the same script without `--dry-run` installs Docker, Compose, Mesa Vulkan for the Radeon 780M, the systemd unit, and the app. `--with-ollama` and `--with-tailscale` are optional. `scripts/uninstall-server.sh` removes the unit and keeps the data unless you pass `--purge`. The Windows laptop script is `scripts/setup-client.ps1`. The phone app is the Capacitor shell in `apps/mobile`. The Windows shell is `apps/desktop`. A laptop-sized WSL2 path, with one small Ollama model, is in [docs/wsl-quickstart.md](docs/wsl-quickstart.md). Details, including the Android signing secrets and the unsigned Windows exe, are in [SETUP.md](SETUP.md).
+**4. Download local-agent.** Open a terminal and paste:
 
 ```bash
-sudo cp deploy/local-agent.service /etc/systemd/system/
-sudo systemctl enable --now local-agent
+sudo apt update && sudo apt install -y git
+git clone https://github.com/acid-code/local-agent.git
+cd local-agent
 ```
 
-`npm test` covers routing, context budgeting, the resumable loop, edit rollback, the vault, and MCP framing. `npm run typecheck` and `npm run build` are what CI runs.
+*You should see:* `Cloning into 'local-agent'...` and then the prompt again with no red errors.
 
-## What you can do in this version
-
-- Finish the setup checklist. It probes Ollama, other OpenAI-compatible ports, Docker, the GPU, SearXNG, and Tailscale. One-click actions show the command, then run it only after you confirm.
-- Create personas. Templates cover a house operator, a researcher, and a coder.
-- Chat with streaming. Rehearsal, an on-box stand-in, calls tools so the loop is visible before a real model is loaded.
-- Watch the trace: model calls, tool arguments, tool results, latency, token counts, and a cost estimate (local is zero).
-- Pause, stop, resume, or retry from a checkpoint.
-- Let personas consult each other in a room, one level deep.
-- Run a coding session: a visible plan, grep and glob, search-and-replace edits with a checkpoint before the write, a diff, and revert. Git status, diff, branch, and commit stay in the workspace. Push asks. Host folders are mounted only after you grant them. If `cursor-agent`, `claude`, `aider`, or `codex` is on `PATH`, a handoff can use it after approval.
-- Store credentials in the vault. A run that needs a key pauses, asks in a password field, and resumes. The model sees `secret:NAME`. Logs and traces are redacted. Reveal requires your password again. Every use is audited.
-- Schedule a cron prompt per persona.
-- Read RAM, disk, GPU/GTT when sysfs exposes it, and per-agent data size. Prune actions preview first.
-
-## Remote access
-
-Prefer Tailscale. Install it on the mini PC and on the phone or laptop. The UI is already bound to `0.0.0.0:8787`; Tailscale gives you a stable address without opening the port on your router. The owner login still applies.
-
-Cloudflare Tunnel is the alternative when you cannot use Tailscale:
+**5. Install everything.** Paste this (change `asaf` if your username is different):
 
 ```bash
-cloudflared tunnel --url http://127.0.0.1:8787
+sudo bash scripts/install-server.sh --user asaf --with-ollama --with-tailscale
 ```
 
-Do not port-forward 8787 to the public internet. Auth is single-user, not a substitute for a private network.
+It installs the app, the model runner (Ollama), Tailscale and the graphics drivers. It takes 5–15 minutes.
+*You should see at the end:* lines starting with `LAN: http://...`, `Setup (LAN only): http://...:8788` and
+`Setup token (one time): ...`. **Write down the setup token**; you need it once in step 7. Do not share it.
 
-The phone UI is a PWA. Add it to the home screen. A native client can use the same HTTP API with a bearer token from Settings, plus `/api/live` (WebSocket) and `/api/runs/:id/events` (SSE).
-
-## Secrets
-
-API keys belong in `.env` or `data/secrets.env`. Neither is committed. The vault is separate: values are AES-256-GCM ciphertext in SQLite. The 32-byte master key is `data/master.key` with mode `0600`. Copying the database without that file does not reveal the secrets. The master key is still on the same disk; an OS keyring (`secret-tool`) is the next place to put it when a login session exists. Headless SSH usually does not have one, so the file is the default.
-
-The model never receives a secret value. Tools that need one get it as an environment variable at execution time. Outputs are scrubbed before they are stored or shown back to the model. Pasting a key into chat is detected and offered a move into the vault.
-
-## Models on this machine
-
-The mini PC has 48 GB. A Qwen3.6 35B-A3B Q4 build is about 23 GB and Gemma 4 26B-A4B is in the high teens. Only one of those is loaded at a time. If the other is busy, the router steps aside and says so in one line. If it is idle, it can be unloaded first. The theoretical windows are 256K. The practical budget defaults to 32K because the KV cache, not the brochure, is what fits beside the weights.
-
-Cloud routing follows the free-tier reading from 13 Nov 2026:
-
-| Model | Free tier on this key | Role |
-| --- | --- | --- |
-| Gemini 3.5 Flash Lite | 15 RPM, 250K TPM, 500 RPD | Cloud fallback with the widest daily cap |
-| Gemini 3.1 Flash Lite | 15 RPM, 250K TPM, 500 RPD | Alternate lite |
-| Gemini 3.8 Flash | 5 RPM, 250K TPM, 20 RPD | Reserve. The reading showed 110.6K TPM that minute |
-| Gemini 4 Hydrogen | 5 RPM, 250K TPM, 20 RPD | Hard reasoning |
-| Gemini 4 Argon, Carbon | 0 / 0 / 0 | Not selected unless Settings says the key is paid |
-| Gemini Embedding 2 | 100 RPM, 30K TPM, 1K RPD | Retrieval, with hash embeddings as the fallback |
-
-Ordinary turns stay on the local model. Gemini is used only for a hard reasoning question, a synthesis that does not fit the local practical budget, or after two local failures. Per-model request caps default to the free-tier reading and can be changed in settings. A call that would pass the cap does not go out. The turn falls back to the local model, and the Models page shows what is left.
-
-## Backups, watchdog, notices, voice
-
-Snapshots land in `data/backups`. Each one has the database, the encrypted vault, `master.key`, and the persona workspaces. Settings can copy the file onward with rsync or rclone (including an S3-compatible target). Restore is one confirmation, then the process exits so it can start on the restored files.
-
-The watchdog checks Ollama and restarts containers this app created when they have stopped. It does not try to reinstall Ollama.
-
-Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` and the bot long-polls. Approval requests arrive with Approve and Deny buttons. Failures, low memory, and an empty Gemini quota are messages. The same events can go out as web push after the browser subscribes.
-
-Push-to-talk records in the browser and posts the audio to faster-whisper if that container is up. Kokoro does the reverse for speech. Both are optional:
+**6. Connect Tailscale.** Paste:
 
 ```bash
-docker compose --profile voice up -d whisper kokoro
+sudo tailscale up
 ```
 
-The setup screen shows those commands before it runs them.
+Open the link it prints, sign in (Google, Microsoft or Apple account is fine) and approve the device. Then paste
+`tailscale ip -4` and write down the address.
+*You should see:* an address like `100.101.102.103`.
 
-A kill switch stops current runs and refuses new ones. A daily token cap, a daily spend cap, and a read-only mode are in Settings. Read-only blocks tools that change files, shells, or containers.
+**7. Create your account.** On the mini PC (or a laptop on the same home network), open the browser and go to the
+`Setup` address from step 5, for example `http://192.168.1.20:8788`. Paste the setup token, then choose your app username
+and password (8+ characters; this is separate from the Ubuntu password).
+*You should see:* your account is created and the page offers optional extras (a Gemini key, Telegram). You can skip them for now.
 
-A switch is announced once, in one line. Staying on the current model is silent, including a quiet fallback when Gemini is out of quota. Pin a persona to stop the router from moving.
+**8. Install the AI models.** Open `http://localhost:8787` on the mini PC, sign in, and go to **Setup → Recommended models
+for this machine**. It recognises the mini PC and lists one model per job (chat, Hebrew, code, reading pictures). Press
+**Install recommended models**. About 45 GB downloads, which can take 30–60 minutes.
+*You should see:* a progress line per model, ending with "Models installed and roles saved."
 
-## Layout
+**9. Make it faster (optional, 2 minutes).** In the terminal, paste:
 
+```bash
+cd /opt/local-agent && sudo bash scripts/bench-runtime.sh gemma3:4b --apply
 ```
-packages/shared   types, routing, context budgets, token estimates
-packages/server   Fastify, SQLite, the run loop, tools, MCP, vault
-packages/web      React UI
-apps/mobile       Capacitor Android shell
-apps/desktop      Electron Windows shell
-deploy/           systemd unit
-```
 
-More detail is in `ARCHITECTURE.md`. What is real, what is partial, and what comes later is in `ROADMAP.md`.
+It tests whether the graphics chip makes the assistant faster and switches it on if so.
+*You should see:* `Pick: ollama-vulkan` (graphics chip used) or `Pick: ollama-cpu` (processor only). Both are fine.
 
-## Remote monitoring
+**10. Open it on your phone.** Install **Tailscale** from the App Store or Google Play and sign in with the same account as step 6.
+Then open the phone's browser and go to `http://<address from step 6>:8787`, for example `http://100.101.102.103:8787`.
+Sign in with your app username and password. To make it look like an app:
+iPhone: Share → **Add to Home Screen**. Android: browser menu → **Install app**.
+*You should see:* the chat screen. Type "שלום" or "hello" and you get an answer.
 
-Read-only, token-protected run traces, errors and health over Tailscale: see [docs/monitoring.md](docs/monitoring.md).
+Done. The mini PC can stay on with no screen attached; the app starts by itself after a power cut.
 
-## Models for your machine
+## If something goes wrong
 
-Per-role defaults, the Ryzen 780M mini PC guide, the installer and the runtime bench: see [docs/models.md](docs/models.md).
+| Problem | Try this |
+|---|---|
+| A command says `Permission denied` | Put `sudo ` at the start and run it again. |
+| `git: command not found` | Run `sudo apt install -y git`, then repeat the step. |
+| The page does not open on the phone | Check Tailscale is switched **on** on both the phone and the mini PC (`tailscale status` on the mini PC). Use `http://`, not `https://`, and include `:8787`. |
+| The setup page (8788) says refused | It only works from your home network, not over Tailscale. Use the mini PC itself or a laptop at home. |
+| Lost the setup token | Run `sudo cat /opt/local-agent/data/setup.token` on the mini PC. If it is gone, the account already exists: sign in instead. |
+| Answers are very slow | Run step 9. Check **Resources** in the app: if memory is full, pick a smaller model in Setup. |
+| Model install stops with an error | Press Install again; it continues where it stopped. Check free disk space with `df -h ~`. |
+| Is it running at all? | `curl -s http://127.0.0.1:8787/api/health` should print `{"ok":true}`. If not: `sudo systemctl restart local-agent`. |
+| Something else | `sudo journalctl -u local-agent -n 50` shows the last messages; send them to whoever helps you. |
+
+## More detail
+
+- [SETUP.md](SETUP.md): every install step by hand, the laptop, the Android/Windows apps, where passwords and keys are kept
+- [docs/models.md](docs/models.md): which models and why, graphics chip settings, speed test
+- [docs/monitoring.md](docs/monitoring.md): checking on the assistant remotely
+- [docs/personas.md](docs/personas.md), [docs/memory.md](docs/memory.md), [docs/images.md](docs/images.md): what the assistant can do
+- [docs/overview.md](docs/overview.md): how it is built, for developers (`npm install && npm run dev`)

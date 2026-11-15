@@ -11,7 +11,10 @@ MODEL=gemma3:4b; APPLY=0
 for arg in "$@"; do case "$arg" in --apply) APPLY=1 ;; *) MODEL="$arg" ;; esac; done
 OLLAMA="${OLLAMA_HOST:-http://127.0.0.1:11434}"; OLLAMA="${OLLAMA%/}"; [[ "$OLLAMA" == http* ]] || OLLAMA="http://$OLLAMA"
 CLI=packages/server/dist/bench-cli.js
-[ -f "$CLI" ] || npm run build >/dev/null
+# Docker installs have no Node on the host: run the bench inside the app image (host network, so it reaches Ollama).
+if command -v node >/dev/null && { [ -f "$CLI" ] || npm run build >/dev/null; }; then RUN=(node "$CLI")
+elif [ -f docker-compose.yml ] && command -v docker >/dev/null; then RUN=(docker compose run --rm --no-deps -T -e OLLAMA_HOST -e LA_BENCH_GPU_BASE setup node packages/server/dist/bench-cli.js)
+else echo "Needs Node 22 or the Docker install" >&2; exit 1; fi
 curl -fsS "$OLLAMA/api/tags" >/dev/null || { echo "Ollama is not answering at $OLLAMA" >&2; exit 1; }
 curl -fsS "$OLLAMA/api/tags" | grep -q "\"$MODEL\"" || { echo "pulling $MODEL"; curl -fsS "$OLLAMA/api/pull" -d "{\"name\":\"$MODEL\",\"stream\":false}" >/dev/null; }
 
@@ -36,7 +39,8 @@ if [ -n "$VK" ] && command -v ollama >/dev/null && ! systemctl show ollama -p En
   curl -fsS http://127.0.0.1:11499/api/tags >/dev/null 2>&1 && GPU_BASE=http://127.0.0.1:11499 || echo "Vulkan Ollama did not start; see /tmp/ollama-vulkan-bench.log"
 fi
 
-REPORT=$(OLLAMA_HOST="$OLLAMA" LA_BENCH_GPU_BASE="$GPU_BASE" node "$CLI" "$MODEL")
+export OLLAMA_HOST="$OLLAMA" LA_BENCH_GPU_BASE="$GPU_BASE"
+REPORT=$("${RUN[@]}" "$MODEL")
 cleanup; TMP_PID=""
 mkdir -p "${DATA_DIR:-$PWD/data}"
 echo "$REPORT" > "${DATA_DIR:-$PWD/data}/runtime-bench.json"
