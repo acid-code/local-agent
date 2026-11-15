@@ -52,6 +52,8 @@ import { MAX_FILE_BYTES, deleteFile, filePath, getFile, getMessageRow, listFiles
 import type { Store } from './db.js';
 import type { Vault } from './vault.js';
 import { renderSlides } from './slides.js';
+import { registerMonitor } from './monitor.js';
+import { OCR_URL, PIPER_URL, serviceUp } from './ocr.js';
 import { benchRuntime, loadBench, machineInfo, saveBench } from './runtime-bench.js';
 import { registerOcr } from './ocr-routes.js';
 import { MEMBER_DENIED_TOOLS, OWNER_ID, accountOf, foreignPath, mustOwn, ownerOf, workspaceFor } from './accounts.js';
@@ -1378,6 +1380,22 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     if (!memory) return { tracked: false };
     const cfg = budgetConfig(store.getSettings());
     return { tracked: true, budgetBytes: cfg.budgetBytes, usage: await memory.usage(), active: memory.snapshotActive(), queue: memory.snapshotQueue(), summary: (await budgetReport(memory, cfg)).detail };
+  });
+  registerMonitor(app, {
+    store, redact: (text) => vault.redact(text),
+    health: async () => {
+      const [checks, ocrUp, piperUp] = await Promise.all([healthChecks(store, docker, fetchImpl, config.dataDir, engine.memory), serviceUp(fetchImpl, OCR_URL), serviceUp(fetchImpl, PIPER_URL)]);
+      return [...checks,
+        { id: 'ocr', ok: Boolean(ocrUp), optional: true, detail: ocrUp ? `OCR service up (${(ocrUp.langs as string[] | undefined)?.join('+') ?? 'tesseract'})` : 'OCR service not running' },
+        { id: 'piper', ok: Boolean(piperUp), optional: true, detail: piperUp ? 'Piper voices up' : 'Piper voices not running' }];
+    },
+    memory: async () => {
+      const memory = engine.memory;
+      if (!memory) return { tracked: false };
+      const cfg = budgetConfig(store.getSettings());
+      return { tracked: true, budgetGiB: Math.round((cfg.budgetBytes / 2 ** 30) * 10) / 10, usage: await memory.usage(), active: memory.snapshotActive(), queue: memory.snapshotQueue() };
+    },
+    ownerOnly: (req) => { if (accountOf(req).role !== 'owner') throw http(403, 'Only the owner can manage monitoring tokens.'); },
   });
   app.get('/api/debug/health', async () => ({ checks: await healthChecks(store, docker, fetchImpl, config.dataDir, engine.memory) }));
   app.post('/api/debug/health/:id', async (req) => {

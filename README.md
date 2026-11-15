@@ -126,3 +126,7 @@ deploy/           systemd unit
 ```
 
 More detail is in `ARCHITECTURE.md`. What is real, what is partial, and what comes later is in `ROADMAP.md`.
+
+## Remote monitoring
+
+Read-only, token-protected run traces, errors and health over Tailscale: see [docs/monitoring.md](docs/monitoring.md).

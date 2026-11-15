@@ -28,6 +28,7 @@ import { loadMasterKey, Vault } from './vault.js';
 import { ollamaEmbedder, reindexRoots } from './kb.js';
 import { TriggerRuntime } from './triggers.js';
 
+import { checkMonitorToken, MONITOR_PREFIX } from './monitor.js';
 const PUBLIC = new Set(['GET /api/health', 'GET /api/auth/me', 'POST /api/auth/login', 'POST /api/setup']);
 
 export interface BuiltApp {
@@ -110,6 +111,11 @@ export async function buildApp(options: {
     if (PUBLIC.has(`${req.method} ${pathOnly}`)) return;
     if (req.method === 'POST' && /^\/api\/hooks\/(?:github\/)?[A-Za-z0-9_-]+$/.test(pathOnly)) return;
     if (!req.url.startsWith('/api/')) return;
+    // Remote monitoring: read-only, bearer token instead of a session (an owner session works too).
+    if (pathOnly.startsWith(MONITOR_PREFIX)) {
+      if (req.method !== 'GET' && req.method !== 'HEAD') return reply.code(405).send({ error: 'The monitoring API is read-only.' });
+      if (checkMonitorToken(store, req.headers.authorization)) return;
+    }
     const ok = await authenticate(store, req);
     if (!ok) return reply.code(401).send({ error: 'Sign in required.' });
     // Members reach only their own corner of the API. Admin routes are owner-only.

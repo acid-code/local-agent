@@ -24,6 +24,15 @@ if (process.argv.includes('--reset-owner')) {
   process.exit(0);
 }
 
+if (process.argv.includes('--monitor-token')) {
+  const { createMonitorToken } = await import('./monitor.js');
+  const label = process.argv[process.argv.indexOf('--monitor-token') + 1] || 'monitor';
+  const { id, token } = createMonitorToken(store, label.startsWith('--') ? 'monitor' : label);
+  console.log(`Monitoring token ${id} (shown once, store it in ~/.config/local-agent/monitor-token with chmod 600):`);
+  console.log(token);
+  process.exit(0);
+}
+
 const loaded = await ollamaLoaded(fetch);
 const searx = await searxngHealth(store.getSettings().searxngUrl || process.env.SEARXNG_URL || '', fetch);
 const snap = snapshotResources(store, config.dataDir);
