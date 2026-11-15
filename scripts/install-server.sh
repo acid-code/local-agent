@@ -270,6 +270,14 @@ else
   run sudo -u "$APP_USER" bash -lc "cd '$INSTALL_ROOT' && docker compose pull || true"
   run sudo -u "$APP_USER" bash -lc "cd '$INSTALL_ROOT' && docker compose build"
 fi
+# Built-in connectors work offline: pre-pull the SearXNG image (web search) now; the app starts it on first boot.
+# Filesystem, fetch, git, memory, time, sequential thinking, SQLite and the browser run inside the app (no download).
+if command -v docker >/dev/null 2>&1; then
+  run docker pull docker.io/searxng/searxng:latest || echo "SearXNG image not pulled; web search starts once the network is up."
+fi
+if ! command -v google-chrome >/dev/null 2>&1 && ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1; then
+  echo "Note: no Chrome/Chromium found. The Browser connector falls back to plain fetch until one is installed."
+fi
 TOKEN_FILE="$INSTALL_ROOT/data/setup.token"
 USED_FILE="$INSTALL_ROOT/data/setup-token.used"
 HASH_FILE="$INSTALL_ROOT/data/setup-token.sha256"

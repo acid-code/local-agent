@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { isOwner } from '../lib/role';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { ChevronDown, Eye, EyeOff, MessageSquare, Pencil, Plus, Users } from 'lucide-react';
 import { api, post } from '../lib/api';
@@ -53,7 +54,7 @@ export function Agents() {
     setTemplates(data.templates);
     setLoaded(true);
     setSkills((await api<{ skills: Skill[] }>('/api/skills').catch(() => ({ skills: [] }))).skills);
-    setWorkshops((await api<{ workshops: Workshop[] }>('/api/workshops').catch(() => ({ workshops: [] }))).workshops);
+    if (isOwner()) setWorkshops((await api<{ workshops: Workshop[] }>('/api/workshops').catch(() => ({ workshops: [] }))).workshops);
     return data.agents;
   }
   useEffect(() => { void load().catch((error: Error) => toast(error.message, 'error')); }, []);
@@ -215,7 +216,7 @@ export function Agents() {
       <div className="grid cards agent-cards">
         {agents.map((agent) => (
           <article key={agent.id} className="card agent-card" style={{ ['--accent' as string]: agent.accent }}>
-            <button className="agent-open" onClick={() => open(agent)} aria-label={`Edit ${agent.name}`}>
+            <button className="agent-open" onClick={() => open(agent)} title={`Edit ${agent.name}`}>
               <Face agent={agent} size={40} />
               <span className="grow"><strong>{agent.emoji ? `${agent.emoji} ` : ''}{agent.name}</strong><span className="faint">{agent.title || agent.description || 'No title yet'}</span></span>
             </button>

@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { safeInside } from './pathsafe.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
@@ -7,19 +8,21 @@ import { z } from 'zod';
 import { FREE_TIER_OBSERVED_AT, FREE_TIER_SNAPSHOT, VERSION, geminiQuotaDay, nextCron, quotaAvailability } from '@local-agent/shared';
 import { authenticate, hashPassword, noteFailure, rateLimit, setSession, verifyPassword } from './auth.js';
 import { TEMPLATES } from './catalog.js';
-import { detectCodingClis, listEdits, readPlan, replacePlan, revertBatch, updatePlanItem } from './coding.js';
+import { detectCodingClis, listEdits, readPlan, replacePlan, revertBatch, RollbackConflict, updatePlanItem } from './coding.js';
 import { secretDrift, secretNames, writeSecret } from './config.js';
 import type { DockerCtl } from './docker.js';
 import { checklist, scanMachine, setupPreview } from './discovery.js';
 import type { McpRuntime } from './mcp.js';
-import { importConfigs, searchRegistry, vetSpec } from './mcp.js';
+import type { McpServer } from './db.js';
+import { importConfigs, searchRegistry, trustOf, vetSpec, type VettingReport } from './mcp.js';
+import { cacheNpm, cacheStatus, dockerCatalog, officialCatalog, specFor, vetCatalogImage } from './mcp-catalog.js';
 import { localReputationSummarizer } from './reputation.js';
 import type { Notifier } from './notify.js';
 import { createBackup, listBackups, shipBackup, stageRestore } from './ops.js';
 import { telegramQueue } from './notify.js';
 import { ollamaLoaded } from './ollama.js';
 import { doctorChecks, geminiStateOf, missingRoleModels, redactValue, searchLogs, zipStore, LOG_COMPONENTS, type LogComponent } from './debug.js';
-import { previewPrune, runPrune, snapshotResources } from './resources.js';
+import { ensureDiskRoom, isDiskFullError, previewPrune, runPrune, snapshotResources } from './resources.js';
 import { speak, transcribe, voiceStatus, VoiceError, KOKORO_COMMAND, WHISPER_COMMAND } from './voice.js';
 import { formatSearch, listWorkspace, readWorkspaceFile, searxngHealth, searxngQuery } from './tools.js';
 import {
@@ -29,10 +32,14 @@ import {
   exportSkill, importSkill, listSkills, parseSkillMd, saveSkill, setSkillEnabled, skillFit, skillVersions,
 } from './skills.js';
 import {
-  createTrigger, fireTrigger, getTrigger, githubSignatureOk, listTriggerEvents, listTriggers, secretEquals, triggerSecret,
+  createTrigger, fireTrigger, getTrigger, githubSignatureOk, listTriggerEvents, listTriggers, secretEquals, triggerSecret, updateTrigger,
   type TriggerKind,
 } from './triggers.js';
 import { secret as randomSecret } from './util.js';
+import { RULE_FILE_CAP, RULE_TOTAL_CAP, disabledRules, discoverRules, setRuleEnabled } from './rules.js';
+import { GALLERY, gallerySystemPrompt, galleryList, installGallerySkills, type GalleryPersona } from './gallery.js';
+import { connectorStateFlag, BUILTIN_CONNECTORS, RECOMMENDED_CONNECTORS, recommendedSpec, connectorEnabled, connectorReport, connectorTools, recommendedConnected, setConnectorEnabled } from './connectors.js';
+import { memoryFiles, rollbackRun, writeMemoryFile } from './learning.js';
 import { createWorkshop, getWorkshop, listWorkshops } from './workshops.js';
 import { ACCENT_DEFAULT, FACES, accentOk, avatarPath, saveAvatar } from './avatars.js';
 import type { Bus } from './bus.js';
@@ -48,13 +55,14 @@ import { MEMBER_DENIED_TOOLS, OWNER_ID, accountOf, foreignPath, mustOwn, ownerOf
 import { memberByUsername } from './accounts.js';
 import { registerAccounts } from './members.js';
 import { registerMedia } from './media.js';
-import { prefillChatWorkspaces, resolveChatWorkspaces, setChatWorkspaces } from './chat-workspaces.js';
+import { prefillChatWorkspaces, resolveChatWorkspaces, setChatWorkspaces, chatWorkspacePaths } from './chat-workspaces.js';
 import { usableModels } from './usable-models.js';
 import { registerWorkspaceRoutes } from './workspaces.js';
 import { budgetConfig, budgetReport, type MemoryBudget } from './memory.js';
 import { localStatus } from './images.js';
 
 type Ctx = {
+  autoConnectors?: boolean;
   store: Store;
   engine: Engine;
   bus: Bus;
@@ -102,6 +110,8 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     }
     await setSession(reply, store);
     store.addLog('info', `Owner ${body.username} created.`);
+    // One assistant to start with; the rest of the gallery is optional.
+    if (!store.listAgents(OWNER_ID).length) await addFromGallery(GALLERY[0]!, OWNER_ID, false).catch((error) => store.addLog('warn', `Default assistant not created: ${(error as Error).message}`));
     return { username: body.username };
   });
 
@@ -266,8 +276,133 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   });
 
   const me = (req: Parameters<typeof accountOf>[0]) => accountOf(req).id;
+  // Built-in connectors (offline, no secrets) and recommended account connectors.
+  const healthEnv = () => ({ store, dataDir: config.dataDir, searxngUrl: store.getSettings().searxngUrl || process.env.SEARXNG_URL || '', fetchImpl, dockerAvailable: () => docker.available() });
+  const connectorBrief = (id: string, member: boolean) => {
+    const builtin = BUILTIN_CONNECTORS.find((row) => row.id === id);
+    if (builtin) return member && builtin.ownerOnly ? null : { name: builtin.name, builtIn: true, status: connectorEnabled(store, id) ? 'on' : 'off' };
+    const rec = RECOMMENDED_CONNECTORS.find((row) => row.id === id);
+    return rec ? { name: rec.name, builtIn: false, status: recommendedConnected(store, id) ? 'connected' : 'not connected' } : null;
+  };
+  // Web search is a built-in connector: on a fresh install, find SearXNG on :8088 or start the local container once.
+  if (ctx.autoConnectors) setTimeout(() => void (async () => {
+    if (store.getSettings().searxngUrl || connectorStateFlag(store, 'search:auto')) return;
+    connectorStateFlag(store, 'search:auto', true);
+    try {
+      const res = await fetchImpl('http://127.0.0.1:8088/search?q=ping&format=json', { signal: AbortSignal.timeout(3000) });
+      if (res.ok) { const current = store.getSettings(); store.saveSettings({ ...current, searxngUrl: 'http://127.0.0.1:8088' }, 'SearXNG found', { searxngUrl: 'http://127.0.0.1:8088' }); return; }
+    } catch { /* not running yet */ }
+    if (await docker.ping().catch(() => false)) {
+      const job = store.createJob('start-searxng', 'built-in web search');
+      await runSetup('start-searxng', undefined, job.id, ctx);
+    }
+  })().catch((error: Error) => store.addLog('warn', `Built-in search: ${error.message}`)), 3000);
+  app.get('/api/connectors', async (req) => connectorReport(healthEnv(), accountOf(req).role === 'member'));
+  app.patch('/api/connectors/:id', async (req) => {
+    const id = (req.params as { id: string }).id;
+    if (!BUILTIN_CONNECTORS.some((row) => row.id === id)) throw http(404, 'No such built-in connector.');
+    const body = parse(z.object({ enabled: z.boolean() }), req.body);
+    setConnectorEnabled(store, id, body.enabled);
+    return connectorReport(healthEnv(), false);
+  });
+  /** One click: vet the recommended server's pinned image or package; the Tools page shows the report and installs on approval. */
+  app.post('/api/connectors/:id/connect', async (req) => {
+    const item = RECOMMENDED_CONNECTORS.find((row) => row.id === (req.params as { id: string }).id);
+    if (!item) throw http(404, 'No such connector.');
+    const spec = recommendedSpec(item);
+    let report: VettingReport;
+    if (item.image) {
+      report = vetCatalogImage({ source: 'docker', id: item.id, title: item.name, description: item.description, trust: item.trust, image: item.image, secrets: item.secrets.map((env) => ({ env })), env: [], installable: true });
+    } else {
+      const settings = store.getSettings();
+      report = await vetSpec({ name: item.name, transport: 'stdio', command: 'npx', args: ['-y', item.npm!], source: spec.source }, fetchImpl, {
+        reputation: true, searxngUrl: settings.searxngUrl || process.env.SEARXNG_URL || '', summarize: localReputationSummarizer(store, fetchImpl),
+      });
+    }
+    report.spec = spec;
+    report.name = item.name;
+    store.saveVetting(report.id, report);
+    return { report, needs: item.needs, trust: item.trust, secrets: item.secrets, note: item.note ?? null };
+  });
+  /** What "Download all recommended" would fetch, and what is already on disk. */
+  const cacheItems = () => RECOMMENDED_CONNECTORS.map((item) => ({ id: item.id, image: item.image, npm: item.npm }));
+  const mcpCacheDir = path.join(config.dataDir, 'mcp-cache');
+  let cacheJob: { id: string; running: boolean; current: string | null; errors: Record<string, string> } | null = null;
+  app.get('/api/connectors/cache', async () => ({
+    items: (await cacheStatus(cacheItems(), docker, mcpCacheDir)).map((row) => ({ ...row, status: cacheJob?.running && cacheJob.current === row.id ? 'downloading' : cacheJob?.errors[row.id] && row.status !== 'ready' ? 'failed' : row.status, detail: cacheJob?.errors[row.id] })),
+    running: Boolean(cacheJob?.running), dockerAvailable: docker.available(),
+  }));
+  app.post('/api/connectors/cache', async () => {
+    if (cacheJob?.running) return { started: false, running: true };
+    const job = store.createJob('mcp-cache', 'Download all recommended connectors');
+    cacheJob = { id: job.id, running: true, current: null, errors: {} };
+    const state = cacheJob;
+    void (async () => {
+      for (const row of await cacheStatus(cacheItems(), docker, mcpCacheDir)) {
+        if (row.status === 'ready') continue;
+        state.current = row.id;
+        try {
+          if (row.kind === 'image') {
+            if (!docker.available()) throw new Error('Docker is not reachable.');
+            await docker.pull(row.ref);
+          } else await cacheNpm(row.ref, mcpCacheDir);
+          store.appendJob(job.id, `${row.id}: ready\n`);
+        } catch (error) {
+          state.errors[row.id] = error instanceof Error ? error.message.slice(0, 200) : 'failed';
+          store.appendJob(job.id, `${row.id}: ${state.errors[row.id]}\n`);
+        }
+      }
+      state.current = null;
+      state.running = false;
+      store.finishJob(job.id, Object.keys(state.errors).length ? 'failed' : 'done');
+    })();
+    return { started: true, running: true, jobId: job.id };
+  });
+
+  async function addFromGallery(item: GalleryPersona, accountId: string, member: boolean) {
+    const taken = new Set(store.listAgents(accountId).map((agent) => agent.name));
+    let name = item.name;
+    for (let n = 2; taken.has(name); n += 1) name = `${item.name} ${n}`;
+    const workspace = workspaceFor(config.dataDir, accountId, name);
+    fs.mkdirSync(workspace, { recursive: true });
+    const agent = store.createAgent({
+      name, description: item.description, systemPrompt: gallerySystemPrompt(item), ownerId: accountId, workspacePath: workspace,
+      toolAllowlist: [...new Set([...item.tools, ...connectorTools(item.connectors, member)])].filter((tool) => !member || !MEMBER_DENIED_TOOLS.has(tool)),
+    });
+    store.updateAgent(agent.id, { title: item.title, accent: item.accent, avatarKind: 'initials', avatarRef: `blob-${item.shape}`, templateId: item.id });
+    await installGallerySkills(store, config.dataDir, agent.id, item);
+    return store.getAgent(agent.id)!;
+  }
   const memberTools = (req: Parameters<typeof accountOf>[0], tools: string[]) => accountOf(req).role === 'member' ? tools.filter((tool) => !MEMBER_DENIED_TOOLS.has(tool)) : tools;
-  app.get('/api/agents', async (req) => ({ agents: store.listAgents(me(req)), templates: TEMPLATES, faces: FACES }));
+  // Each persona's latest message, for the sidebar preview.
+  const lastMessage = store.db.prepare(`SELECT m.content AS content, m.role AS role, m.created_at AS at FROM messages m JOIN chat_sessions s ON s.id = m.session_id
+    WHERE s.agent_id = ? AND s.helper_of IS NULL AND s.archived = 0 AND m.role IN ('user', 'assistant') AND m.content <> '' ORDER BY m.rowid DESC LIMIT 1`);
+  app.get('/api/agents', async (req) => ({
+    agents: store.listAgents(me(req)).map((agent) => {
+      const last = lastMessage.get(agent.id) as { content: string; role: string; at: string } | undefined;
+      return { ...agent, lastMessage: last ? { text: last.content.replace(/[*_`#>]+/g, '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\s+/g, ' ').trim().slice(0, 120), role: last.role, at: last.at } : null };
+    }),
+    templates: TEMPLATES, faces: FACES,
+  }));
+  // Persona gallery: ready-made personas with skills, rules, tools and connectors. One click adds one.
+  app.get('/api/gallery', async (req) => {
+    const mine = store.listAgents(me(req));
+    const member = accountOf(req).role === 'member';
+    return {
+      personas: galleryList(store, (id) => connectorBrief(id, member)).map((item) => ({
+        ...item, tools: member ? item.tools.filter((tool) => !MEMBER_DENIED_TOOLS.has(tool)) : item.tools,
+        added: mine.some((agent) => agent.templateId === item.id),
+      })),
+    };
+  });
+  app.post('/api/gallery/:id', async (req) => {
+    const item = GALLERY.find((row) => row.id === (req.params as { id: string }).id);
+    if (!item) throw http(404, 'No such persona in the gallery.');
+    const account = accountOf(req);
+    if (account.role === 'member' && store.listAgents(account.id).length >= account.limits.maxAgents) throw http(400, `You can have up to ${account.limits.maxAgents} personas.`);
+    return { agent: await addFromGallery(item, account.id, account.role === 'member') };
+  });
+
   app.post('/api/agents/reorder', async (req) => {
     const body = parse(z.object({ ids: z.array(z.string()).min(1) }), req.body);
     store.reorderAgents(body.ids.filter((id) => ownerOf(store, 'agent', id) === me(req)));
@@ -347,6 +482,20 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     store.markAgentRead(agentId);
     return { session, created };
   });
+  // Capped memory files (USER, NOTES): readable and editable by the persona's owner.
+  app.get('/api/agents/:id/memory-files', async (req) => {
+    const id = (req.params as { id: string }).id;
+    mustOwn(store, req, 'agent', id, 'Persona not found.');
+    return { files: memoryFiles(store, id) };
+  });
+  app.put('/api/agents/:id/memory-files/:kind', async (req) => {
+    const { id, kind } = req.params as { id: string; kind: string };
+    mustOwn(store, req, 'agent', id, 'Persona not found.');
+    if (kind !== 'user' && kind !== 'notes') throw http(404, 'No such memory file.');
+    const body = parse(z.object({ content: z.string().max(10_000) }), req.body);
+    writeMemoryFile(store, id, kind, body.content);
+    return { files: memoryFiles(store, id) };
+  });
   app.post('/api/agents/:id/read', async (req) => {
     mustOwn(store, req, 'agent', (req.params as { id: string }).id, 'Persona not found.');
     store.markAgentRead((req.params as { id: string }).id);
@@ -389,7 +538,12 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const agent = store.getAgent((req.params as { id: string }).id);
     if (!agent) throw http(404, 'Persona not found.');
     const relative = String((req.query as { path?: string }).path || '');
-    return { path: relative, content: await readWorkspaceFile(agent.workspacePath, relative) };
+    try { return { path: relative, content: await readWorkspaceFile(agent.workspacePath, relative) }; }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'EISDIR' || code === 'ENOTDIR' || code === 'ENAMETOOLONG' || code === 'ERR_INVALID_ARG_VALUE') throw http(404, 'File not found.');
+      throw http(400, error instanceof Error ? error.message : 'Bad path.');
+    }
   });
 
   app.get('/api/rooms', async (req) => ({ rooms: store.listRooms(me(req)) }));
@@ -403,15 +557,19 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   app.post('/api/files', { bodyLimit: Math.ceil(MAX_FILE_BYTES * 1.4) + 4096 }, async (req) => {
     const body = parse(z.object({ name: z.string().min(1).max(200), contentBase64: z.string().min(1), sessionId: z.string().optional() }), req.body);
     if (body.sessionId) mustOwn(store, req, 'session', body.sessionId, 'Chat not found.');
+    const bytes = Buffer.from(body.contentBase64, 'base64');
+    ensureDiskRoom(config.dataDir, bytes.length);
     try {
-      return { file: saveFile(store, config.dataDir, { name: body.name, bytes: Buffer.from(body.contentBase64, 'base64'), sessionId: body.sessionId ?? null, source: 'upload', ownerId: me(req) }) };
+      return { file: saveFile(store, config.dataDir, { name: body.name, bytes, sessionId: body.sessionId ?? null, source: 'upload', ownerId: me(req) }) };
     } catch (error) {
+      if (isDiskFullError(error)) throw http(507, 'The disk is full. Free some space, then try again.');
       throw http(400, error instanceof Error ? error.message : 'Could not save the file.');
     }
   });
   app.get('/api/files', async (req) => {
-    const query = parse(z.object({ sessionId: z.string().optional(), q: z.string().optional(), limit: z.coerce.number().int().optional() }), req.query);
-    return { files: listFiles(store, { sessionId: query.sessionId, query: query.q, limit: query.limit, ownerId: me(req) }) };
+    const query = parse(z.object({ sessionId: z.string().optional(), q: z.string().optional(), limit: z.coerce.number().int().optional(), source: z.enum(['upload', 'agent']).optional() }), req.query);
+    if (query.sessionId) mustOwn(store, req, 'session', query.sessionId, 'Chat not found.');
+    return { files: listFiles(store, { sessionId: query.sessionId, query: query.q, limit: query.limit, ownerId: me(req), source: query.source }) };
   });
   app.get('/api/files/:id', async (req) => {
     mustOwn(store, req, 'file', (req.params as { id: string }).id, 'File not found.');
@@ -497,7 +655,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const root = rootFor(req, (req.params as { root: string }).root);
     const q = req.query as { path?: string; download?: string };
     const full = path.resolve(root.path, String(q.path || ''));
-    if (!isInside(root.path, full) || !fs.existsSync(full) || !fs.statSync(full).isFile()) throw http(404, 'File not found.');
+    if (!safeInside(root.path, full) || !fs.existsSync(full) || !fs.statSync(full).isFile()) throw http(404, 'File not found.');
     const name = path.basename(full);
     const download = q.download === '1';
     const mime = mimeFor(name);
@@ -622,13 +780,71 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     prefillChatWorkspaces(store, session.id, body.agentId);
     return { session: store.getSession(session.id) };
   });
+  // Everything this chat set in motion: helpers, timers/triggers it created, and files in both directions.
+  app.get('/api/sessions/:id/context', async (req) => {
+    const id = (req.params as { id: string }).id;
+    mustOwn(store, req, 'session', id, 'Chat not found.');
+    const helpers = engine.autonomy.listHelpers(id);
+    const files = listFiles(store, { sessionId: id, limit: 200, ownerId: me(req) });
+    // Files a helper produced count as this chat's output too.
+    const helperFiles = helpers.flatMap((row) => listFiles(store, { sessionId: row.childSessionId, limit: 50, ownerId: me(req), source: 'agent' }).map((file) => ({ ...file, helperId: row.id })));
+    const childRuns = new Set(helpers.map((row) => row.childRunId).filter(Boolean));
+    const waiting = store.listApprovals('pending').filter((approval) => childRuns.has(approval.runId));
+    return {
+      helpers, approvals: waiting,
+      timers: engine.autonomy.timersFor(id), triggers: accountOf(req).role === 'member' ? [] : engine.autonomy.triggersFor(id),
+      files: { uploads: files.filter((file) => file.source === 'upload'), produced: [...files.filter((file) => file.source !== 'upload'), ...helperFiles] },
+      // One entry per reply that changed files and can still be rolled back.
+      checkpoints: (store.db.prepare(`SELECT run_id AS runId, COUNT(*) AS edits, GROUP_CONCAT(label, ', ') AS labels, MAX(created_at) AS createdAt FROM edit_batches
+        WHERE session_id = ? AND run_id IS NOT NULL AND reverted_at IS NULL GROUP BY run_id ORDER BY createdAt DESC LIMIT 20`).all(id) as { runId: string; edits: number; labels: string; createdAt: string }[])
+        .map((row) => ({ ...row, edits: Number(row.edits), labels: String(row.labels || '').slice(0, 200) })),
+    };
+  });
+  // One click: undo every file edit a reply made (newest checkpoint first).
+  app.post('/api/runs/:id/rollback', async (req) => {
+    const id = (req.params as { id: string }).id;
+    mustOwn(store, req, 'run', id, 'Run not found.');
+    if (store.getSettings().readOnly) throw http(423, 'Read-only mode is on.');
+    try { return { reverted: await rollbackRun(store, id) }; }
+    catch (error) { if (error instanceof RollbackConflict) throw http(409, error.message); throw error; }
+  });
+  // Rule files the chat's workspaces bring (AGENTS.md, .cursor/rules, CLAUDE.md…), each switchable per chat.
+  app.get('/api/sessions/:id/rules', async (req) => {
+    const id = (req.params as { id: string }).id;
+    mustOwn(store, req, 'session', id, 'Chat not found.');
+    const rules = discoverRules(chatWorkspacePaths(store, id, me(req)), disabledRules(store, id));
+    return { rules: rules.map(({ text, ...rule }) => ({ ...rule, preview: text.slice(0, 400) })), caps: { file: RULE_FILE_CAP, total: RULE_TOTAL_CAP } };
+  });
+  app.put('/api/sessions/:id/rules', async (req) => {
+    const id = (req.params as { id: string }).id;
+    mustOwn(store, req, 'session', id, 'Chat not found.');
+    const body = parse(z.object({ key: z.string().min(1).max(2000), enabled: z.boolean() }), req.body);
+    setRuleEnabled(store, id, body.key, body.enabled);
+    return { ok: true };
+  });
+  app.post('/api/helpers/:id/stop', async (req) => {
+    const helper = engine.autonomy.getHelper((req.params as { id: string }).id);
+    if (!helper || helper.ownerId !== me(req)) throw http(404, 'Helper not found.');
+    return { helper: engine.autonomy.stop(helper.id) };
+  });
   app.get('/api/sessions/:id', async (req) => {
     const id = (req.params as { id: string }).id;
     mustOwn(store, req, 'session', id, 'Chat not found.');
     const session = store.getSession(id);
     if (!session) throw http(404, 'Chat not found.');
     const workshop = session.workshopId ? getWorkshop(store, session.workshopId) : null;
-    return { session, messages: store.listMessages(id), summaries: store.listSummaries(id), plan: readPlan(store, id), edits: listEdits(store, id), archived: store.listArchived(id), workshop };
+    // ?limit=N returns only the newest N messages (and hasMore); older pages come from /messages?before=.
+    const limit = Number((req.query as { limit?: string }).limit);
+    const page = Number.isFinite(limit) && limit > 0 ? store.pageMessages(id, Math.min(500, Math.floor(limit))) : { messages: store.listMessages(id), hasMore: false };
+    // A reply still running here (another tab, or a reload mid-run), so the page can attach to its stream.
+    const activeRun = (store.db.prepare(`SELECT id, status FROM runs WHERE session_id = ? AND parent_run_id IS NULL AND status IN ('running', 'awaiting_approval', 'paused') ORDER BY started_at DESC LIMIT 1`).get(id) as { id: string; status: string } | undefined) ?? null;
+    return { session, activeRun, messages: page.messages, hasMore: page.hasMore, summaries: store.listSummaries(id), plan: readPlan(store, id), edits: listEdits(store, id), archived: store.listArchived(id), workshop };
+  });
+  app.get('/api/sessions/:id/messages', async (req) => {
+    const id = (req.params as { id: string }).id;
+    mustOwn(store, req, 'session', id, 'Chat not found.');
+    const query = parse(z.object({ before: z.string().max(80).optional(), limit: z.coerce.number().int().min(1).max(500).default(100) }), req.query);
+    return store.pageMessages(id, query.limit ?? 100, query.before ?? null);
   });
   app.patch('/api/sessions/:id', async (req) => {
     const body = parse(z.object({ title: z.string().optional(), mode: z.enum(['chat', 'code']).optional(), modelPin: z.string().nullable().optional(), agentId: z.string().optional(), workshopId: z.string().nullable().optional() }), req.body);
@@ -660,6 +876,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const id = (req.params as { id: string }).id;
     mustOwn(store, req, 'session', id, 'Chat not found.');
     if (engine.sessionBusy(id)) throw http(409, 'A reply is still running in this chat. Press Stop first, then delete it.');
+    engine.autonomy.stopForSession(id);
     store.updateSession(id, { archived: true });
     return { ok: true };
   });
@@ -708,7 +925,8 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   app.post('/api/edits/:id/revert', async (req) => {
     const batch = store.db.prepare('SELECT session_id AS s FROM edit_batches WHERE id = ?').get((req.params as { id: string }).id) as { s?: string } | undefined;
     if (!batch?.s || ownerOf(store, 'session', batch.s) !== me(req)) throw http(404, 'Edit not found.');
-    await revertBatch(store, (req.params as { id: string }).id);
+    try { await revertBatch(store, (req.params as { id: string }).id); }
+    catch (error) { if (error instanceof RollbackConflict) throw http(409, error.message); throw error; }
     return { ok: true };
   });
 
@@ -801,7 +1019,68 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     return { provider };
   });
 
-  app.get('/api/mcp', async () => ({ servers: mcp.list(), builtin: ['shell', 'files', 'web_search', 'web_fetch', 'docker', 'memory', 'consult_agent', 'plan', 'grep', 'glob', 'apply_patch', 'git'] }));
+  app.get('/api/mcp', async () => ({ servers: mcp.list().map((server) => mcpView(server)), builtin: ['shell', 'files', 'web_search', 'web_fetch', 'docker', 'memory', 'consult_agent', 'plan', 'grep', 'glob', 'apply_patch', 'git'] }));
+  /** A server as the Tools page sees it: health, trust and which secrets are set (names only, never values). */
+  const mcpView = (server: McpServer) => {
+    const needed = [...new Set(Object.values(server.env).flatMap((value) => [...String(value).matchAll(/\{\{secret:([A-Z0-9_]+)\}\}/gi)].map((match) => match[1]!.toUpperCase())))];
+    const set = vault.mcpSecretNames(server.id);
+    return {
+      ...server, env: Object.fromEntries(Object.entries(server.env).map(([key, value]) => [key, /\{\{secret:/i.test(String(value)) ? '(from the vault)' : String(value)])),
+      health: mcp.health(server.id), trust: trustOf({ name: server.name, image: server.image, packageName: server.args.find((arg) => !arg.startsWith('-')), source: server.source }),
+      secrets: needed.map((name) => ({ name, set: set.includes(name) })),
+    };
+  };
+  app.get('/api/mcp/catalog', async (req) => {
+    const query = req.query as { source?: string; q?: string };
+    const q = String(query.q || '').trim().toLowerCase();
+    if (query.source === 'official') return { source: 'official', entries: await officialCatalog(q, fetchImpl) };
+    const entries = (await dockerCatalog(fetchImpl, config.dataDir)).filter((entry) => !q || `${entry.id} ${entry.title} ${entry.description}`.toLowerCase().includes(q));
+    return { source: 'docker', total: entries.length, entries: entries.slice(0, 60) };
+  });
+  app.post('/api/mcp/catalog/vet', async (req) => {
+    const body = parse(z.object({ source: z.enum(['docker', 'official']), id: z.string().min(1).max(200) }), req.body);
+    const entries = body.source === 'docker' ? await dockerCatalog(fetchImpl, config.dataDir) : await officialCatalog(body.id, fetchImpl);
+    const entry = entries.find((row) => row.id === body.id);
+    if (!entry) throw http(404, 'Not found in that catalog.');
+    if (!entry.installable) throw http(400, entry.note || 'This server cannot be installed here.');
+    let report: VettingReport;
+    if (entry.image) report = vetCatalogImage(entry);
+    else {
+      const settings = store.getSettings();
+      report = await vetSpec(specFor(entry), fetchImpl, { reputation: true, searxngUrl: settings.searxngUrl || process.env.SEARXNG_URL || '', summarize: localReputationSummarizer(store, fetchImpl) });
+      if (entry.trust === 'community' && !report.findings.some((row) => row.code === 'community')) report.findings.push({ severity: 'medium', code: 'community', detail: 'Community server: read its source before trusting it with tokens.' });
+    }
+    store.saveVetting(report.id, report);
+    return { report, trust: entry.trust, secrets: entry.secrets.map((row) => row.env) };
+  });
+  /** Secrets for one server, typed into a form: stored in the vault for that server only; never returned or shown to a model. */
+  app.get('/api/mcp/:id/secrets', async (req) => {
+    const server = store.getMcp((req.params as { id: string }).id);
+    if (!server) throw http(404, 'MCP server not found.');
+    return { secrets: mcpView(server).secrets };
+  });
+  app.put('/api/mcp/:id/secrets', async (req) => {
+    const id = (req.params as { id: string }).id;
+    const server = store.getMcp(id);
+    if (!server) throw http(404, 'MCP server not found.');
+    const body = parse(z.object({ values: z.record(z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/), z.string().max(20_000)) }), req.body);
+    const allowed = new Set(mcpView(server).secrets.map((row) => row.name));
+    for (const [name, value] of Object.entries(body.values)) {
+      if (!allowed.has(name)) throw http(400, `${name} is not a secret this server uses.`);
+      if (value) vault.put({ name, value, scope: 'mcp', scopeId: id, actor: me(req) });
+    }
+    if (mcp.health(id).status === 'connected' || server.lastError) void mcp.connect(id).catch(() => undefined);
+    return { secrets: mcpView(store.getMcp(id)!).secrets };
+  });
+  app.patch('/api/mcp/:id', async (req) => {
+    const id = (req.params as { id: string }).id;
+    const server = store.getMcp(id);
+    if (!server) throw http(404, 'MCP server not found.');
+    const body = parse(z.object({ enabled: z.boolean() }), req.body);
+    store.upsertMcp({ ...server, enabled: body.enabled });
+    if (!body.enabled) await mcp.stop(id);
+    return { server: mcpView(store.getMcp(id)!) };
+  });
   app.post('/api/mcp/discover', async () => ({ servers: mcp.importFound(config.dataDir), found: importConfigs(config.dataDir).length }));
   app.get('/api/mcp/registry', async (req) => searchRegistry(String((req.query as { q?: string }).q || 'file'), fetchImpl));
   app.post('/api/mcp/vet', async (req) => {
@@ -821,15 +1100,22 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     return { report };
   });
   app.post('/api/mcp/install', async (req) => {
-    const body = parse(z.object({ reportId: z.string(), acknowledgeRisk: z.boolean(), acknowledgeCritical: z.boolean().optional(), grants: z.array(z.string()).optional() }), req.body);
+    const body = parse(z.object({ reportId: z.string(), acknowledgeRisk: z.boolean(), acknowledgeCritical: z.boolean().optional(), acknowledgeCommunity: z.boolean().optional(), grants: z.array(z.string()).optional() }), req.body);
     const report = store.getVetting<import('./mcp.js').VettingReport>(body.reportId);
     if (!report) throw http(404, 'Vetting report not found. Vet the server first.');
-    return { server: mcp.install(report, body) };
+    try { return { server: mcpView(mcp.install(report, body)) }; } catch (error) { throw http(400, error instanceof Error ? error.message : 'Install failed.'); }
   });
-  app.post('/api/mcp/:id/refresh', async (req) => ({ server: await mcp.connect((req.params as { id: string }).id) }));
+  app.post('/api/mcp/:id/refresh', async (req) => {
+    const id = (req.params as { id: string }).id;
+    try { await mcp.connect(id); } catch { /* the view carries the error */ }
+    const server = store.getMcp(id);
+    if (!server) throw http(404, 'MCP server not found.');
+    return { server: mcpView(server) };
+  });
   app.delete('/api/mcp/:id', async (req) => {
     const id = (req.params as { id: string }).id;
     await mcp.stop(id);
+    for (const secret of vault.list().filter((row) => row.scope === 'mcp' && row.scopeId === id && !row.revokedAt)) vault.revoke(secret.id, me(req));
     store.deleteMcp(id);
     return { ok: true };
   });
@@ -951,6 +1237,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   });
   app.get('/api/backups', async () => ({ backups: listBackups(config.dataDir) }));
   app.post('/api/backups', async () => {
+    ensureDiskRoom(config.dataDir, fs.existsSync(path.join(config.dataDir, 'local-agent.db')) ? fs.statSync(path.join(config.dataDir, 'local-agent.db')).size : 0);
     const backup = await createBackup(config.dataDir);
     const shipped = await shipBackup(backup.file, store.getSettings());
     return { backup, shipped };
@@ -1327,6 +1614,14 @@ function registerLibrary(app: FastifyInstance, ctx: Ctx) {
     const event = body.event ?? { test: true, note: 'Fired from the triggers page.' };
     return fireTrigger(store, engine, trigger, event, { test: true, wait: true });
   });
+  app.patch('/api/triggers/:id', async (req) => {
+    const id = (req.params as { id: string }).id;
+    mustOwn(store, req, 'trigger', id, 'Trigger not found.');
+    const body = parse(z.object({ enabled: z.boolean() }), req.body);
+    const trigger = updateTrigger(store, id, { enabled: body.enabled });
+    ctx.bus.publish({ type: 'trigger', message: body.enabled ? 'resumed' : 'paused' });
+    return { trigger: { id: trigger.id, enabled: trigger.enabled } };
+  });
   app.delete('/api/triggers/:id', async (req) => {
     mustOwn(store, req, 'trigger', (req.params as { id: string }).id, 'Trigger not found.');
     store.db.prepare('DELETE FROM triggers WHERE id = ?').run((req.params as { id: string }).id);
@@ -1393,11 +1688,21 @@ async function runSetup(action: string, model: string | undefined, jobId: string
       if (!response.ok || !response.body) throw new Error(`Ollama pull failed (${response.status}).`);
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
+      // Ollama reports a failed pull (unknown model, disk full) as an {"error"} line inside a 200 stream.
+      let pending = '';
+      let failure = '';
       while (true) {
         const chunk = await reader.read();
         if (chunk.done) break;
-        store.appendJob(jobId, decoder.decode(chunk.value));
+        const text = decoder.decode(chunk.value, { stream: true });
+        store.appendJob(jobId, text);
+        pending += text;
+        const lines = pending.split('\n');
+        pending = lines.pop() ?? '';
+        for (const line of lines) { try { const row = JSON.parse(line) as { error?: string }; if (row.error) failure = row.error; } catch { /* progress text */ } }
       }
+      try { const row = JSON.parse(pending) as { error?: string }; if (row.error) failure = row.error; } catch { /* no trailing line */ }
+      if (failure) throw new Error(`Ollama could not pull ${name}: ${failure}`);
     } else if (action === 'start-searxng') {
       if (!(await docker.ping())) throw new Error(`Docker is not available at ${docker.describe()}.`);
       const config = searxngConfig(ctx.config.dataDir);

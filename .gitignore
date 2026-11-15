@@ -14,3 +14,5 @@ coverage
 *.keystore
 *.jks
 .vite
+e2e-report/
+test-results/

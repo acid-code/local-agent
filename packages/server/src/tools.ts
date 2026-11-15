@@ -4,6 +4,8 @@ import path from 'node:path';
 import { assessCommand, isBlockedUrl, resolveInside } from '@local-agent/shared';
 import { formatCitations, searchKnowledge } from './kb.js';
 import { loadSkill } from './skills.js';
+import { lineDiff } from './coding.js';
+import { nid, now } from './util.js';
 import { locatePath, projectPath } from './workshops.js';
 import type { Agent } from './db.js';
 import type { DockerCtl } from './docker.js';
@@ -181,6 +183,15 @@ export const BUILTIN_TOOLS: Tool[] = [
     async execute(args, ctx) {
       const hit = locatePath({ workspace: ctx.workspace, roots: ctx.roots, target: String(args.path || '') });
       if (!hit?.write) throw new Error('That file is not in a writable project.');
+      // Pre-edit checkpoint, so the reply's changes can be rolled back in one click.
+      if (ctx.sessionId) {
+        let before: string | null = null;
+        try { before = await fs.readFile(hit.full, 'utf8'); } catch { before = null; }
+        const rel = path.relative(ctx.workspace, hit.full);
+        ctx.store.db.prepare('INSERT INTO edit_batches (id, session_id, run_id, label, files, diff, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+          nid('edit'), ctx.sessionId, ctx.runId ?? null, String(args.path), JSON.stringify([{ path: hit.full, before, after: String(args.content ?? '') }]), lineDiff(rel, before ?? '', String(args.content ?? '')), now(),
+        );
+      }
       await fs.mkdir(path.dirname(hit.full), { recursive: true });
       await fs.writeFile(hit.full, String(args.content ?? ''), 'utf8');
       return `Wrote ${hit.label ? `${hit.label}/` : ''}${path.relative(hit.root, hit.full)} (${String(args.content ?? '').length} bytes).`;

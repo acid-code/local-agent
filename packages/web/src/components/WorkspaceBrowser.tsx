@@ -13,8 +13,36 @@ interface FileData { text: string; truncated: boolean; binary: boolean; size: nu
  * Right panel for one attached workspace: file tree, viewer/editor (save inline), git status and diff (refreshes live
  * while open, so the agent's edits show up), and quick actions: pull, commit, new branch, open in a new window.
  */
-export function WorkspaceBrowser({ root, live, onClose, onChanged, onMention }: {
-  root: ChatRoot; live: boolean; onClose: () => void; onChanged: () => void; onMention: (path: string) => void;
+interface RuleRow { key: string; root: string; file: string; kind: 'always' | 'glob' | 'manual' | 'nested'; globs: string[]; description: string; chars: number; enabled: boolean; preview: string }
+const KIND_NOTE: Record<RuleRow['kind'], string> = { always: 'always on', glob: 'for matching files', manual: 'read when relevant', nested: 'for its folder' };
+
+/** Rule files this workspace brings into the chat (AGENTS.md, .cursor/rules, CLAUDE.md…). Click a chip to switch it for this chat. */
+function RuleChips({ sessionId, rootPath }: { sessionId: string; rootPath: string }) {
+  const [rules, setRules] = useState<RuleRow[] | null>(null);
+  const load = useCallback(() => api<{ rules: RuleRow[] }>(`/api/sessions/${sessionId}/rules`).then((data) => setRules(data.rules.filter((rule) => rule.root === rootPath))).catch(() => setRules([])), [sessionId, rootPath]);
+  useEffect(() => { void load(); }, [load]);
+  if (!rules || rules.length === 0) return null;
+  const on = rules.filter((rule) => rule.enabled).length;
+  return (
+    <div className="rule-chips" aria-label="Project rules">
+      <small className="faint">Rules · {on} of {rules.length} on</small>
+      <div className="chip-row">
+        {rules.map((rule) => (
+          <button key={rule.key} type="button" className={rule.enabled ? 'chip on' : 'chip'} aria-pressed={rule.enabled}
+            title={`${rule.file} — ${KIND_NOTE[rule.kind]}${rule.globs.length ? ` (${rule.globs.join(', ')})` : ''} · ${rule.chars} chars\n\n${rule.description || rule.preview}`}
+            onClick={async () => {
+              setRules((rows) => rows?.map((row) => row.key === rule.key ? { ...row, enabled: !row.enabled } : row) ?? rows);
+              try { await api(`/api/sessions/${sessionId}/rules`, { method: 'PUT', body: JSON.stringify({ key: rule.key, enabled: !rule.enabled }) }); }
+              catch (error) { toast(errorText(error), 'error'); void load(); }
+            }}>{rule.file.replace(/^\.cursor\/rules\//, '')}{rule.kind !== 'always' && <span className="faint"> · {rule.kind === 'glob' ? 'glob' : rule.kind === 'nested' ? 'folder' : 'on demand'}</span>}</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export function WorkspaceBrowser({ root, live, onClose, onChanged, onMention, sessionId }: {
+  root: ChatRoot; live: boolean; onClose: () => void; onChanged: () => void; onMention: (path: string) => void; sessionId?: string | null;
 }) {
   const [view, setView] = useState<'files' | 'changes'>(root.dirty ? 'changes' : 'files');
   const [tree, setTree] = useState<Record<string, Entry[]>>({});
@@ -103,6 +131,7 @@ export function WorkspaceBrowser({ root, live, onClose, onChanged, onMention }: 
         ]} />
         <button className="icon-btn" aria-label="Close panel" onClick={onClose}><X size={18} /></button>
       </div>
+      {sessionId && <RuleChips sessionId={sessionId} rootPath={root.path} />}
       {form && (
         <form className="ws-quick" onSubmit={(event) => { event.preventDefault(); if (form === 'commit') void action('commit', { message: text }); else void action('branch', { name: text.trim() }); }}>
           <input autoFocus value={text} onChange={(event) => setText(event.target.value)} placeholder={form === 'commit' ? 'Commit message' : 'feature/my-change'} aria-label={form === 'commit' ? 'Commit message' : 'Branch name'} onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); setForm(null); } }} />

@@ -1,3 +1,4 @@
+import { isDiskFullError } from './resources.js';
 import { MemoryBudget, budgetConfig, systemProbe, type MemoryProbe } from './memory.js';
 import path from 'node:path';
 import { ensureFilesTable } from './files.js';
@@ -36,6 +37,7 @@ export interface BuiltApp {
   bus: Bus;
   vault: Vault;
   scheduler: Scheduler;
+  mcp: McpRuntime;
   config: ReturnType<typeof loadConfig>;
 }
 
@@ -63,7 +65,8 @@ export async function buildApp(options: {
   const memoryProbe = options.memoryProbe ?? (options.providerOverride || process.env.VITEST ? undefined : systemProbe(options.fetchImpl ?? fetch));
   engine.memory = memoryProbe ? new MemoryBudget(memoryProbe, () => budgetConfig(store.getSettings()), path.join(config.dataDir, 'memory-calibration.json')) : null;
   const triggers = new TriggerRuntime(store, engine, vault, bus);
-  const mcp = new McpRuntime(store, docker);
+  const mcp = new McpRuntime(store, docker, { secretsFor: (id) => vault.mcpEnv(id), cacheDir: path.join(config.dataDir, 'mcp-cache') });
+  engine.mcpTools = () => mcp.agentTools();
   const scheduler = new Scheduler(store, engine);
   engine.recover();
   const notifier = new Notifier(store, bus, engine, config.dataDir, options.fetchImpl ?? fetch);
@@ -71,6 +74,7 @@ export async function buildApp(options: {
     scheduler.start();
     notifier.start();
     triggers.start();
+    if (!process.env.VITEST) mcp.startAll();
   }
 
   const app = Fastify({ bodyLimit: 8 * 1024 * 1024, logger: false });
@@ -126,13 +130,15 @@ export async function buildApp(options: {
   });
 
   app.setErrorHandler((error: unknown, _req, reply) => {
-    const status = typeof error === 'object' && error && 'statusCode' in error ? Number((error as { statusCode?: number }).statusCode) : 500;
-    const message = error instanceof Error ? error.message : 'Internal error';
+    // A full disk is the user's to fix, so say so plainly (507) instead of "Internal error".
+    const full = isDiskFullError(error);
+    const status = full ? 507 : typeof error === 'object' && error && 'statusCode' in error ? Number((error as { statusCode?: number }).statusCode) : 500;
+    const message = full && !(error instanceof Error && /disk is full/i.test(error.message)) ? 'The disk is full. Free some space, then try again.' : error instanceof Error ? error.message : 'Internal error';
     if (status >= 500) store.addLog('error', message);
-    reply.code(status || 500).send({ error: status >= 500 ? 'Internal error' : message });
+    reply.code(status || 500).send({ error: status >= 500 && status !== 507 ? 'Internal error' : message });
   });
 
-  registerRoutes(app, { store, engine, bus, docker, mcp, vault, notifier, config, fetchImpl: options.fetchImpl ?? fetch });
+  registerRoutes(app, { store, engine, bus, docker, mcp, vault, notifier, config, fetchImpl: options.fetchImpl ?? fetch, autoConnectors: options.startScheduler !== false && !process.env.VITEST });
 
   if (options.serveWeb !== false && fs.existsSync(config.webDist)) {
     await app.register(fastifyStatic, { root: config.webDist });
@@ -161,9 +167,10 @@ export async function buildApp(options: {
     scheduler.stop();
     notifier.stop();
     triggers.stop();
+    await mcp.closeAll().catch(() => undefined);
     for (const timer of background) clearInterval(timer);
     store.close();
   });
 
-  return { app, store, engine, bus, vault, scheduler, config };
+  return { app, store, engine, bus, vault, scheduler, config, mcp };
 }

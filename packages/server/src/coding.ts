@@ -73,19 +73,45 @@ export function listEdits(store: Store, sessionId: string): EditBatch[] {
   return (store.db.prepare('SELECT * FROM edit_batches WHERE session_id = ? ORDER BY created_at DESC').all(sessionId) as Record<string, unknown>[]).map(mapBatch);
 }
 
-export async function revertBatch(store: Store, batchId: string) {
-  const row = store.db.prepare('SELECT * FROM edit_batches WHERE id = ?').get(batchId) as { id: string; files: string; reverted_at: string | null } | undefined;
-  if (!row) throw new Error('Edit batch not found.');
-  if (row.reverted_at) throw new Error('That batch was already reverted.');
-  const files = JSON.parse(row.files) as { path: string; before: string | null }[];
-  for (const file of files) {
-    if (file.before == null) await fs.rm(file.path, { force: true });
-    else {
-      await fs.mkdir(path.dirname(file.path), { recursive: true });
-      await fs.writeFile(file.path, file.before, 'utf8');
+type BatchFile = { path: string; before: string | null; after?: string | null };
+const readOrNull = async (file: string) => { try { return await fs.readFile(file, 'utf8'); } catch { return null; } };
+
+/** A file changed after the agent's edit (by you or another run): rolling back would throw that work away. */
+export class RollbackConflict extends Error {
+  constructor(readonly paths: string[]) { super(`Not rolled back: ${paths.join(', ')} changed after this edit. Undo those changes first, or roll back the later edit.`); }
+}
+
+/**
+ * Checks, then restores, a list of batches (newest first). Nothing is written when any file no longer
+ * matches what the batch wrote, so a rollback never clobbers a later edit made by you or a concurrent run.
+ */
+export async function revertBatches(store: Store, batchIds: string[]) {
+  const rows = batchIds.map((id) => {
+    const row = store.db.prepare('SELECT * FROM edit_batches WHERE id = ?').get(id) as { id: string; files: string; reverted_at: string | null } | undefined;
+    if (!row) throw new Error('Edit batch not found.');
+    if (row.reverted_at) throw new Error('That batch was already reverted.');
+    return { id: row.id, files: JSON.parse(row.files) as BatchFile[] };
+  });
+  const current = new Map<string, string | null>();
+  const conflicts = new Set<string>();
+  for (const row of rows) {
+    for (const file of row.files) {
+      if (!current.has(file.path)) current.set(file.path, await readOrNull(file.path));
+      if (file.after !== undefined && current.get(file.path) !== file.after) conflicts.add(file.path);
+      current.set(file.path, file.before);
     }
   }
-  store.db.prepare('UPDATE edit_batches SET reverted_at = ? WHERE id = ?').run(now(), batchId);
+  if (conflicts.size) throw new RollbackConflict([...conflicts]);
+  for (const [file, content] of current) {
+    if (content == null) await fs.rm(file, { force: true });
+    else { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, content, 'utf8'); }
+  }
+  for (const row of rows) store.db.prepare('UPDATE edit_batches SET reverted_at = ? WHERE id = ?').run(now(), row.id);
+  return rows.length;
+}
+
+export async function revertBatch(store: Store, batchId: string) {
+  await revertBatches(store, [batchId]);
 }
 
 export function grantFolder(store: Store, agentId: string, folder: string, mode: 'read' | 'write') {

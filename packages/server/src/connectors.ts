@@ -1,0 +1,233 @@
+import { spawn, spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { isBlockedUrl } from '@local-agent/shared';
+import type { Store } from './db.js';
+import type { Tool, ToolContext } from './tools.js';
+import { fetchPublicText } from './tools.js';
+import { locatePath } from './workshops.js';
+
+/**
+ * Connectors that ship with the app and work offline with no account or secret. They implement the same tool contracts as the
+ * reference MCP servers (filesystem, fetch, git, memory, time, sequential-thinking, SQLite, a browser, SearXNG search, Docker),
+ * but run in-process, scoped to the chat's workspaces, so there is nothing to download or start. Docker is owner-only.
+ * Account-based services (GitHub, Gmail, Calendar…) are "recommended": one click starts the vetted, containerized MCP install.
+ */
+export type ConnectorStatus = 'healthy' | 'degraded' | 'off';
+export interface BuiltinConnector {
+  id: string; name: string; description: string; tools: string[]; ownerOnly?: boolean; mcpEquivalent: string;
+  health: (env: HealthEnv) => Promise<{ status: Exclude<ConnectorStatus, 'off'>; detail: string }>;
+}
+export interface HealthEnv { store: Store; dataDir: string; searxngUrl: string; fetchImpl: typeof fetch; dockerAvailable: () => boolean }
+
+const which = (bin: string) => { try { return spawnSync('sh', ['-c', `command -v ${bin}`], { encoding: 'utf8' }).stdout.trim() || null; } catch { return null; } };
+
+export function chromePath(): string | null {
+  const configured = process.env.CHROME_PATH;
+  if (configured && fs.existsSync(configured)) return configured;
+  for (const candidate of ['/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/snap/bin/chromium']) if (fs.existsSync(candidate)) return candidate;
+  return null;
+}
+
+export const BUILTIN_CONNECTORS: BuiltinConnector[] = [
+  { id: 'filesystem', name: 'Filesystem', mcpEquivalent: '@modelcontextprotocol/server-filesystem', description: 'Read, list and search files in the chat\'s workspaces only. Writes still ask first.', tools: ['list_dir', 'read_file', 'glob', 'grep'],
+    async health(env) { try { fs.accessSync(env.dataDir, fs.constants.W_OK); return { status: 'healthy', detail: 'Scoped to attached workspaces.' }; } catch { return { status: 'degraded', detail: 'Data folder is not writable.' }; } } },
+  { id: 'fetch', name: 'Fetch', mcpEquivalent: '@modelcontextprotocol/server-fetch', description: 'Fetch public web pages as text. Private and local addresses are blocked.', tools: ['web_fetch'],
+    async health() { return { status: 'healthy', detail: 'Public http(s) only.' }; } },
+  { id: 'git', name: 'Git', mcpEquivalent: 'mcp-server-git', description: 'Status, diff, log, branches and commits in workspace repos. Pushes and main need approval.', tools: ['git'],
+    async health() { const bin = which('git'); return bin ? { status: 'healthy', detail: bin } : { status: 'degraded', detail: 'git is not installed.' }; } },
+  { id: 'memory', name: 'Memory', mcpEquivalent: '@modelcontextprotocol/server-memory', description: 'Long-term notes and capped USER/NOTES memory files per persona.', tools: ['remember', 'recall', 'memory_file'],
+    async health(env) { try { env.store.db.prepare('SELECT 1').get(); return { status: 'healthy', detail: 'Stored in the local database.' }; } catch { return { status: 'degraded', detail: 'Database unavailable.' }; } } },
+  { id: 'time', name: 'Time', mcpEquivalent: 'mcp-server-time', description: 'Current time and time-zone conversion.', tools: ['time_now'],
+    async health() { return { status: 'healthy', detail: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC' }; } },
+  { id: 'search', name: 'Web search', mcpEquivalent: 'SearXNG', description: 'Private web search through the local SearXNG container.', tools: ['web_search'],
+    async health(env) {
+      const base = env.searxngUrl || 'http://127.0.0.1:8088';
+      try { const res = await env.fetchImpl(`${base.replace(/\/$/, '')}/search?q=ping&format=json`, { signal: AbortSignal.timeout(4000) }); return res.ok ? { status: 'healthy', detail: base } : { status: 'degraded', detail: `SearXNG answered ${res.status}.` }; }
+      catch { return { status: 'degraded', detail: env.dockerAvailable() ? 'SearXNG is starting or stopped (Setup → Web search).' : 'SearXNG needs Docker (Setup → Web search).' }; }
+    } },
+  { id: 'thinking', name: 'Sequential thinking', mcpEquivalent: '@modelcontextprotocol/server-sequential-thinking', description: 'Step-by-step reasoning scratchpad for hard problems: numbered thoughts, revisions, branches.', tools: ['think'],
+    async health() { return { status: 'healthy', detail: 'In-process.' }; } },
+  { id: 'browser', name: 'Browser', mcpEquivalent: '@playwright/mcp', description: 'Render JavaScript-heavy public pages in a headless browser with a throwaway profile. Public URLs only.', tools: ['browse'],
+    async health() { const chrome = chromePath(); return { status: 'healthy', detail: chrome ? `Headless ${path.basename(chrome)}, throwaway profile.` : 'No Chrome found: plain fetch fallback.' }; } },
+  { id: 'sqlite', name: 'SQLite', mcpEquivalent: 'mcp-server-sqlite', description: 'Read-only SQL queries on .db/.sqlite files in the chat\'s workspaces.', tools: ['sqlite_query'],
+    async health() { try { new DatabaseSync(':memory:').prepare('SELECT 1').get(); return { status: 'healthy', detail: 'node:sqlite, read-only.' }; } catch { return { status: 'degraded', detail: 'node:sqlite unavailable.' }; } } },
+  { id: 'docker', name: 'Docker', mcpEquivalent: 'docker-mcp', ownerOnly: true, description: 'List and inspect containers; run and remove need approval. Owner only.', tools: ['docker_ps', 'docker_inspect', 'docker_run', 'docker_rm'],
+    async health(env) { return env.dockerAvailable() ? { status: 'healthy', detail: 'Docker answered.' } : { status: 'degraded', detail: 'Docker is not reachable.' }; } },
+];
+
+/**
+ * Account-based connectors, pinned: a Docker catalog image by sha256 digest where one exists, otherwise an exact npm version that
+ * "Download all recommended" installs into a local cache (mounted read-only into the container), so nothing changes under you.
+ */
+export interface RecommendedConnector {
+  id: string; name: string; description: string; package: string; ecosystem: 'npm' | 'docker'; needs: string;
+  image?: string; npm?: string; bin?: string; secrets: string[]; env?: Record<string, string>; trust: 'official' | 'docker' | 'community'; note?: string;
+}
+export const RECOMMENDED_CONNECTORS: RecommendedConnector[] = [
+  { id: 'github', name: 'GitHub', description: 'Issues, pull requests and repos.', package: 'ghcr.io/github/github-mcp-server', ecosystem: 'docker', trust: 'official', needs: 'A GitHub token.',
+    image: 'ghcr.io/github/github-mcp-server@sha256:f6056fc10bfffcc8c81a6417a2e9ca12808647e8dd6049642a4feaadee0e0f8a', secrets: ['GITHUB_PERSONAL_ACCESS_TOKEN'] },
+  { id: 'gmail', name: 'Gmail', description: 'Read and send email over IMAP/SMTP with an app password.', package: 'yashtekwani/gmail-mcp', ecosystem: 'docker', trust: 'community', needs: 'Your address and a Google app password.',
+    image: 'yashtekwani/gmail-mcp@sha256:9d806c6ba3752bd83a94782cc65d79929e05b3d4d805a01320d86004e39daf13', secrets: ['EMAIL_ADDRESS', 'EMAIL_PASSWORD'],
+    env: { IMAP_HOST: 'imap.gmail.com', IMAP_PORT: '993', SMTP_HOST: 'smtp.gmail.com', SMTP_PORT: '587' } },
+  { id: 'calendar', name: 'Google Calendar', description: 'Events and free/busy.', package: '@cocal/google-calendar-mcp', ecosystem: 'npm', trust: 'community', needs: 'A Google OAuth client file path.',
+    npm: '@cocal/google-calendar-mcp@2.8.1', bin: 'node_modules/@cocal/google-calendar-mcp/build/index.js', secrets: ['GOOGLE_OAUTH_CREDENTIALS'], note: 'First sign-in opens a Google consent page.' },
+  { id: 'slack', name: 'Slack', description: 'Channels and messages.', package: 'mcp/slack', ecosystem: 'docker', trust: 'docker', needs: 'A Slack bot token and team id.',
+    image: 'mcp/slack@sha256:4cc10c3f4bd988bd2dce40e3068fe38fa3b3bad1da99f9653eb5fa5cce35baa1', secrets: ['SLACK_BOT_TOKEN', 'SLACK_TEAM_ID'], note: 'Docker marks this reference server archived.' },
+  { id: 'notion', name: 'Notion', description: 'Pages and databases.', package: 'mcp/notion', ecosystem: 'docker', trust: 'docker', needs: 'A Notion integration token.',
+    image: 'mcp/notion@sha256:df0d6781d03f37bd5b962c85ae1f288382f31b7108c489473641ffc372f43dc9', secrets: ['INTERNAL_INTEGRATION_TOKEN'],
+    env: { OPENAPI_MCP_HEADERS: '{"Authorization": "Bearer $INTERNAL_INTEGRATION_TOKEN", "Notion-Version": "2022-06-28"}' } },
+  { id: 'linear', name: 'Linear', description: 'Issues and projects.', package: 'linear-mcp-server', ecosystem: 'npm', trust: 'community', needs: 'A Linear API key.',
+    npm: 'linear-mcp-server@0.1.0', bin: 'node_modules/linear-mcp-server/build/index.js', secrets: ['LINEAR_API_KEY'] },
+];
+
+/** The install spec for a recommended connector: its pinned image, or the cached npm package run with node. */
+export function recommendedSpec(item: RecommendedConnector) {
+  const env: Record<string, string> = { ...(item.env ?? {}) };
+  for (const name of item.secrets) env[name] = `{{secret:${name}}}`;
+  return item.image
+    ? { name: item.name, transport: 'stdio' as const, args: [], env, source: `recommended:${item.id}`, image: item.image }
+    : { name: item.name, transport: 'stdio' as const, command: 'npm-cache', args: [item.npm!, item.bin!], env, source: `recommended:${item.id}` };
+}
+
+// ── State ────────────────────────────────────────────────────────────────────
+
+function ensure(store: Store) {
+  store.db.exec('CREATE TABLE IF NOT EXISTS connector_state (id TEXT PRIMARY KEY, enabled INTEGER NOT NULL)');
+}
+export function connectorEnabled(store: Store, id: string): boolean {
+  ensure(store);
+  const row = store.db.prepare('SELECT enabled FROM connector_state WHERE id = ?').get(id) as { enabled: number } | undefined;
+  return row ? Boolean(row.enabled) : true;
+}
+export function setConnectorEnabled(store: Store, id: string, enabled: boolean) {
+  ensure(store);
+  store.db.prepare('INSERT INTO connector_state (id, enabled) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled').run(id, enabled ? 1 : 0);
+}
+/** One-time markers (e.g. "already tried to start SearXNG"). */
+export function connectorStateFlag(store: Store, key: string, set?: boolean): boolean {
+  ensure(store);
+  if (set !== undefined) { store.db.prepare('INSERT INTO connector_state (id, enabled) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled').run(`flag:${key}`, set ? 1 : 0); return set; }
+  return Boolean((store.db.prepare('SELECT enabled FROM connector_state WHERE id = ?').get(`flag:${key}`) as { enabled: number } | undefined)?.enabled);
+}
+/** Tools a switched-off connector would provide; the engine drops them for every persona. */
+export function disabledConnectorTools(store: Store): Set<string> {
+  const off = new Set<string>();
+  for (const connector of BUILTIN_CONNECTORS) if (!connectorEnabled(store, connector.id)) for (const tool of connector.tools) off.add(tool);
+  return off;
+}
+export function connectorTools(ids: string[], member: boolean): string[] {
+  return [...new Set(ids.flatMap((id) => BUILTIN_CONNECTORS.find((row) => row.id === id && !(member && row.ownerOnly))?.tools ?? []))];
+}
+export function recommendedConnected(store: Store, id: string): boolean {
+  const item = RECOMMENDED_CONNECTORS.find((row) => row.id === id);
+  if (!item) return false;
+  return store.listMcp().some((server) => server.enabled && (server.source === `recommended:${item.id}` || server.args.includes(item.package) || server.name === item.id || server.name.endsWith(`/${item.id}`)));
+}
+
+export async function connectorReport(env: HealthEnv, member: boolean) {
+  const builtIn = await Promise.all(BUILTIN_CONNECTORS.filter((row) => !(member && row.ownerOnly)).map(async (row) => {
+    const enabled = connectorEnabled(env.store, row.id);
+    const health = enabled ? await row.health(env).catch(() => ({ status: 'degraded' as const, detail: 'Health check failed.' })) : { status: 'off' as const, detail: 'Switched off.' };
+    return { id: row.id, name: row.name, description: row.description, tools: row.tools, ownerOnly: Boolean(row.ownerOnly), mcpEquivalent: row.mcpEquivalent, builtIn: true, enabled, ...health };
+  }));
+  const servers = env.store.listMcp();
+  const recommended = RECOMMENDED_CONNECTORS.map((row) => ({ ...row, builtIn: false, connected: recommendedConnected(env.store, row.id), serverId: servers.find((server) => server.source === `recommended:${row.id}`)?.id ?? null, pinned: row.image ?? row.npm ?? row.package }));
+  return { builtIn, recommended };
+}
+
+// ── New tools (the rest already exist as built-in tools) ─────────────────────
+
+const obj = (properties: Record<string, unknown>, required: string[] = []) => ({ type: 'object', properties, required, additionalProperties: false });
+
+export function timeTool(): Tool {
+  return {
+    name: 'time_now', description: 'Current date and time, optionally in other IANA time zones (e.g. Asia/Jerusalem, America/New_York), or convert a given ISO time.',
+    parameters: obj({ zones: { type: 'array', items: { type: 'string' } }, at: { type: 'string' } }), mutates: () => false, approval: () => null,
+    async execute(args) {
+      const at = args.at ? new Date(String(args.at)) : new Date();
+      if (Number.isNaN(at.getTime())) throw new Error('at must be an ISO date-time.');
+      const zones = Array.isArray(args.zones) && args.zones.length ? (args.zones as string[]).slice(0, 8) : [Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'];
+      const lines = zones.map((zone) => {
+        try { return `${zone}: ${new Intl.DateTimeFormat('en-GB', { timeZone: zone, dateStyle: 'full', timeStyle: 'long' }).format(at)}`; } catch { return `${zone}: unknown time zone`; }
+      });
+      return `UTC: ${at.toISOString()}\n${lines.join('\n')}`;
+    },
+  };
+}
+
+const thoughts = new Map<string, { n: number; text: string; revises?: number }[]>();
+export function thinkTool(): Tool {
+  return {
+    name: 'think', description: 'Sequential thinking scratchpad: record numbered thoughts (thought, thought_number, total_thoughts, revises?), see the chain so far, and set done when ready to answer. Thoughts are private to this reply.',
+    parameters: obj({ thought: { type: 'string' }, thought_number: { type: 'number' }, total_thoughts: { type: 'number' }, revises: { type: 'number' }, done: { type: 'boolean' } }, ['thought', 'thought_number', 'total_thoughts']),
+    mutates: () => false, approval: () => null,
+    async execute(args, ctx) {
+      const key = ctx.runId || ctx.sessionId || 'none';
+      const chain = thoughts.get(key) ?? [];
+      chain.push({ n: Number(args.thought_number) || chain.length + 1, text: String(args.thought || '').slice(0, 2000), revises: args.revises ? Number(args.revises) : undefined });
+      thoughts.set(key, chain.slice(-30));
+      if (thoughts.size > 200) thoughts.delete(thoughts.keys().next().value!);
+      const total = Number(args.total_thoughts) || chain.length;
+      return `Thought ${args.thought_number}/${total} recorded${args.done ? ' — done; write the answer now.' : '.'}\nChain:\n${chain.map((row) => `${row.n}${row.revises ? ` (revises ${row.revises})` : ''}. ${row.text.slice(0, 200)}`).join('\n')}`;
+    },
+  };
+}
+
+const READ_SQL = /^\s*(select|with|pragma\s+(table_info|index_list|table_list)|explain)\b/i;
+export function sqliteTool(): Tool {
+  return {
+    name: 'sqlite_query', description: 'Run a read-only SQL query (SELECT/WITH/PRAGMA table_info/EXPLAIN) on a .db or .sqlite file in the chat\'s workspaces. Use "tables" as the sql to list tables. Returns up to 200 rows.',
+    parameters: obj({ path: { type: 'string' }, sql: { type: 'string' } }, ['path', 'sql']), mutates: () => false, approval: () => null,
+    async execute(args, ctx: ToolContext) {
+      const hit = locatePath({ workspace: ctx.workspace, roots: ctx.roots, target: String(args.path || '') });
+      if (!hit || !fs.existsSync(hit.full)) throw new Error('That database is not in an attached workspace.');
+      if (!/\.(db|sqlite3?|db3)$/i.test(hit.full)) throw new Error('Only .db/.sqlite files.');
+      let sql = String(args.sql || '').trim();
+      if (sql.toLowerCase() === 'tables') sql = "SELECT name, type FROM sqlite_master WHERE type IN ('table','view') ORDER BY name";
+      if (!READ_SQL.test(sql) || /;\s*\S/.test(sql.replace(/;\s*$/, ''))) throw new Error('Read-only: one SELECT/WITH/PRAGMA table_info/EXPLAIN statement.');
+      const db = new DatabaseSync(hit.full, { readOnly: true });
+      try {
+        const rows = db.prepare(sql).all().slice(0, 200) as Record<string, unknown>[];
+        if (!rows.length) return 'No rows.';
+        const cols = Object.keys(rows[0]!);
+        return [cols.join('\t'), ...rows.map((row) => cols.map((col) => String(row[col] ?? '').slice(0, 200)).join('\t'))].join('\n').slice(0, 16_000);
+      } finally { db.close(); }
+    },
+  };
+}
+
+/** Headless Chrome with a throwaway profile and its own sandbox (never --no-sandbox unless running as root); fetch fallback. */
+export function browseTool(): Tool {
+  return {
+    name: 'browse', description: 'Open a public web page in a headless browser (runs its JavaScript) and return the visible text. Use for pages where web_fetch returns little. Public http(s) only.',
+    parameters: obj({ url: { type: 'string' } }, ['url']), mutates: () => false, approval: () => null,
+    async execute(args, ctx) {
+      const url = String(args.url || '');
+      const blocked = isBlockedUrl(url);
+      if (blocked) throw new Error(blocked);
+      const chrome = chromePath();
+      if (!chrome) return `(no browser installed; plain fetch)\n${await fetchPublicText(url, ctx.fetchImpl, ctx.signal)}`;
+      const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'la-browse-'));
+      const flags = ['--headless=new', '--disable-gpu', '--disable-extensions', '--no-first-run', '--disable-sync', '--mute-audio', `--user-data-dir=${profile}`, '--virtual-time-budget=6000', '--dump-dom', url];
+      if (process.getuid?.() === 0) flags.unshift('--no-sandbox');
+      try {
+        const html = await new Promise<string>((resolve, reject) => {
+          const child = spawn(chrome, flags, { stdio: ['ignore', 'pipe', 'ignore'] });
+          let out = '';
+          const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('The page took too long.')); }, 25_000);
+          ctx.signal.addEventListener('abort', () => child.kill('SIGKILL'));
+          child.stdout.on('data', (chunk: Buffer) => { if (out.length < 2_000_000) out += chunk.toString('utf8'); });
+          child.on('close', () => { clearTimeout(timer); resolve(out); });
+          child.on('error', (error) => { clearTimeout(timer); reject(error); });
+        });
+        const text = html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+        return text.slice(0, 12_000) || '(empty page)';
+      } finally { fs.rmSync(profile, { recursive: true, force: true }); }
+    },
+  };
+}
+
+export const CONNECTOR_TOOLS = (): Tool[] => [timeTool(), thinkTool(), sqliteTool(), browseTool()];

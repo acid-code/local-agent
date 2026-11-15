@@ -18,7 +18,8 @@ export function startDictation(onText: (text: string) => void, onError: (message
   const Ctor = w.SpeechRecognition || w.webkitSpeechRecognition;
   if (!Ctor) { onError('This browser has no built-in dictation.'); return () => undefined; }
   const rec = new Ctor();
-  rec.lang = navigator.language || 'en-US';
+  const chosen = (() => { try { return localStorage.getItem('la-voice-lang'); } catch { return null; } })();
+  rec.lang = chosen && chosen !== 'auto' ? chosen : navigator.language || 'en-US';
   rec.continuous = true;
   rec.interimResults = false;
   rec.onresult = (event) => {

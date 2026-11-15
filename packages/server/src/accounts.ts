@@ -190,6 +190,10 @@ export function mustOwn(store: Store, req: FastifyRequest, kind: Kind, id: strin
 /** Tools a member's personas never get: host shell, Docker, other people's folders, the owner's vault and CLIs. */
 export const MEMBER_DENIED_TOOLS = new Set([
   'shell', 'docker_ps', 'docker_inspect', 'docker_run', 'docker_rm', 'request_folder', 'handoff_cli', 'repo_sync', 'run_skill_script', 'request_secret',
+  // Triggers are an owner feature (webhooks and folders on this box).
+  'manage_trigger',
+  // Skills are one shared catalog the owner curates.
+  'propose_skill',
 ]);
 
 /**
@@ -198,17 +202,17 @@ export const MEMBER_DENIED_TOOLS = new Set([
  */
 export const MEMBER_ROUTES = new Set([
   'GET /api/auth/me', 'POST /api/auth/logout', 'POST /api/account/password', 'GET /api/me', 'GET /api/me/theme', 'PUT /api/me/theme', 'GET /api/me/quota', 'POST /api/me/wallpaper', 'GET /api/me/wallpaper', 'DELETE /api/me/wallpaper', 'GET /api/images/status', 'POST /api/images/generate',
-  'GET /api/agents', 'POST /api/agents', 'POST /api/agents/reorder', 'GET /api/agents/:id', 'PATCH /api/agents/:id', 'DELETE /api/agents/:id',
+  'GET /api/agents', 'POST /api/agents', 'GET /api/gallery', 'POST /api/gallery/:id', 'GET /api/connectors', 'POST /api/agents/reorder', 'GET /api/agents/:id', 'PATCH /api/agents/:id', 'DELETE /api/agents/:id',
   'POST /api/agents/:id/read', 'POST /api/agents/:id/avatar', 'GET /api/agents/:id/avatar', 'GET /api/agents/:id/files', 'GET /api/agents/:id/file',
   'GET /api/rooms', 'POST /api/rooms',
   'POST /api/files', 'GET /api/files', 'GET /api/files/:id', 'GET /api/files/:id/raw', 'DELETE /api/files/:id',
   'GET /api/messages/:id', 'GET /api/context/search',
   'GET /api/git/roots', 'GET /api/git/:root/status', 'GET /api/git/:root/diff', 'GET /api/git/:root/tree', 'GET /api/git/:root/raw', 'GET /api/git/:root/file', 'POST /api/git/:root/action',
-  'GET /api/sessions', 'POST /api/sessions', 'GET /api/sessions/:id', 'PATCH /api/sessions/:id', 'DELETE /api/sessions/:id', 'POST /api/sessions/:id/messages',
+  'GET /api/sessions', 'POST /api/sessions', 'GET /api/sessions/:id', 'GET /api/sessions/:id/messages', 'GET /api/sessions/:id/context', 'GET /api/sessions/:id/rules', 'PUT /api/sessions/:id/rules', 'POST /api/helpers/:id/stop', 'POST /api/runs/:id/rollback', 'GET /api/agents/:id/memory-files', 'PUT /api/agents/:id/memory-files/:kind', 'PATCH /api/sessions/:id', 'DELETE /api/sessions/:id', 'POST /api/sessions/:id/messages',
   'GET /api/sessions/:id/plan', 'PUT /api/sessions/:id/plan', 'PATCH /api/plan-items/:id', 'GET /api/sessions/:id/edits', 'POST /api/edits/:id/revert',
   'GET /api/runs', 'GET /api/runs/:id', 'GET /api/runs/:id/events', 'POST /api/runs/:id/control',
   'GET /api/approvals', 'POST /api/approvals/:id',
-  'GET /api/models',
+  'GET /api/models', 'GET /api/models/usable', 'GET /api/workspaces', 'POST /api/agents/:id/open-chat', 'GET /api/sessions/:id/workspaces', 'PUT /api/sessions/:id/workspaces',
   'GET /api/schedules', 'POST /api/schedules', 'PATCH /api/schedules/:id', 'DELETE /api/schedules/:id', 'POST /api/schedules/:id/run',
   'GET /api/voice', 'POST /api/voice/transcribe', 'POST /api/voice/speak',
   'GET /api/memory', 'POST /api/memory', 'DELETE /api/memory/:id',

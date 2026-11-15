@@ -24,6 +24,8 @@ export interface Agent {
   pinned: boolean; hidden: boolean; sortOrder: number; lastReadAt: string | null; unread: number; workshopIds: string[];
   /** 'mute' hides this persona's unread dot. */
   notify: 'all' | 'mute';
+  /** Gallery persona this one was added from, if any. */
+  templateId?: string | null;
   createdAt: string; updatedAt: string; ownerId: string;
 }
 export interface Room { id: string; name: string; createdAt: string; agentIds: string[] }
@@ -244,6 +246,21 @@ export class Store {
     addAgentCol('sort_order', `sort_order INTEGER NOT NULL DEFAULT 0`);
     addAgentCol('last_read_at', `last_read_at TEXT`);
     addAgentCol('notify', `notify TEXT NOT NULL DEFAULT 'all'`);
+    addAgentCol('template_id', 'template_id TEXT');
+    // Agent self-management and background helpers.
+    const colsOf = (table: string) => this.many<Raw>(`PRAGMA table_info(${table})`).map((row) => String(row.name));
+    const addCol = (table: string, name: string, ddl: string) => { if (!colsOf(table).includes(name)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`); };
+    addCol('schedules', 'origin_session_id', 'origin_session_id TEXT');
+    addCol('schedules', 'created_by', `created_by TEXT NOT NULL DEFAULT 'user'`);
+    addCol('triggers', 'origin_session_id', 'origin_session_id TEXT');
+    addCol('triggers', 'created_by', `created_by TEXT NOT NULL DEFAULT 'user'`);
+    addCol('chat_sessions', 'helper_of', 'helper_of TEXT');
+    this.db.exec(`CREATE TABLE IF NOT EXISTS helpers (
+      id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL, parent_run_id TEXT, child_session_id TEXT NOT NULL, child_run_id TEXT,
+      agent_id TEXT NOT NULL, owner_id TEXT NOT NULL, task TEXT NOT NULL, cli TEXT, status TEXT NOT NULL, result TEXT, error TEXT,
+      max_steps INTEGER NOT NULL, timeout_ms INTEGER NOT NULL, tools TEXT, delivered INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, ended_at TEXT
+    )`);
+    this.db.exec('CREATE INDEX IF NOT EXISTS helpers_parent ON helpers(parent_session_id, created_at)');
     const repoCols = this.many<Raw>('PRAGMA table_info(shared_repos)').map((row) => String(row.name));
     if (!repoCols.includes('lock_run_id')) this.db.exec(`ALTER TABLE shared_repos ADD COLUMN lock_run_id TEXT`);
     if (!repoCols.includes('lock_agent_id')) this.db.exec(`ALTER TABLE shared_repos ADD COLUMN lock_agent_id TEXT`);
@@ -488,9 +505,9 @@ export class Store {
     const current = this.getAgent(id);
     if (!current) return null;
     const next = { ...current, ...patch, updatedAt: now() };
-    this.db.prepare(`UPDATE agents SET name=?, title=?, description=?, system_prompt=?, model_id=?, routing=?, strategy=?, tool_allowlist=?, memory_enabled=?, avatar_kind=?, avatar_ref=?, accent=?, emoji=?, pinned=?, hidden=?, sort_order=?, notify=?, updated_at=? WHERE id=?`).run(
+    this.db.prepare(`UPDATE agents SET name=?, title=?, description=?, system_prompt=?, model_id=?, routing=?, strategy=?, tool_allowlist=?, memory_enabled=?, avatar_kind=?, avatar_ref=?, accent=?, emoji=?, pinned=?, hidden=?, sort_order=?, notify=?, template_id=?, updated_at=? WHERE id=?`).run(
       next.name, next.title, next.description, next.systemPrompt, next.modelId, next.routing, next.strategy, JSON.stringify(next.toolAllowlist), next.memoryEnabled ? 1 : 0,
-      next.avatarKind, next.avatarRef, next.accent, next.emoji, next.pinned ? 1 : 0, next.hidden ? 1 : 0, next.sortOrder, next.notify === 'mute' ? 'mute' : 'all', next.updatedAt, id,
+      next.avatarKind, next.avatarRef, next.accent, next.emoji, next.pinned ? 1 : 0, next.hidden ? 1 : 0, next.sortOrder, next.notify === 'mute' ? 'mute' : 'all', next.templateId ?? null, next.updatedAt, id,
     );
     if (patch.workshopIds) this.setAgentWorkshops(id, patch.workshopIds);
     return this.getAgent(id);
@@ -589,8 +606,8 @@ export class Store {
     const owner = opts.ownerId ? 'AND owner_id = ?' : '';
     const ownerArg = opts.ownerId ? [opts.ownerId] : [];
     const rows = updatedAt && id
-      ? this.many<Raw>(`SELECT * FROM chat_sessions WHERE archived = 0 ${owner} AND (updated_at < ? OR (updated_at = ? AND id < ?)) ORDER BY updated_at DESC, id DESC LIMIT ?`, ...ownerArg, updatedAt, updatedAt, id, limit + 1)
-      : this.many<Raw>(`SELECT * FROM chat_sessions WHERE archived = 0 ${owner} ORDER BY updated_at DESC, id DESC LIMIT ?`, ...ownerArg, limit + 1);
+      ? this.many<Raw>(`SELECT * FROM chat_sessions WHERE archived = 0 AND helper_of IS NULL ${owner} AND (updated_at < ? OR (updated_at = ? AND id < ?)) ORDER BY updated_at DESC, id DESC LIMIT ?`, ...ownerArg, updatedAt, updatedAt, id, limit + 1)
+      : this.many<Raw>(`SELECT * FROM chat_sessions WHERE archived = 0 AND helper_of IS NULL ${owner} ORDER BY updated_at DESC, id DESC LIMIT ?`, ...ownerArg, limit + 1);
     const more = rows.length > limit;
     const page = rows.slice(0, limit);
     const last = page.at(-1);
@@ -599,7 +616,7 @@ export class Store {
 
   /** The persona's most recently active one-to-one chat for this account, if any. */
   latestSessionForAgent(agentId: string, ownerId: string): Session | null {
-    const row = this.one<Raw>('SELECT * FROM chat_sessions WHERE archived = 0 AND agent_id = ? AND room_id IS NULL AND owner_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1', agentId, ownerId);
+    const row = this.one<Raw>('SELECT * FROM chat_sessions WHERE archived = 0 AND helper_of IS NULL AND agent_id = ? AND room_id IS NULL AND owner_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1', agentId, ownerId);
     return row ? mapSession(row) : null;
   }
 
@@ -637,12 +654,23 @@ export class Store {
     return row ? mapMessage(row) : null;
   }
 
+  /** The newest `limit` messages before `beforeId` (oldest first), and whether older ones exist. */
+  pageMessages(sessionId: string, limit: number, beforeId?: string | null): { messages: Message[]; hasMore: boolean } {
+    const before = beforeId ? this.one<Raw>('SELECT seq FROM messages WHERE id = ? AND session_id = ?', beforeId, sessionId) : undefined;
+    if (beforeId && !before) return { messages: [], hasMore: false };
+    const rows = before
+      ? this.many<Raw>('SELECT * FROM messages WHERE session_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?', sessionId, Number(before.seq), limit + 1)
+      : this.many<Raw>('SELECT * FROM messages WHERE session_id = ? ORDER BY seq DESC LIMIT ?', sessionId, limit + 1);
+    return { messages: rows.slice(0, limit).reverse().map(mapMessage), hasMore: rows.length > limit };
+  }
+
   listMessages(sessionId: string): Message[] {
     return this.many<Raw>('SELECT * FROM messages WHERE session_id = ? ORDER BY seq ASC', sessionId).map(mapMessage);
   }
 
   updateMessageContent(id: string, content: string) {
     this.db.prepare('UPDATE messages SET content = ? WHERE id = ?').run(content, id);
+    try { this.db.prepare('UPDATE messages_fts SET content = ? WHERE message_id = ?').run(content.slice(0, 20_000), id); } catch { /* search index not built yet */ }
   }
 
   archiveMessagesAfter(sessionId: string, messageId: string) {
@@ -1005,7 +1033,10 @@ export class Store {
     };
   }
 
+  isOpen = true;
+
   close() {
+    this.isOpen = false;
     this.db.close();
   }
 }
@@ -1034,7 +1065,7 @@ function mapAgent(row: Raw): Agent {
     toolAllowlist: parseJson<string[]>(String(row.tool_allowlist), []), memoryEnabled: Boolean(row.memory_enabled), workspacePath: String(row.workspace_path),
     avatarKind: kind === 'builtin' || kind === 'upload' ? kind : 'initials', avatarRef: String(row.avatar_ref || ''), accent: String(row.accent || '#e4b56a'), emoji: String(row.emoji || ''),
     pinned: Boolean(row.pinned), hidden: Boolean(row.hidden), sortOrder: Number(row.sort_order || 0), lastReadAt: row.last_read_at ? String(row.last_read_at) : null,
-    unread: 0, workshopIds: [], notify: row.notify === 'mute' ? 'mute' : 'all',
+    unread: 0, workshopIds: [], notify: row.notify === 'mute' ? 'mute' : 'all', templateId: row.template_id ? String(row.template_id) : null,
     createdAt: String(row.created_at), updatedAt: String(row.updated_at), ownerId: String(row.owner_id || 'owner'),
   };
 }

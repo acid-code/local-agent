@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { isOwner } from '../lib/role';
 import { Link } from 'react-router-dom';
 import { CalendarClock, Check, ChevronLeft, FolderGit2, FolderOpen, GitBranch, Settings2, X, Zap } from 'lucide-react';
 import { api, post } from '../lib/api';
@@ -8,6 +9,7 @@ import { Face, FACE_IDS, type FaceAgent } from './Face';
 
 export interface PanelAgent extends FaceAgent { id: string; name: string; title?: string; description?: string; systemPrompt?: string; modelId?: string | null; toolAllowlist?: string[]; workshopIds?: string[]; strategy?: string | null; notify?: 'all' | 'mute' }
 interface Skill { slug: string; name: string; enabled?: boolean }
+interface MemoryFile { kind: 'user' | 'notes'; title: string; cap: number; content: string }
 export interface WorkspaceRow { id: string; label: string; path: string; kind: 'folder' | 'repo'; source: 'agent' | 'project'; remote: string | null; branch: string | null; dirty: number; sets: string[] }
 export interface WorkspaceSet { id: string; name: string; projects: string[] }
 
@@ -49,6 +51,25 @@ export function PersonaPanel({ agent, tab, onTab, onClose, onSaved, ws, canManag
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pending = useRef<Partial<PanelAgent>>({});
   const models = useUsableModels();
+  const [memory, setMemory] = useState<MemoryFile[] | null>(null);
+  const memoryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!agent?.id || tab !== 'settings') return;
+    setMemory(null);
+    api<{ files: MemoryFile[] }>(`/api/agents/${agent.id}/memory-files`).then((data) => setMemory(data.files)).catch(() => setMemory([]));
+  }, [agent?.id, tab]);
+  // The persona keeps these itself; edits here autosave the same way.
+  const saveMemory = (kind: MemoryFile['kind'], content: string) => {
+    if (!agent?.id) return;
+    setMemory((rows) => rows?.map((row) => row.kind === kind ? { ...row, content } : row) ?? rows);
+    setSaved('saving');
+    if (memoryTimer.current) clearTimeout(memoryTimer.current);
+    const id = agent.id;
+    memoryTimer.current = setTimeout(async () => {
+      try { await api(`/api/agents/${id}/memory-files/${kind}`, { method: 'PUT', body: JSON.stringify({ content }) }); setSaved('saved'); }
+      catch (error) { setSaved('idle'); toast(errorText(error), 'error'); }
+    }, 900);
+  };
   useEffect(() => { setDraft(agent); setSaved('idle'); }, [agent?.id]);
   useEffect(() => {
     if (!agent?.id || !canManage) { setSkills([]); return; }
@@ -58,7 +79,7 @@ export function PersonaPanel({ agent, tab, onTab, onClose, onSaved, ws, canManag
     if (!agent?.id) return;
     setRoutines(null); setChannels(null);
     api<{ schedules: Routine[] }>('/api/schedules').then((data) => setRoutines(data.schedules.filter((row) => row.agentId === agent.id))).catch(() => setRoutines([]));
-    api<{ triggers: Channel[] }>('/api/triggers').then((data) => setChannels(data.triggers.filter((row) => row.agentId === agent.id))).catch(() => setChannels([]));
+    if (isOwner()) api<{ triggers: Channel[] }>('/api/triggers').then((data) => setChannels(data.triggers.filter((row) => row.agentId === agent.id))).catch(() => setChannels([]));
   }, [agent?.id]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape' && !(event.target as HTMLElement)?.closest?.('.menu-panel')) onClose(); };
@@ -138,7 +159,7 @@ export function PersonaPanel({ agent, tab, onTab, onClose, onSaved, ws, canManag
             <Face agent={draft} size={56} />
             <div className="grow">
               <div className="face-row" role="group" aria-label="Face">
-                <button type="button" className="face-pick" aria-label="Initials" aria-pressed={draft.avatarKind !== 'builtin' && draft.avatarKind !== 'upload'} onClick={() => save({ avatarKind: 'initials', avatarRef: '' }, 'face', 0)}><Face agent={{ ...draft, avatarKind: 'initials', avatarRef: '' }} size={28} /></button>
+                {[0, 1, 2, 3, 4, 5].map((shape) => <button type="button" key={`blob-${shape}`} className="face-pick" aria-label={`Blob face ${shape + 1}`} aria-pressed={draft.avatarKind !== 'builtin' && draft.avatarKind !== 'upload' && draft.avatarRef === `blob-${shape}`} onClick={() => save({ avatarKind: 'initials', avatarRef: `blob-${shape}` }, 'face', 0)}><Face agent={{ ...draft, avatarKind: 'initials', avatarRef: `blob-${shape}` }} size={28} /></button>)}
                 {FACE_IDS.map((id) => <button type="button" key={id} className="face-pick" aria-label={`Face ${id}`} aria-pressed={draft.avatarKind === 'builtin' && draft.avatarRef === id} onClick={() => save({ avatarKind: 'builtin', avatarRef: id }, 'face', 0)}><Face agent={{ ...draft, avatarKind: 'builtin', avatarRef: id }} size={28} /></button>)}
               </div>
               <div className="swatch-row" role="group" aria-label="Colour">
@@ -167,6 +188,16 @@ export function PersonaPanel({ agent, tab, onTab, onClose, onSaved, ws, canManag
           <details className="pane-more-section">
             <summary>Instructions</summary>
             <textarea rows={6} aria-label="Instructions" value={draft.systemPrompt || ''} onChange={(event) => save({ systemPrompt: event.target.value }, 'instructions', 900)} />
+          </details>
+          <details className="pane-more-section">
+            <summary>Memory</summary>
+            <p className="faint panel-note">Two short files the persona reads every time and keeps up to date itself. When one gets full it merges and trims.</p>
+            {memory === null ? <div className="skeleton-lines"><span /></div> : memory.map((file) => (
+              <label key={file.kind} className="field memory-field">
+                <span className="row"><span className="grow">{file.title}</span><span className={file.content.length > file.cap ? 'faint mono over' : 'faint mono'}>{file.content.length}/{file.cap}</span></span>
+                <textarea rows={file.kind === 'user' ? 3 : 5} value={file.content} maxLength={file.cap} placeholder={file.kind === 'user' ? 'About you: preferences, context' : 'Its own working notes'} onChange={(event) => saveMemory(file.kind, event.target.value)} />
+              </label>
+            ))}
           </details>
           <details className="pane-more-section">
             <summary>Tools and skills</summary>

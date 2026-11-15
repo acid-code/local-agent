@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { ScriptedProvider, type ModelProvider } from '../src/providers.js';
 import { createCollection, formatCitations, hashEmbedder, ingestBuffer, searchKnowledge } from '../src/kb.js';
-import { McpRuntime, vetSpec, encodeFrame, FrameParser } from '../src/mcp.js';
+import { McpRuntime, vetSpec } from '../src/mcp.js';
 import { applyTelegramUpdate, Notifier } from '../src/notify.js';
 import { refreshRepo, registerSharedRepo } from '../src/repos.js';
 import { Scheduler } from '../src/scheduler.js';
@@ -158,22 +158,24 @@ describe('full flows', () => {
     const { app, store, engine } = await buildApp({ dataDir: dir, startScheduler: false, serveWeb: false, providerOverride: () => provider.current });
     const report = await vetSpec({ name: 'notes', transport: 'stdio', command: 'notes-mcp', args: [], source: 'https://example.test/notes' }, (async () => new Response('{}')) as typeof fetch, { reputation: false, llm: async () => 'low risk' });
     expect(report.level === 'critical' || report.level === 'high' || report.level === 'medium' || report.level === 'low').toBe(true);
-    const parser = new FrameParser();
     const stdin = new PassThrough();
     const stdout = new PassThrough();
+    let pending = '';
     stdin.on('data', (chunk: Buffer) => {
-      for (const message of parser.push(chunk)) {
-        const rpc = message as { id?: number; method?: string };
+      pending += String(chunk);
+      for (let nl = pending.indexOf('\n'); nl >= 0; nl = pending.indexOf('\n')) {
+        const rpc = JSON.parse(pending.slice(0, nl)) as { id?: number; method?: string };
+        pending = pending.slice(nl + 1);
         if (!rpc.id) continue;
         const result = rpc.method === 'tools/list'
           ? { tools: [{ name: 'lecture_search', description: 'Search notes', inputSchema: { type: 'object' } }] }
-          : { protocolVersion: '2024-11-05' };
-        stdout.write(encodeFrame({ jsonrpc: '2.0', id: rpc.id, result }));
+          : { protocolVersion: '2025-06-18' };
+        stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: rpc.id, result })}\n`);
       }
     });
     const docker = { available: () => true, attach: async () => ({ stdin, stdout, stderr: new PassThrough(), stop: async () => undefined }) } as unknown as DockerCtl;
     const mcp = new McpRuntime(store, docker);
-    const server = mcp.install(report, { acknowledgeRisk: true });
+    const server = mcp.install(report, { acknowledgeRisk: true, acknowledgeCommunity: true });
     const connected = await mcp.connect(server.id);
     expect(connected?.tools).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'lecture_search' })]));
     const allowed = store.createAgent({ name: 'Notes', systemPrompt: 'Use the notes tool.', toolAllowlist: ['lecture_search'], workspacePath: dir });

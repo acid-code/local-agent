@@ -153,12 +153,13 @@ export function fileText(store: Store, id: string): string {
   return row?.text_index ?? '';
 }
 
-export function listFiles(store: Store, opts: { sessionId?: string | null; query?: string; limit?: number; ownerId: string }): (FileRow & { snippet?: string })[] {
+export function listFiles(store: Store, opts: { sessionId?: string | null; query?: string; limit?: number; ownerId: string; source?: 'upload' | 'agent' }): (FileRow & { snippet?: string })[] {
   const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
   const q = (opts.query || '').trim();
   const where: string[] = ['owner_id = ?'];
   const args: (string | number)[] = [opts.ownerId];
   if (opts.sessionId) { where.push('session_id = ?'); args.push(opts.sessionId); }
+  if (opts.source) { where.push(opts.source === 'upload' ? "source = 'upload'" : "source <> 'upload'"); }
   if (q) { where.push('(name LIKE ? ESCAPE \'\\\' OR text_index LIKE ? ESCAPE \'\\\')'); const like = `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`; args.push(like, like); }
   const rows = store.db.prepare(`SELECT * FROM files ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY created_at DESC LIMIT ?`).all(...args, limit) as Record<string, unknown>[];
   return rows.map((row) => ({ ...mapFile(row), snippet: q ? snippetOf(String(row.text_index || ''), q) : undefined }));

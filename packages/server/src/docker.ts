@@ -183,6 +183,10 @@ export class DockerCtl {
     return container.id;
   }
 
+  async hasImage(image: string) {
+    try { await this.api().getImage(image).inspect(); return true; } catch { return false; }
+  }
+
   async pull(image: string) {
     const stream = await this.api().pull(image);
     await new Promise<void>((resolve, reject) => {
@@ -339,7 +343,7 @@ export function mcpContainerSpec(input: {
 }): RunSpec {
   return {
     Image: input.image,
-    Cmd: input.cmd,
+    Cmd: input.cmd.length ? input.cmd : undefined,
     Env: Object.entries(input.env).map(([key, value]) => `${key}=${value}`),
     name: `la-mcp-${input.id.slice(0, 18)}`,
     Labels: withManagedLabels({ 'local-agent.role': 'mcp', 'local-agent.mcp': input.id }),

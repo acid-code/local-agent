@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { NavLink, useNavigate } from 'react-router-dom';
-import { Activity, Bell, BellOff, Info, MessageSquarePlus, Settings2, ArrowDown, ArrowUp, EyeOff, GitBranch, BookOpen, Box, CalendarClock, ChevronsUpDown, Cpu, Gauge, ListChecks, LogOut, Menu as MenuIcon, MessageSquare, MoreHorizontal, Palette, PanelLeftClose, PanelLeftOpen, Pin, PinOff, Radio, Settings, Sparkles, Users, Wrench, X, type LucideIcon } from 'lucide-react';
+import { NavLink, useLocation, useNavigate } from 'react-router-dom';
+import { ChevronRight, LayoutGrid, Plus, Search, Star, Activity, Bell, BellOff, Info, MessageSquarePlus, Settings2, ArrowDown, ArrowUp, EyeOff, GitBranch, BookOpen, Box, CalendarClock, ChevronsUpDown, Cpu, Gauge, ListChecks, LogOut, Menu as MenuIcon, MessageSquare, MoreHorizontal, Palette, PanelLeftClose, PanelLeftOpen, Pin, PinOff, Radio, Settings, Sparkles, Users, Wrench, X, type LucideIcon } from 'lucide-react';
 import { Menu } from './ui';
 import { Toaster } from './Toaster';
 import { api, post } from '../lib/api';
@@ -34,7 +34,18 @@ const GROUPS: { title: string; items: NavItem[] }[] = [
   ] },
 ];
 
-interface Persona extends FaceAgent { id: string; title?: string; pinned?: boolean; hidden?: boolean; unread?: number; notify?: 'all' | 'mute' }
+interface Persona extends FaceAgent { id: string; title?: string; pinned?: boolean; hidden?: boolean; unread?: number; notify?: 'all' | 'mute'; templateId?: string | null; lastMessage?: { text: string; role: string; at: string } | null }
+
+/** Short relative time for the persona list ("now", "5m", "3h", "Mon", "12 Nov"). */
+function when(iso?: string) {
+  if (!iso) return '';
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 60_000) return 'now';
+  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m`;
+  if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)}h`;
+  const date = new Date(iso);
+  return ms < 6 * 86_400_000 ? date.toLocaleDateString(undefined, { weekday: 'short' }) : date.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+}
 
 export function Shell({ username, role = 'owner', onLogout, children }: { username: string; role?: 'owner' | 'member'; onLogout: () => void; children: ReactNode }) {
   const groups = GROUPS.map((group) => ({ ...group, items: role === 'owner' ? group.items : group.items.filter((item) => MEMBER_PAGES.has(item.to)) })).filter((group) => group.items.length);
@@ -47,16 +58,24 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
   const [restartKeys, setRestartKeys] = useState<string[]>([]);
   const [selected, setSelected] = useState(0);
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('la-sidebar') === 'collapsed');
+  // Admin pages stay folded away; personas come first.
+  const [pagesOpen, setPagesOpen] = useState(() => localStorage.getItem('la-pages') === 'open');
+  useEffect(() => { localStorage.setItem('la-pages', pagesOpen ? 'open' : 'closed'); }, [pagesOpen]);
+  const [apps, setApps] = useState(false);
   useEffect(() => { localStorage.setItem('la-sidebar', collapsed ? 'collapsed' : 'open'); }, [collapsed]);
   const isWide = () => window.matchMedia('(min-width: 981px)').matches;
   const toggleSidebar = () => { if (isWide()) setCollapsed((value) => !value); else setOpen((value) => !value); };
   const navigate = useNavigate();
+  const location = useLocation();
+  const chatRoute = location.pathname === '/';
   // The chat page reports whose chat is open, so that persona's row reads as selected.
   const [activePersona, setActivePersona] = useState<string | null>(null);
   useEffect(() => {
     const onActive = (event: Event) => setActivePersona((event as CustomEvent<string | null>).detail ?? null);
+    const onOpen = () => setOpen(true);
     window.addEventListener('la:active-persona', onActive);
-    return () => window.removeEventListener('la:active-persona', onActive);
+    window.addEventListener('la:open-sidebar', onOpen);
+    return () => { window.removeEventListener('la:active-persona', onActive); window.removeEventListener('la:open-sidebar', onOpen); };
   }, []);
 
   async function loadPersonas() {
@@ -78,17 +97,17 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
         event.preventDefault();
         toggleSidebar();
       }
-      if (event.key === 'Escape') { setPalette(false); setOpen(false); }
+      if (event.key === 'Escape') { setPalette(false); setOpen(false); setApps(false); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
   useEffect(() => {
-    if (role !== 'owner') return;
-    const tick = () => api<{ approvals: unknown[]; requests?: unknown[] }>('/api/vault').then((data) => setPending((data.requests?.length || 0))).catch(() => undefined);
+    const owner = role === 'owner';
+    const tick = () => { if (owner) void api<{ approvals: unknown[]; requests?: unknown[] }>('/api/vault').then((data) => setPending((data.requests?.length || 0))).catch(() => undefined); };
     tick();
-    const id = setInterval(tick, 8000);
+    const id = owner ? setInterval(tick, 8000) : undefined;
     let socket: WebSocket | null = null;
     try {
       const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
@@ -96,10 +115,12 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
       socket.onmessage = (event) => {
         const data = JSON.parse(event.data);
         if (data.type === 'secret' || data.type === 'approval') tick();
+        // Pages listen for runs starting in the chat they show (the server only sends this account's runs).
+        window.dispatchEvent(new CustomEvent('la:live', { detail: data }));
       };
     } catch { /* live channel is optional */ }
-    return () => { clearInterval(id); socket?.close(); };
-  }, []);
+    return () => { if (id) clearInterval(id); socket?.close(); };
+  }, [role]);
 
   async function move(index: number, delta: number) {
     const next = personas.slice();
@@ -116,41 +137,54 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
   }, [query, role]);
   useEffect(() => setSelected(0), [query, palette]);
   const go = (to: string) => { navigate(to); setPalette(false); setQuery(''); };
+  // Big faces on top: pinned personas, or the first few when none are pinned. The default assistant wears the star.
+  const pinned = (personas.some((persona) => persona.pinned) ? personas.filter((persona) => persona.pinned) : personas.slice(0, 4)).slice(0, 8);
+  const primaryId = (personas.find((persona) => persona.templateId === 'assistant') ?? personas[0])?.id;
+  // Refresh previews when a reply lands or the open chat changes.
+  useEffect(() => { void loadPersonas().catch(() => undefined); }, [activePersona]);
+  useEffect(() => {
+    const reload = () => void loadPersonas().catch(() => undefined);
+    window.addEventListener('la-personas-changed', reload);
+    return () => window.removeEventListener('la-personas-changed', reload);
+  }, []);
   const initials = username.split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase();
 
   return (
-    <div className={collapsed ? 'app collapsed' : 'app'}>
+    <div className={`app${collapsed ? ' collapsed' : ''}${chatRoute ? ' route-chat' : ''}`}>
       {open && <div className="scrim drawer-scrim" onClick={() => setOpen(false)} />}
       <aside id="main-sidebar" className={open ? 'sidebar open' : 'sidebar'} aria-label="Main menu">
-        <div className="brand">
-          <svg className="mark" viewBox="0 0 64 64" aria-hidden><circle cx="32" cy="32" r="18" fill="none" stroke="var(--brass)" strokeWidth="4"/><circle cx="32" cy="32" r="5" fill="var(--brass)"/></svg>
-          <div className="word"><i>local</i><span>agent</span></div>
+        <div className="side-top">
+          <span className="sr-only">local agent</span>
+          <span className="grow" />
+          <button className="icon-btn round" aria-label="Search (Ctrl+K)" title="Search or jump (Ctrl+K)" onClick={() => setPalette(true)}><Search size={17} /></button>
+          <Menu label="New" icon={Plus} className="icon-btn round menu-trigger" items={[
+            { label: 'New chat', icon: MessageSquarePlus, hint: activePersona ? 'with this persona' : undefined, onSelect: () => { navigate(activePersona ? `/?persona=${activePersona}&new=1` : '/'); setOpen(false); } },
+            { label: 'Add a persona from the gallery', icon: LayoutGrid, onSelect: () => { navigate('/gallery'); setOpen(false); } },
+            { label: 'Create a persona', icon: Users, onSelect: () => { navigate('/agents?new=1'); setOpen(false); } },
+          ]} />
           <button className="icon-btn drawer-close" aria-label="Close menu" onClick={() => setOpen(false)}><X size={18} /></button>
         </div>
-        <nav className="nav" aria-label="Pages">
-          {groups.map((group) => (
-            <div key={group.title} className="nav-group" role="group" aria-label={group.title}>
-              <span className="nav-heading" aria-hidden>{group.title}</span>
-              {group.items.map(({ to, label, icon: Icon, hint }) => (
-                <NavLink key={to} to={to} end={to === '/'} title={collapsed ? `${label} — ${hint}` : hint} className={({ isActive }) => isActive ? 'active' : ''} onClick={() => setOpen(false)}>
-                  <Icon aria-hidden /> <span className="label">{label}</span>
-                </NavLink>
-              ))}
-            </div>
-          ))}
-        </nav>
-        {personas.length > 0 && (
-          <div className="persona-head">
-            <span className="nav-heading">Personas</span>
+        {pinned.length > 0 && (
+          <div className="pin-faces" role="list" aria-label="Pinned personas">
+            {pinned.map((persona) => (
+              <button key={persona.id} role="listitem" className={activePersona === persona.id ? 'pin-face on' : 'pin-face'} title={persona.title ? `${persona.name} · ${persona.title}` : persona.name}
+                onClick={() => { navigate(`/?persona=${persona.id}`); setOpen(false); }}>
+                <span className="pin-face-art"><Face agent={persona} size={58} />{persona.id === primaryId && <span className="star-badge" role="img" aria-label="Primary"><Star size={10} /></span>}{persona.unread && persona.notify !== 'mute' ? <span className="unread-dot" role="img" aria-label="unread" /> : null}</span>
+                <span className="pin-face-name ellipsis" dir="auto">{persona.name}</span>
+              </button>
+            ))}
           </div>
         )}
-        <div className="persona-list">
+        <div className="persona-list" role="list" aria-label="Personas">
           {personas.map((persona, index) => (
-            <div key={persona.id} className={activePersona === persona.id ? 'persona-row on' : 'persona-row'} style={{ ['--accent' as string]: persona.accent || 'var(--brass)' }}
+            <div key={persona.id} role="listitem" className={activePersona === persona.id ? 'persona-row on' : 'persona-row'} style={{ ['--accent' as string]: persona.accent || 'var(--brass)' }}
               onContextMenu={(event) => { event.preventDefault(); (event.currentTarget.querySelector('.menu-trigger') as HTMLButtonElement | null)?.click(); }}>
               <button className="persona-open" aria-current={activePersona === persona.id ? 'true' : undefined} title={persona.title ? `${persona.name} · ${persona.title}` : persona.name} onClick={() => { navigate(`/?persona=${persona.id}`); setOpen(false); }}>
-                <Face agent={persona} size={24} />
-                <span className="label"><span className="ellipsis" dir="auto">{persona.emoji ? `${persona.emoji} ` : ''}{persona.name}</span></span>
+                <Face agent={persona} size={36} />
+                <span className="label persona-text">
+                  <span className="row persona-line"><span className="ellipsis persona-row-name" dir="auto">{persona.emoji ? `${persona.emoji} ` : ''}{persona.name}</span><span className="faint persona-when">{when(persona.lastMessage?.at)}</span></span>
+                  <span className="ellipsis faint persona-preview" dir="auto">{persona.lastMessage ? `${persona.lastMessage.role === 'user' ? 'You: ' : ''}${persona.lastMessage.text}` : (persona.title || 'Say hi')}</span>
+                </span>
                 {persona.unread && persona.notify !== 'mute' ? <span className="unread-dot" role="status" aria-label={`${persona.unread} unread`} /> : null}
               </button>
               <Menu label={`Options for ${persona.name}`} items={[
@@ -162,21 +196,43 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
                 { label: persona.pinned ? 'Unpin' : 'Pin to top', separator: true, icon: persona.pinned ? PinOff : Pin, onSelect: () => void api(`/api/agents/${persona.id}`, { method: 'PATCH', body: JSON.stringify({ pinned: !persona.pinned }) }).then(loadPersonas) },
                 { label: 'Move up', icon: ArrowUp, disabled: index === 0, onSelect: () => void move(index, -1) },
                 { label: 'Move down', icon: ArrowDown, disabled: index === personas.length - 1, onSelect: () => void move(index, 1) },
-                                { label: 'Hide from sidebar', icon: EyeOff, onSelect: () => void api(`/api/agents/${persona.id}`, { method: 'PATCH', body: JSON.stringify({ hidden: true }) }).then(loadPersonas) },
+                { label: 'Hide from sidebar', icon: EyeOff, onSelect: () => void api(`/api/agents/${persona.id}`, { method: 'PATCH', body: JSON.stringify({ hidden: true }) }).then(loadPersonas) },
               ]} />
             </div>
           ))}
         </div>
+        {pending > 0 && <button className="side-alert" onClick={() => navigate('/settings#vault')}>{pending} secret request{pending === 1 ? '' : 's'} waiting</button>}
         <div className="side-foot">
-          <span className="user-chip" title={username}>
+          <span className="user-chip" title={`${username} · ${role === 'member' ? 'Member' : 'Owner'}`}>
             <span className="avatar" aria-hidden>{initials || '?'}</span>
-            <span className="who label"><span className="ellipsis">{username}</span><small>{role === 'member' ? 'Member' : 'Owner'}</small></span>
+            <span className="who label"><span className="ellipsis">{username}</span></span>
           </span>
-          <Menu label="Account menu" icon={ChevronsUpDown} items={[
-            { label: 'Appearance', icon: Palette, onSelect: () => { navigate('/settings#appearance'); setOpen(false); } },
-            { label: 'Settings', icon: Settings, onSelect: () => { navigate('/settings'); setOpen(false); } },
-            { label: 'Sign out', icon: LogOut, separator: true, danger: true, onSelect: onLogout },
-          ]} />
+          <button className="icon-btn round apps-btn" aria-label="All apps and pages" title="All apps and pages" aria-expanded={apps} aria-controls="apps-pop" onClick={() => setApps((value) => !value)}><LayoutGrid size={17} /></button>
+          {apps && (
+            <div className="apps-pop" id="apps-pop" role="dialog" aria-label="All apps and pages" onKeyDown={(event) => { if (event.key === 'Escape') setApps(false); }}>
+              <div className="apps-group">
+                <span className="nav-heading">Personas</span>
+                <div className="apps-grid">
+                  <button className="app-tile" onClick={() => { navigate('/gallery'); setApps(false); setOpen(false); }}><LayoutGrid size={20} aria-hidden /><span>Gallery</span></button>
+                </div>
+              </div>
+              {groups.map((group) => (
+                <div key={group.title} className="apps-group" role="group" aria-label={group.title}>
+                  <span className="nav-heading" aria-hidden>{group.title}</span>
+                  <div className="apps-grid">
+                    {group.items.map((item) => (
+                      <NavLink key={item.to} to={item.to} end={item.to === '/'} title={item.hint} className={({ isActive }) => isActive ? 'app-tile active' : 'app-tile'} onClick={() => { setApps(false); setOpen(false); }}><item.icon size={20} aria-hidden /><span>{item.label}</span></NavLink>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              <div className="apps-foot">
+                <button className="btn ghost small" onClick={() => { navigate('/settings#appearance'); setApps(false); setOpen(false); }}><Palette size={14} aria-hidden /> Appearance</button>
+                <button className="btn ghost small collapse-toggle" onClick={() => { toggleSidebar(); setApps(false); }}>{collapsed ? <PanelLeftOpen size={14} aria-hidden /> : <PanelLeftClose size={14} aria-hidden />} {collapsed ? 'Expand' : 'Collapse'}</button>
+                <button className="btn ghost small danger" onClick={onLogout}><LogOut size={14} aria-hidden /> Sign out</button>
+              </div>
+            </div>
+          )}
         </div>
       </aside>
       <div className="main">
@@ -185,7 +241,6 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
           <button className="icon-btn menu-btn" aria-label="Menu" aria-expanded={open} onClick={() => setOpen((value) => !value)}><MenuIcon size={20} /></button>
           <button className="icon-btn collapse-btn" aria-controls="main-sidebar" aria-expanded={!collapsed} aria-label={collapsed ? 'Expand sidebar (Ctrl+B)' : 'Collapse sidebar (Ctrl+B)'} title={collapsed ? 'Expand sidebar (Ctrl+B)' : 'Collapse sidebar (Ctrl+B)'} onClick={() => setCollapsed((value) => !value)}>{collapsed ? <PanelLeftOpen size={19} /> : <PanelLeftClose size={19} />}</button>
           <button className="palette-btn" onClick={() => setPalette(true)}><span>Search or jump</span> <span className="kbd">Ctrl K</span></button>
-          {pending > 0 && <button className="btn" onClick={() => navigate('/settings#vault')}>{pending} secret request{pending === 1 ? '' : 's'}</button>}
         </header>
         {children}
         <nav className="bottom-nav" aria-label="Quick navigation">

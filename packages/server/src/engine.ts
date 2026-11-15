@@ -44,6 +44,12 @@ import { generateImage, imageTool, localStatus } from './images.js';
 import { NO_MODEL_MESSAGE } from './usable-models.js';
 import { BudgetError, type Lease, type MemoryBudget } from './memory.js';
 import { MEMBER_DENIED_TOOLS, OWNER_ID, foreignPath, getAccount } from './accounts.js';
+import { Autonomy, HELPER_DENIED } from './autonomy.js';
+import type { McpAgentTool } from './mcp.js';
+import { GALLERY } from './gallery.js';
+import { disabledRules } from './rules.js';
+import { CONNECTOR_TOOLS, disabledConnectorTools } from './connectors.js';
+import { memoryBrief, memoryFileTool, projectRules, proposeSkillTool, searchChatsTool, skillNudge } from './learning.js';
 
 export class Engine {
   private readonly inflight = new Map<string, { abort: AbortController; paused: boolean; resumePause: () => void }>();
@@ -53,6 +59,8 @@ export class Engine {
   private readonly dwell = new Map<string, { modelId: string; previousId: string | null; until: number; explicit: boolean }>();
   residentLarge: string[] = [];
   extraTools: Tool[] = [];
+  /** Tools from installed MCP servers (owner personas only). */
+  mcpTools: () => McpAgentTool[] = () => [];
   libraryDir = '';
   /** Shared RAM budget. Set by buildApp; absent in some unit tests. */
   memory: MemoryBudget | null = null;
@@ -66,9 +74,13 @@ export class Engine {
     private readonly instanceId: string,
     private readonly fetchImpl: typeof fetch = fetch,
     private readonly providerOverride?: (model: ModelRow) => ModelProvider,
-  ) {}
+  ) {
+    this.autonomy = new Autonomy(store, bus, vault, (input) => this.startTurn(input), (runId) => this.stop(runId), () => this.libraryDir);
+  }
+  /** Timers/triggers an agent manages itself, and background helpers. */
+  readonly autonomy: Autonomy;
 
-  async startTurn(input: { sessionId: string; agentId: string; content?: string; imageUrl?: string; modelId?: string; parentRunId?: string | null; depth?: number; wait?: boolean; background?: boolean }) {
+  async startTurn(input: { sessionId: string; agentId: string; content?: string; imageUrl?: string; modelId?: string; parentRunId?: string | null; depth?: number; wait?: boolean; background?: boolean; cursorExtras?: Partial<RunCursor>; onDone?: (run: RunRow) => void }) {
     const session = this.store.getSession(input.sessionId);
     const agent = this.store.getAgent(input.agentId);
     if (!session || !agent) throw new Error('Chat or persona is missing.');
@@ -106,9 +118,10 @@ export class Engine {
       }
       userMessageId = message.id;
     }
-    const cursor: RunCursor = { phase: 'route', turn: 0, userMessageId, messageModelId: input.modelId, depth: input.depth ?? 0, configVersion: this.store.getSettings().version, agentUpdatedAt: agent.updatedAt, commandAck, pinMiss, imagePrompt: imageCommand?.[1]?.trim() || undefined, background: input.background || undefined };
+    const cursor: RunCursor = { phase: 'route', turn: 0, userMessageId, messageModelId: input.modelId, depth: input.depth ?? 0, configVersion: this.store.getSettings().version, agentUpdatedAt: agent.updatedAt, commandAck, pinMiss, imagePrompt: imageCommand?.[1]?.trim() || undefined, background: input.background || undefined, ...input.cursorExtras };
     const run = this.store.createRun({ sessionId: session.id, agentId: agent.id, parentRunId: input.parentRunId, configVersion: cursor.configVersion ?? 1, cursor });
     const task = this.execute(run.id);
+    if (input.onDone) void task.then(() => { const done = this.store.getRun(run.id); if (done) input.onDone!(done); }, () => { const done = this.store.getRun(run.id); if (done) input.onDone!(done); });
     if (input.wait) await task;
     else void task;
     return this.store.getRun(run.id)!;
@@ -119,14 +132,19 @@ export class Engine {
     const abort = new AbortController();
     const state = { abort, paused: false, resumePause: () => {} };
     const runForLimit = this.store.getRun(runId);
-    const limitMs = runForLimit ? this.runLimitMs(runForLimit.agentId) : null;
-    const limitTimer = limitMs ? setTimeout(() => abort.abort(), limitMs) : null;
+    const baseLimit = runForLimit ? this.runLimitMs(runForLimit.agentId) : null;
+    const ownLimit = runForLimit?.cursor.timeoutMs;
+    const limitMs = ownLimit ? Math.min(ownLimit, baseLimit || ownLimit) : baseLimit;
+    let timedOut = false;
+    const limitTimer = limitMs ? setTimeout(() => { timedOut = true; abort.abort(); }, limitMs) : null;
     this.inflight.set(runId, state);
     this.touch(runId);
     const beat = setInterval(() => this.touch(runId), 5000);
     try {
       this.store.updateRun(runId, { status: 'running', error: null, endedAt: null, leaseOwner: this.instanceId });
-      this.bus.publish({ type: 'status', runId, status: 'running' });
+      // sessionId lets any open page of this chat (another tab, or a timer firing here) attach to the run.
+      const started = this.store.getRun(runId);
+      this.bus.publish({ type: 'status', runId, status: 'running', sessionId: started?.sessionId, parentRunId: started?.parentRunId ?? null } as never);
       while (true) {
         const run = this.store.getRun(runId);
         if (!run || run.cursor.phase === 'done' || run.status === 'stopped') break;
@@ -144,8 +162,9 @@ export class Engine {
         this.store.updateRun(runId, { status: 'completed', endedAt: now(), cursor: { ...latest.cursor, phase: 'done' } });
       }
     } catch (error) {
-      const status = error instanceof StopError ? 'stopped' : 'failed';
-      const message = error instanceof Error ? error.message : String(error);
+      // A run that hit its time limit failed (with a reason); only a real Stop is "stopped".
+      const status = error instanceof StopError && !timedOut ? 'stopped' : 'failed';
+      const message = timedOut ? `Ran out of time after ${Math.round((limitMs ?? 0) / 1000)} s.` : error instanceof Error ? error.message : String(error);
       try {
         const latest = this.store.getRun(runId);
         if (latest && latest.status !== 'stopped') {
@@ -161,7 +180,10 @@ export class Engine {
       // The store can already be closed when the app shuts down mid-run.
       try {
         releaseRepoLocks(this.store, runId);
-        this.bus.publish({ type: 'done', runId, run: this.store.getRun(runId) });
+        const ended = this.store.getRun(runId);
+        this.bus.publish({ type: 'done', runId, run: ended });
+        // Helper results are delivered from the run's own record, so they survive a restart (no in-memory callback needed).
+        if (ended?.cursor.helperId && ['completed', 'failed', 'stopped', 'interrupted', 'cancelled'].includes(ended.status)) this.autonomy.deliver(ended);
       } catch { /* shutting down */ }
     }
   }
@@ -202,6 +224,8 @@ export class Engine {
   }
 
   stop(runId: string) {
+    // Stopping a reply also stops the helpers it started.
+    this.autonomy.stopChildrenOf(runId);
     const state = this.inflight.get(runId);
     state?.abort.abort();
     if (state?.paused) state.resumePause();
@@ -257,6 +281,8 @@ export class Engine {
         this.store.updateRun(run.id, { status: 'interrupted', error: 'The process stopped before this run finished. Resume to continue from the last checkpoint.', endedAt: now(), leaseOwner: null });
       }
     }
+    // Deliver helper results whose runs ended while the process was down.
+    this.autonomy.sweep();
   }
 
   /** /image <prompt>: one picture, saved to the user's files, shown as a preview in the chat. */
@@ -306,6 +332,7 @@ export class Engine {
     const prepared = await prepareRepos(this.store, run, stage);
     const staged = { ...run, cursor: { ...run.cursor, stage: prepared.stage, syncNote: prepared.syncNote, branched: prepared.branched } };
     await this.probeToolSupport();
+    await this.ensureSomeModel(agent.id);
     const decision = this.choose(agent, staged);
     let reason = prepared.lockedOut || decision.reason;
     let switched = prepared.lockedOut ? true : decision.switched;
@@ -357,7 +384,8 @@ export class Engine {
     await this.waitIfPaused(run.id, signal);
     const settings = this.store.getSettings();
     const sessionMode = this.store.getSession(run.sessionId)?.mode;
-    const maxSteps = sessionMode === 'code' || run.cursor.stage ? Math.max(settings.maxSteps, 24) : settings.maxSteps;
+    const baseSteps = sessionMode === 'code' || run.cursor.stage ? Math.max(settings.maxSteps, 24) : settings.maxSteps;
+    const maxSteps = run.cursor.maxSteps ? Math.min(run.cursor.maxSteps, baseSteps) : baseSteps;
     let current = this.store.getRun(run.id)!;
     if (current.cursor.turn >= maxSteps) {
       this.store.updateRun(run.id, { cursor: { ...current.cursor, phase: 'summarize' } });
@@ -373,6 +401,7 @@ export class Engine {
       current = this.store.updateRun(run.id, { cursor: { ...current.cursor, modelId: undefined, agentUpdatedAt: agent.updatedAt, configVersion: settings.version } })!;
     }
     if (!current.cursor.modelId) {
+      await this.ensureSomeModel(agent.id);
       const decision = this.choose(agent, current);
       current = this.store.updateRun(run.id, { cursor: { ...current.cursor, modelId: decision.modelId, routingReason: decision.reason, switched: decision.switched, reasoning: Boolean(decision.reasoning) }, modelId: decision.modelId, routingNote: decision.reason, switched: decision.switched })!;
       if (decision.unload.length) await this.unload(decision.unload);
@@ -395,7 +424,7 @@ export class Engine {
     }
     const provider = this.provider(model);
     const toolless = Boolean(current.cursor.noTools) || this.toolSupportOf(model) === false;
-    const tools = toolless ? [] : this.tools(agent, this.store.getSession(run.sessionId)?.mode, current.cursor.stage).map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
+    const tools = toolless ? [] : this.tools(agent, this.store.getSession(run.sessionId)?.mode, current.cursor.stage, current.cursor.toolSubset, Boolean(current.cursor.helperId)).map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
     let numCtx = model.local ? ollamaNumCtx(current.cursor.budgetOverride || model.practicalBudget, settings.outputReserveTokens, model.contextWindow) : undefined;
     const admitted = model.local && numCtx ? await this.admitLocal(current, model, numCtx, signal) : { lease: null, numCtx };
     if ('switchTo' in admitted) {
@@ -549,7 +578,7 @@ export class Engine {
       if (completed.has(call.id)) continue;
       await this.waitIfPaused(run.id, signal);
       if (signal.aborted) throw new StopError();
-      const tools = this.tools(this.store.getAgent(run.agentId)!, this.store.getSession(run.sessionId)?.mode, run.cursor.stage);
+      const tools = this.tools(this.store.getAgent(run.agentId)!, this.store.getSession(run.sessionId)?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId));
       const tool = tools.find((item) => item.name === call.name);
       let args = parseArgs(call.arguments);
       const speaker = this.store.getAgent(run.agentId);
@@ -673,7 +702,7 @@ export class Engine {
     }
     const latest = this.store.getRun(run.id)!;
     const turn = latest.cursor.turn + 1;
-    let next: RunCursor = { ...latest.cursor, phase: turn >= this.store.getSettings().maxSteps ? 'summarize' : 'model', turn, toolCalls: undefined, completedToolIds: [], approvalId: undefined };
+    let next: RunCursor = { ...latest.cursor, phase: turn >= (latest.cursor.maxSteps ? Math.min(latest.cursor.maxSteps, this.store.getSettings().maxSteps) : this.store.getSettings().maxSteps) ? 'summarize' : 'model', turn, toolCalls: undefined, completedToolIds: [], approvalId: undefined };
     if (handoff) {
       const approval = this.store.createApproval({ runId: run.id, toolCallId: 'plan', toolName: 'plan', args: { stage: 'plan' }, reason: 'Start coding from this plan. Edit the plan first if you want to change it.' });
       const waiting = { ...latest.cursor, phase: 'tools' as const, stage: 'plan' as const, approvalId: approval.id };
@@ -852,7 +881,12 @@ export class Engine {
     const hasKb = this.hasKnowledge(agent.id);
     const kbHint = hasKb ? '\n\nA knowledge base of the owner\'s documents is attached. When a question could be answered from it, call kb_search first and cite the numbered sources.' : '';
     const kbNote = hasKb ? await this.knowledgeNote(agent.id, user?.content ?? '') : '';
-    const system = `${agent.systemPrompt}${sharedRepoBrief(this.store)}${chatWorkspaces}${stageNote}${roleNote}${kbHint}${CITE_HINT}`;
+    // Hermes-style context: capped memory files, the project's own rule files, and a nudge to save a skill after hard tasks.
+    const memoryNote = agent.memoryEnabled ? memoryBrief(this.store, agent.id) : '';
+    const rulesNote = session ? projectRules(chatWorkspacePaths(this.store, run.sessionId, session.ownerId || OWNER_ID), disabledRules(this.store, run.sessionId)) : '';
+    const toolNames = this.tools(agent, session?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId)).map((tool) => tool.name);
+    const nudge = run.cursor.helperId ? '' : skillNudge(run.cursor.turn, toolNames);
+    const system = `${agent.systemPrompt}${sharedRepoBrief(this.store)}${chatWorkspaces}${rulesNote}${memoryNote}${stageNote}${roleNote}${kbHint}${CITE_HINT}${nudge}`;
     const preambleGuess = `${system}\n${notes.map((note) => note.content).join('\n')}`;
     if (model.providerId === 'prov_gemini' && estimateTokens(preambleGuess, 'gemini') > budget * 0.75) {
       const key = process.env.GEMINI_API_KEY;
@@ -1030,7 +1064,19 @@ export class Engine {
     }
   }
 
+  /** A fresh install has not scanned for Ollama yet: look once (briefly) before saying there is no model. */
+  private async ensureSomeModel(agentId: string) {
+    // OLLAMA_HOST moved (new port, restored or upgraded data folder): re-scan so chats stop going to the old address.
+    const host = process.env.OLLAMA_HOST?.replace(/\/$/, '');
+    const stored = this.store.getProvider('prov_ollama')?.baseUrl;
+    const moved = Boolean(host && /^https?:\/\//.test(host) && !this.providerOverride && stored && stored !== `${host}/v1` && this.rescannedFor !== host);
+    if (moved) this.rescannedFor = host!; // once per address, so an unreachable host never slows every turn
+    if (!moved && this.candidates(this.store.getSettings(), agentId).length) return;
+    await Promise.race([this.refreshModels(), new Promise((resolve) => setTimeout(resolve, 6000))]);
+  }
+
   private refreshing: Promise<unknown> | null = null;
+  private rescannedFor: string | null = null;
   private refreshModels() {
     if (this.providerOverride || this.refreshing) return this.refreshing;
     this.refreshing = scanMachine(this.fetchImpl, this.docker, this.store)
@@ -1040,7 +1086,7 @@ export class Engine {
     return this.refreshing;
   }
 
-  private tools(agent: Agent, sessionMode?: string, stage?: 'plan' | 'implement') {
+  private tools(agent: Agent, sessionMode?: string, stage?: 'plan' | 'implement', subset?: string[], helper = false) {
     const names = new Set(agent.toolAllowlist);
     names.add('request_secret');
     names.add('read_output');
@@ -1050,19 +1096,33 @@ export class Engine {
     names.add('repo_sync');
     names.add('find_context');
     names.add('share_file');
+    for (const name of ['manage_timer', 'manage_trigger', 'spawn_agent', 'helpers', 'memory_file', 'search_chats', 'propose_skill', 'run_tool_script', 'time_now', 'think']) names.add(name);
     if (this.store.getSettings().imageGen.mode !== 'off') names.add('generate_image');
     if (stage === 'plan') {
       for (const name of ['web_search', 'web_fetch', 'read_file', 'list_dir', 'grep', 'glob', 'plan', 'recall', 'consult_agent']) names.add(name);
     }
     if (stage === 'implement' || sessionMode === 'code') for (const tool of CODING_TOOLS) names.add(tool.name);
+    // MCP connector tools: owner personas only (servers carry the owner's tokens). A persona gets a server's tools when its
+    // allowlist names them (exact name, "mcp:<server>" or "mcp:*"), or when its gallery template lists that connector.
+    const mcp = (agent.ownerId || OWNER_ID) === OWNER_ID ? this.mcpTools() : [];
+    const templateConnectors = agent.templateId ? GALLERY.find((item) => item.id === agent.templateId)?.connectors ?? [] : [];
+    for (const row of mcp) {
+      if (names.has(row.tool.name) || names.has('mcp:*') || names.has(`mcp:${row.serverName}`) || (row.connector && templateConnectors.includes(row.connector))) names.add(row.tool.name);
+    }
     if (agent.ownerId !== OWNER_ID) for (const name of MEMBER_DENIED_TOOLS) names.delete(name);
-    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), ...this.extraTools];
+    // A helper run gets only the tools it was started with (never more than its persona allows).
+    if (subset) for (const name of [...names]) if (!subset.includes(name)) names.delete(name);
+    if (helper) for (const name of HELPER_DENIED) names.delete(name);
+    // Built-in connectors the owner switched off take their tools with them.
+    for (const name of disabledConnectorTools(this.store)) names.delete(name);
+    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), ...this.autonomy.tools(), memoryFileTool(), searchChatsTool(), proposeSkillTool(), ...CONNECTOR_TOOLS(), ...this.extraTools, ...mcp.map((row) => row.tool)];
     const seen = new Set<string>();
-    return catalog.filter((tool) => {
+    const chosen = catalog.filter((tool) => {
       if (!names.has(tool.name) || seen.has(tool.name)) return false;
       seen.add(tool.name);
       return true;
     }).map((tool) => ({ ...tool, parameters: toolParameters(tool.name).properties ? toolParameters(tool.name) : tool.parameters }));
+    return names.has('run_tool_script') ? [...chosen, toolScript(chosen)] : chosen;
   }
 
   private contextFor(run: RunRow, signal: AbortSignal): ToolContext {
@@ -1155,6 +1215,8 @@ export class Engine {
   }
 
   private touch(runId: string) {
+    // The heartbeat timer can outlive the database during shutdown; a closed store means there is nothing to renew.
+    if (!this.store.isOpen) return;
     this.store.updateRun(runId, { leaseOwner: this.instanceId, heartbeatAt: now() });
   }
 
@@ -1449,6 +1511,66 @@ function turnRoots(store: Store, run: RunRow, dataDir = '') {
   }
   for (const root of chatWorkspacePaths(store, run.sessionId, OWNER_ID)) roots.set(root.path, { label: root.label, path: root.path, write });
   return [...roots.values()].filter((root) => !dataDir || !foreignPath(dataDir, OWNER_ID, root.path));
+}
+
+/** Tools a script may not call: no nesting, no helpers or scheduling, nothing that pauses for the user. */
+const SCRIPT_DENIED = new Set(['run_tool_script', 'spawn_agent', 'helpers', 'manage_timer', 'manage_trigger', 'request_secret', 'request_folder', 'propose_skill', 'handoff_cli']);
+const SCRIPT_MAX_STEPS = 10;
+
+/**
+ * Several tool calls in one step, run in order. Plain data, not code: each step names an allowed tool and its args,
+ * and string args may use {{name}} for an earlier step's output. If any step would need approval, the whole script asks once.
+ */
+export function toolScript(available: Tool[]): Tool {
+  const byName = new Map(available.filter((tool) => !SCRIPT_DENIED.has(tool.name)).map((tool) => [tool.name, tool]));
+  const stepsOf = (args: Record<string, unknown>) => {
+    const steps = Array.isArray(args.steps) ? args.steps as { tool?: unknown; args?: unknown; save_as?: unknown }[] : [];
+    if (!steps.length) throw new Error('Pass steps: [{ tool, args, save_as }].');
+    if (steps.length > SCRIPT_MAX_STEPS) throw new Error(`At most ${SCRIPT_MAX_STEPS} steps per script.`);
+    return steps.map((step, index) => {
+      const name = String(step.tool || '');
+      const tool = byName.get(name);
+      if (!tool) throw new Error(`Step ${index + 1}: ${name || 'a tool'} is not allowed in a script here. Allowed: ${[...byName.keys()].join(', ')}.`);
+      const stepArgs = step.args && typeof step.args === 'object' && !Array.isArray(step.args) ? step.args as Record<string, unknown> : {};
+      return { tool, args: stepArgs, saveAs: step.save_as ? String(step.save_as).replace(/[^\w-]/g, '').slice(0, 32) : `step${index + 1}` };
+    });
+  };
+  const fill = (value: unknown, vars: Map<string, string>): unknown => {
+    if (typeof value === 'string') return value.replace(/\{\{\s*([\w-]+)\s*\}\}/g, (_, key: string) => (vars.get(key) ?? '').slice(0, 4000));
+    if (Array.isArray(value)) return value.map((item) => fill(item, vars));
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, fill(item, vars)]));
+    return value;
+  };
+  return {
+    name: 'run_tool_script',
+    description: `Run up to ${SCRIPT_MAX_STEPS} of your tools in one step, in order: steps [{ tool, args, save_as }]. A string arg may contain {{save_as}} (or {{step1}}) to use an earlier output. Stops at the first error unless continue_on_error. Use it for mechanical sequences (read several files, search then fetch); it cannot start helpers or schedule anything.`,
+    parameters: { type: 'object', properties: { steps: { type: 'array', items: { type: 'object', properties: { tool: { type: 'string' }, args: { type: 'object' }, save_as: { type: 'string' } }, required: ['tool'] } }, continue_on_error: { type: 'boolean' } }, required: ['steps'], additionalProperties: false },
+    mutates: (args) => { try { return stepsOf(args).some((step) => step.tool.mutates(step.args)); } catch { return false; } },
+    approval: (args, ctx) => {
+      let steps;
+      try { steps = stepsOf(args); } catch { return null; }
+      const asks = steps.map((step) => step.tool.approval(step.args, ctx)).filter(Boolean);
+      return asks.length ? `Run a ${steps.length}-step tool script: ${steps.map((step) => step.tool.name).join(' → ')}. Needs approval for: ${asks.join('; ')}` : null;
+    },
+    async execute(args, ctx) {
+      const steps = stepsOf(args);
+      const vars = new Map<string, string>();
+      const log: string[] = [];
+      for (const [index, step] of steps.entries()) {
+        if (ctx.signal.aborted) throw new StopError();
+        const filled = fill(step.args, vars) as Record<string, unknown>;
+        try {
+          const output = await step.tool.execute(filled, { ...ctx, toolCallId: ctx.toolCallId ? `${ctx.toolCallId}:${index}` : undefined });
+          vars.set(step.saveAs, output);
+          log.push(`[${index + 1}] ${step.tool.name} → ${step.saveAs}\n${output.slice(0, 3000)}`);
+        } catch (error) {
+          log.push(`[${index + 1}] ${step.tool.name} failed: ${(error as Error).message}`);
+          if (!args.continue_on_error) break;
+        }
+      }
+      return log.join('\n\n').slice(0, 16_000);
+    },
+  };
 }
 
 function skillScriptTool(): Tool {
