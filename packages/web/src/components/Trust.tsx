@@ -1,12 +1,13 @@
 import { BadgeCheck, Container, ShieldAlert } from 'lucide-react';
+import { t } from '../i18n';
 
 export type Trust = 'built-in' | 'official' | 'docker' | 'community';
 
 const LABEL: Record<Trust, { text: string; title: string; cls: string }> = {
-  'built-in': { text: 'Built-in', title: 'Ships with the app and runs in-process.', cls: 'ok' },
-  official: { text: 'Official', title: 'Published by the MCP project or the service itself.', cls: 'ok' },
-  docker: { text: 'Docker', title: 'Built and signed by Docker in its MCP catalog.', cls: 'ok' },
-  community: { text: 'Community', title: 'Published by someone else. Read its source before trusting it with tokens; installing needs your explicit OK.', cls: 'warn' },
+  'built-in': { text: t('Built-in'), title: t('Ships with the app and runs in-process.'), cls: 'ok' },
+  official: { text: t('Official'), title: t('Published by the MCP project or the service itself.'), cls: 'ok' },
+  docker: { text: t('Docker'), title: t('Built and signed by Docker in its MCP catalog.'), cls: 'ok' },
+  community: { text: t('Community'), title: t('Published by someone else. Read its source before trusting it with tokens; installing needs your explicit OK.'), cls: 'warn' },
 };
 
 export function TrustBadge({ trust }: { trust: Trust | null | undefined }) {

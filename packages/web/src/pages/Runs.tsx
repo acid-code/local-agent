@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import { api, post } from '../lib/api';
 import { EmptyState, PageHeader } from '../components/ui';
 import { Activity } from 'lucide-react';
+import { t } from '../i18n';
 
 interface Run { id: string; status: string; modelId: string | null; routingNote: string | null; inputTokens: number; outputTokens: number; costUsd: number; error: string | null; startedAt: string }
 interface Step { id: string; index: number; kind: string; name: string; status: string; input: unknown; output: unknown; latencyMs: number; tokensIn: number; tokensOut: number; error: string | null }
@@ -26,10 +27,10 @@ export function Runs() {
 
   return (
     <div className="page">
-      <PageHeader title="Runs" description="Every reply is a run with checkpoints. If the process stops, it resumes from the last checkpoint. Retrying from an earlier one does not undo file changes; use the edit checkpoint for that." />
+      <PageHeader title={t('Runs')} description={t('Every reply is a run with checkpoints. If the process stops, it resumes from the last checkpoint. Retrying from an earlier one does not undo file changes; use the edit checkpoint for that.')} />
       <div className="runs-grid">
         <div className="run-list">
-          {runs.length === 0 && <EmptyState icon={Activity} title="No runs yet" action={<a className="btn" href="/">Start a chat</a>}>Every chat reply, schedule and trigger becomes a run you can inspect here.</EmptyState>}
+          {runs.length === 0 && <EmptyState icon={Activity} title={t('No runs yet')} action={<a className="btn" href="/">{t('Start a chat')}</a>}>{t('Every chat reply, schedule and trigger becomes a run you can inspect here.')}</EmptyState>}
           {runs.map((item) => (
             <button key={item.id} className={item.id === selected ? 'run-item active' : 'run-item'} onClick={() => { setSelected(item.id); if (window.innerWidth <= 980) setTimeout(() => document.getElementById('run-detail')?.scrollIntoView({ behavior: 'smooth' }), 50); }}>
               <span className="mono ellipsis">{item.id}</span>
@@ -39,15 +40,15 @@ export function Runs() {
           ))}
         </div>
         <div id="run-detail" className="run-detail">
-          {!run && <p className="faint">Pick a run to see its steps and checkpoints.</p>}
+          {!run && <p className="faint">{t('Pick a run to see its steps and checkpoints.')}</p>}
           {run && (
             <div className="card">
               <div className="row"><span className="badge">{run.status}</span><span className="muted">{run.routingNote}</span></div>
               {run.error && <p className="badge bad">{run.error}</p>}
-              <p className="faint">Cost estimate ${run.costUsd.toFixed(4)}. Local models are $0.</p>
+              <p className="faint">{t('Cost estimate $')}{run.costUsd.toFixed(4)}. Local models are $0.</p>
               <div className="row">
-                <button className="btn" onClick={() => post(`/api/runs/${run.id}/control`, { action: 'resume' })}>Resume</button>
-                <button className="btn danger" onClick={() => post(`/api/runs/${run.id}/control`, { action: 'stop' })}>Stop</button>
+                <button className="btn" onClick={() => post(`/api/runs/${run.id}/control`, { action: 'resume' })}>{t('Resume')}</button>
+                <button className="btn danger" onClick={() => post(`/api/runs/${run.id}/control`, { action: 'stop' })}>{t('Stop')}</button>
               </div>
             </div>
           )}
@@ -55,7 +56,7 @@ export function Runs() {
             <div key={checkpoint.id} className="row" style={{ marginTop: 8 }}>
               <span className="mono faint">{checkpoint.phase}</span>
               <span>{checkpoint.note}</span>
-              {selected && <button className="btn" onClick={() => post(`/api/runs/${selected}/control`, { action: 'retry_from', checkpointId: checkpoint.id })}>Retry from here</button>}
+              {selected && <button className="btn" onClick={() => post(`/api/runs/${selected}/control`, { action: 'retry_from', checkpointId: checkpoint.id })}>{t('Retry from here')}</button>}
             </div>
           ))}
           {steps.map((step) => (

@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { getLoadablePath } from 'sqlite-vec';
-import { hashEmbed } from '@local-agent/shared';
+import { hashEmbed, hebrewVariants, stripNiqqud } from '@local-agent/shared';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Store } from './db.js';
 import { nid, now } from './util.js';
@@ -125,8 +125,16 @@ export function windowText(text: string, size: number, overlap: number): string[
   return windows;
 }
 
+/** Words in any script (Hebrew included), lower-cased, niqqud dropped. Hebrew words also yield prefix-stripped forms. */
 export function tokenize(text: string): string[] {
-  return text.toLowerCase().split(/[^a-z0-9]+/).filter((token) => token.length > 1);
+  const words = stripNiqqud(text.toLowerCase()).match(/[\p{L}\p{N}]+/gu) ?? [];
+  const out: string[] = [];
+  for (const word of words) {
+    if (word.length < 2) continue;
+    if (/[\u05D0-\u05EA]/.test(word)) out.push(...hebrewVariants(word));
+    else out.push(word);
+  }
+  return out;
 }
 
 /** Okapi BM25 over the given documents. */
@@ -376,6 +384,8 @@ export async function ingestBuffer(
   collectionId: string,
   file: { name: string; bytes: Buffer; path?: string | null },
   embed: EmbedFn,
+  /** Reads text out of photos and scans (OCR). Without it, images are refused as having no text. */
+  ocr?: (bytes: Buffer, name: string) => Promise<string>,
 ): Promise<{ id: string; status: string; chunks: number; skipped: boolean }> {
   const collection = store.db.prepare('SELECT id FROM kb_collections WHERE id = ?').get(collectionId);
   if (!collection) throw new KbInputError('Collection not found.', 404);
@@ -386,7 +396,9 @@ export async function ingestBuffer(
     collectionId, file.name, file.path ?? '',
   ) as { id: string; sha256: string } | undefined;
   if (existing && existing.sha256 === sha) return { id: existing.id, status: 'indexed', chunks: 0, skipped: true };
-  const extracted = extractText(file.name, file.bytes);
+  const extracted = /\.(jpe?g|png|webp|heic|heif|tiff?|bmp|gif)$/i.test(file.name)
+    ? { text: ocr ? await ocr(file.bytes, file.name).catch((error: Error) => { throw new KbInputError(`${file.name}: ${error.message}`); }) : '', kind: 'prose' as const }
+    : extractText(file.name, file.bytes);
   if (!extracted.text.trim()) throw new KbInputError(`${file.name} has no text to index. It is empty or only whitespace.`);
   const pieces = chunkDocument(extracted.text, extracted.kind);
   if (!pieces.length) throw new KbInputError(`${file.name} has no text to index.`);

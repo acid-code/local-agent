@@ -2,13 +2,14 @@ import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type 
 import { createPortal } from 'react-dom';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { Check, ChevronRight, MoreHorizontal, type LucideIcon } from 'lucide-react';
+import { t } from '../i18n';
 
 /** Page title row: optional breadcrumb, title, one-line description, actions on the right. */
 export function PageHeader({ title, description, actions, crumbs }: { title: ReactNode; description?: ReactNode; actions?: ReactNode; crumbs?: { label: string; to?: string }[] }) {
   return (
     <header className="page-head">
       {crumbs && crumbs.length > 0 && (
-        <nav className="crumbs" aria-label="Breadcrumb">
+        <nav className="crumbs" aria-label={t('Breadcrumb')}>
           {crumbs.map((crumb, index) => (
             <span key={index} className="crumb">
               {crumb.to ? <Link to={crumb.to}>{crumb.label}</Link> : <span aria-current="page">{crumb.label}</span>}

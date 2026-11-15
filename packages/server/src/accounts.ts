@@ -1,3 +1,4 @@
+import { deleteLanguage } from './language.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { FastifyRequest } from 'fastify';
@@ -108,6 +109,7 @@ export function deleteMember(store: Store, dataDir: string, id: string) {
     }
     store.db.prepare('DELETE FROM auth_sessions WHERE account_id = ?').run(id);
     store.db.prepare('DELETE FROM account_prefs WHERE account_id = ?').run(id);
+    deleteLanguage(store, id);
     store.db.prepare('DELETE FROM members WHERE id = ?').run(id);
   });
   fs.rmSync(accountDir(dataDir, id), { recursive: true, force: true });
@@ -201,7 +203,7 @@ export const MEMBER_DENIED_TOOLS = new Set([
  * Each listed route still checks that the row belongs to the caller.
  */
 export const MEMBER_ROUTES = new Set([
-  'GET /api/auth/me', 'POST /api/auth/logout', 'POST /api/account/password', 'GET /api/me', 'GET /api/me/theme', 'PUT /api/me/theme', 'GET /api/me/quota', 'POST /api/me/wallpaper', 'GET /api/me/wallpaper', 'DELETE /api/me/wallpaper', 'GET /api/images/status', 'POST /api/images/generate',
+  'GET /api/auth/me', 'POST /api/auth/logout', 'POST /api/account/password', 'GET /api/me', 'GET /api/me/theme', 'PUT /api/me/theme', 'GET /api/me/language', 'PUT /api/me/language', 'POST /api/ocr', 'GET /api/me/quota', 'POST /api/me/wallpaper', 'GET /api/me/wallpaper', 'DELETE /api/me/wallpaper', 'GET /api/images/status', 'POST /api/images/generate',
   'GET /api/agents', 'POST /api/agents', 'GET /api/gallery', 'POST /api/gallery/:id', 'GET /api/connectors', 'POST /api/agents/reorder', 'GET /api/agents/:id', 'PATCH /api/agents/:id', 'DELETE /api/agents/:id',
   'POST /api/agents/:id/read', 'POST /api/agents/:id/avatar', 'GET /api/agents/:id/avatar', 'GET /api/agents/:id/files', 'GET /api/agents/:id/file',
   'GET /api/rooms', 'POST /api/rooms',

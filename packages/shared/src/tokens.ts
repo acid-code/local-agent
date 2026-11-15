@@ -9,6 +9,9 @@ import type { TokenizerId } from './types.js';
  * Ratios are characters of non-CJK text per token. CJK ideographs are
  * counted separately because they are usually one token or less.
  */
+/** Hebrew letters per token: big-vocabulary tokenizers (Gemma, Gemini) pack Hebrew well, Qwen less so. */
+const HEBREW_CHARS_PER_TOKEN: Record<TokenizerId, number> = { gemma4: 2.6, qwen3: 1.7, gemini: 2.8, approx: 1.6 };
+
 const CHARS_PER_TOKEN: Record<TokenizerId, number> = {
   gemma4: 3.6,
   qwen3: 3.5,
@@ -22,7 +25,7 @@ export function estimateTokens(text: string, tokenizer: TokenizerId = 'approx'):
   const rtl = text.match(/[\u0590-\u08ff]/g)?.length ?? 0;
   const rest = Math.max(0, [...text].length - cjk - rtl);
   const ratio = CHARS_PER_TOKEN[tokenizer] ?? 4;
-  return Math.max(1, Math.ceil(rest / ratio + cjk / 1.35 + rtl));
+  return Math.max(1, Math.ceil(rest / ratio + cjk / 1.35 + rtl / (HEBREW_CHARS_PER_TOKEN[tokenizer] ?? 1.6)));
 }
 
 export function estimateMessageTokens(

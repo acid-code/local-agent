@@ -5,13 +5,13 @@ import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { FREE_TIER_OBSERVED_AT, FREE_TIER_SNAPSHOT, VERSION, geminiQuotaDay, nextCron, quotaAvailability } from '@local-agent/shared';
+import { MACHINE_PROFILES, autoMapFor, autoMapForPlan, planInstall, type InstallPlan, profileFor, residentGiB, FREE_TIER_OBSERVED_AT, FREE_TIER_SNAPSHOT, VERSION, geminiQuotaDay, nextCron, quotaAvailability } from '@local-agent/shared';
 import { authenticate, hashPassword, noteFailure, rateLimit, setSession, verifyPassword } from './auth.js';
 import { TEMPLATES } from './catalog.js';
 import { detectCodingClis, listEdits, readPlan, replacePlan, revertBatch, RollbackConflict, updatePlanItem } from './coding.js';
 import { secretDrift, secretNames, writeSecret } from './config.js';
 import type { DockerCtl } from './docker.js';
-import { checklist, scanMachine, setupPreview } from './discovery.js';
+import { checklist, readGpu, scanMachine, setupPreview } from './discovery.js';
 import type { McpRuntime } from './mcp.js';
 import type { McpServer } from './db.js';
 import { importConfigs, searchRegistry, trustOf, vetSpec, type VettingReport } from './mcp.js';
@@ -51,6 +51,11 @@ import { cloneInto, gitRoot, gitStatus, listDir, listGitRoots, openPullRequest, 
 import { MAX_FILE_BYTES, deleteFile, filePath, getFile, getMessageRow, listFiles, mimeFor, saveFile, searchMessages } from './files.js';
 import type { Store } from './db.js';
 import type { Vault } from './vault.js';
+import { renderSlides } from './slides.js';
+import { registerMonitor } from './monitor.js';
+import { OCR_URL, PIPER_URL, serviceUp } from './ocr.js';
+import { benchRuntime, loadBench, machineInfo, saveBench } from './runtime-bench.js';
+import { registerOcr } from './ocr-routes.js';
 import { MEMBER_DENIED_TOOLS, OWNER_ID, accountOf, foreignPath, mustOwn, ownerOf, workspaceFor } from './accounts.js';
 import { memberByUsername } from './accounts.js';
 import { registerAccounts } from './members.js';
@@ -83,6 +88,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   registerAccounts(app, { store, config });
   registerWorkspaceRoutes(app, { store });
   registerMedia(app, { store, dataDir: config.dataDir, vault, fetchImpl, memory: () => engine.memory });
+  const ocr = registerOcr(app, { store, engine, docker, fetchImpl, dataDir: config.dataDir });
 
   app.get('/api/auth/me', async (req) => {
     const owner = store.getOwner();
@@ -451,6 +457,8 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       sortOrder: z.number().int().optional(),
       workshopIds: z.array(z.string()).optional(),
       notify: z.enum(['all', 'mute']).optional(),
+      language: z.enum(['auto', 'match', 'en', 'he']).optional(),
+      hebrewCleanup: z.enum(['inherit', 'auto', 'on', 'off']).optional(),
     }), req.body);
     mustOwn(store, req, 'agent', (req.params as { id: string }).id, 'Persona not found.');
     if (body.toolAllowlist) body.toolAllowlist = memberTools(req, body.toolAllowlist);
@@ -560,7 +568,9 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const bytes = Buffer.from(body.contentBase64, 'base64');
     ensureDiskRoom(config.dataDir, bytes.length);
     try {
-      return { file: saveFile(store, config.dataDir, { name: body.name, bytes, sessionId: body.sessionId ?? null, source: 'upload', ownerId: me(req) }) };
+      const file = saveFile(store, config.dataDir, { name: body.name, bytes, sessionId: body.sessionId ?? null, source: 'upload', ownerId: me(req) });
+      ocr.indexImage(file, me(req));
+      return { file };
     } catch (error) {
       if (isDiskFullError(error)) throw http(507, 'The disk is full. Free some space, then try again.');
       throw http(400, error instanceof Error ? error.message : 'Could not save the file.');
@@ -576,6 +586,27 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const file = getFile(store, (req.params as { id: string }).id);
     if (!file) throw http(404, 'File not found.');
     return { file };
+  });
+  // Slide pictures for .pptx previews (rendered once with LibreOffice when it is installed).
+  app.get('/api/files/:id/slides', async (req) => {
+    const id = (req.params as { id: string }).id;
+    mustOwn(store, req, 'file', id, 'File not found.');
+    const file = getFile(store, id);
+    const full = file ? filePath(store, config.dataDir, id) : null;
+    if (!file || !full || !/\.pptx$/i.test(file.name)) throw http(404, 'File not found.');
+    const pages = await renderSlides(config.dataDir, id, full).catch((error: Error) => { store.addLog('warn', `Slide preview failed: ${error.message}`); return [] as string[]; });
+    return { pages: pages.length, renderer: pages.length ? 'libreoffice' : null };
+  });
+  app.get('/api/files/:id/slides/:n', async (req, reply) => {
+    const { id, n } = req.params as { id: string; n: string };
+    mustOwn(store, req, 'file', id, 'File not found.');
+    const full = filePath(store, config.dataDir, id);
+    if (!full) throw http(404, 'File not found.');
+    const pages = await renderSlides(config.dataDir, id, full).catch(() => [] as string[]);
+    const page = pages[Number(n) - 1];
+    if (!page) throw http(404, 'No such slide.');
+    reply.header('content-type', 'image/png').header('cache-control', 'private, max-age=3600');
+    return reply.send(fs.readFileSync(page));
   });
   app.get('/api/files/:id/raw', async (req, reply) => {
     const id = (req.params as { id: string }).id;
@@ -889,7 +920,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       content: z.string().min(1), agentId: z.string().optional(), modelId: z.string().optional(), imageUrl: z.string().optional(),
       mentions: z.array(z.union([
         z.object({ kind: z.literal('path'), root: z.string().min(1), path: z.string(), start: z.number().int().positive().optional(), end: z.number().int().positive().optional() }),
-        z.object({ kind: z.literal('file'), id: z.string().min(1) }),
+        z.object({ kind: z.literal('file'), id: z.string().min(1), ocr: z.enum(['auto', 'printed', 'handwriting']).optional() }),
       ])).max(12).optional(),
     }), req.body);
     const modelId = body.modelId ? allowedModel(req, chatModelId(store, body.modelId)) : undefined;
@@ -903,7 +934,20 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     }
     if (engine.sessionBusy(id)) throw http(409, 'A reply is still running in this chat. Wait for it or press Stop, then send again.');
     const offers = vault.capture(null, body.content);
-    const context = body.mentions?.length ? expandMentions(store, body.mentions, me(req)) : '';
+    let context = body.mentions?.length ? expandMentions(store, body.mentions.map((mention) => (mention.kind === 'file' ? { kind: 'file' as const, id: mention.id } : mention)), me(req)) : '';
+    // Photos sent with "read text" on: OCR text rides along as context (printed via Tesseract, handwriting via a vision model).
+    for (const mention of body.mentions ?? []) {
+      if (mention.kind !== 'file' || !mention.ocr || !engine.ocrReader) continue;
+      const file = getFile(store, mention.id);
+      if (!file || !(/^image\//.test(file.mime) || /\.(jpe?g|png|webp|heic|heif|tiff?|bmp|gif)$/i.test(file.name))) continue;
+      try {
+        const result = await engine.ocrReader(mention.id, mention.ocr, me(req));
+        const how = `${result.engine === 'vision' ? `vision model ${result.model}` : `Tesseract, confidence ${Math.round(result.confidence ?? 0)}`}; direction ${result.direction}`;
+        context += `${context ? '\n\n' : ''}### Text read from ${file.name} (${how})\n${result.text || '(no text found)'}${result.notes.length ? `\n(${result.notes.join(' ')})` : ''}`;
+      } catch (error) {
+        context += `${context ? '\n\n' : ''}### Text read from ${file.name}\n(OCR failed: ${error instanceof Error ? error.message : 'error'})`;
+      }
+    }
     const content = context ? `${body.content}${CONTEXT_MARK}${context}` : body.content;
     const run = await engine.startTurn({ sessionId: id, agentId, content: vault.redact(content), imageUrl: body.imageUrl, modelId });
     return { run, offers };
@@ -1179,6 +1223,66 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     }
     return { scan: lastScan, checklist: checklist(lastScan, store) };
   });
+  // Machine profile: role defaults, runtime advice, the install plan and the last bench, for the setup wizard.
+  const ollamaBase = () => (process.env.OLLAMA_HOST || lastScan?.ollama?.url || 'http://127.0.0.1:11434').replace(/\/$/, '').replace(/^(?!https?:)/, 'http://');
+  const installedModels = async () => fetchImpl(`${ollamaBase()}/api/tags`, { signal: AbortSignal.timeout(5000) }).then((res) => res.json() as Promise<{ models?: { name: string }[] }>).then((data) => (data.models ?? []).map((row) => row.name)).catch(() => [] as string[]);
+  const catalogSizes = () => Object.fromEntries(store.listModels().filter((row) => row.typicalQ4GiB).map((row) => [row.apiName, row.typicalQ4GiB as number]));
+  const pickProfile = async (id?: string) => {
+    const machine = await machineInfo();
+    const gtt = readGpu()?.gttBytes;
+    const detected = profileFor({ ...machine, gpu: machine.gpu ?? undefined, gttGiB: gtt ? gtt / 2 ** 30 : undefined });
+    return { machine, detected, profile: (id ? MACHINE_PROFILES.find((row) => row.id === id) : null) ?? detected };
+  };
+  const roleChoices = z.record(z.enum(['fast', 'main', 'hebrew', 'coder', 'vision', 'embed', 'image']), z.string().max(120).regex(/^[\w.:/-]*$/)).optional();
+  app.get('/api/setup/profile', async (req) => {
+    const { machine, detected, profile } = await pickProfile((req.query as { id?: string }).id);
+    const { match: _match, ...plain } = profile;
+    const settings = store.getSettings();
+    return { machine, detected: detected.id, profile: plain, residentGiB: residentGiB(profile), autoMap: autoMapFor(profile), plan: planInstall(profile, {}, await installedModels(), catalogSizes()), applied: settings.modelProfile ?? null, bench: loadBench(config.dataDir), profiles: MACHINE_PROFILES.map((row) => ({ id: row.id, title: row.title })) };
+  });
+  app.post('/api/setup/profile/plan', async (req) => {
+    const body = parse(z.object({ id: z.string().optional(), choices: roleChoices }), req.body);
+    const { profile } = await pickProfile(body.id);
+    return { plan: planInstall(profile, body.choices, await installedModels(), catalogSizes()) };
+  });
+  const applyPlan = (plan: InstallPlan) => {
+    const settings = store.getSettings();
+    const image = plan.rows.find((row) => row.role === 'image')?.model;
+    const hebrew = plan.rows.find((row) => row.role === 'hebrew')?.model;
+    const next = { ...settings, autoModels: { ...settings.autoModels, ...autoMapForPlan(plan) }, ramBudgetGiB: plan.ramCapGiB, imageGen: { ...settings.imageGen, localModel: image || settings.imageGen.localModel }, modelProfile: { id: plan.profileId, hebrew: hebrew ?? null, at: new Date().toISOString() } };
+    store.saveSettings(next, `Applied machine profile ${plan.profileId}`, { settings: next });
+    return next;
+  };
+  app.post('/api/setup/profile/apply', async (req) => {
+    const body = parse(z.object({ confirm: z.literal(true), id: z.string().optional(), choices: roleChoices }), req.body);
+    const { profile } = await pickProfile(body.id);
+    const next = applyPlan(planInstall(profile, body.choices, await installedModels(), catalogSizes()));
+    return { applied: profile.id, autoModels: next.autoModels, ramBudgetGiB: next.ramBudgetGiB, imageModel: next.imageGen.localModel };
+  });
+  // Pull every model the plan needs (one at a time, compact progress), then write the role map. Refuses plans over the RAM cap.
+  app.post('/api/setup/profile/install', async (req) => {
+    const body = parse(z.object({ confirm: z.literal(true), id: z.string().optional(), choices: roleChoices }), req.body);
+    const { profile } = await pickProfile(body.id);
+    const plan = planInstall(profile, body.choices, await installedModels(), catalogSizes());
+    if (!plan.fits) throw http(400, plan.warnings[0] ?? 'These models do not fit the RAM cap.');
+    const job = store.createJob('install-models', plan.pulls.length ? `ollama pull ${plan.pulls.join(' && ollama pull ')}` : 'nothing to pull');
+    void (async () => {
+      try {
+        store.appendJob(job.id, `Profile ${plan.profileId}: ${plan.pulls.length} model(s), ~${plan.downloadGiB} GB to download; ~${plan.peakGiB} GB peak RAM of ${plan.ramCapGiB} GB.\n`);
+        for (const [index, name] of plan.pulls.entries()) {
+          store.appendJob(job.id, `[${index + 1}/${plan.pulls.length}] ${name}\n`);
+          await ollamaPull(fetchImpl, ollamaBase(), name, pullProgress(name, (line) => store.appendJob(job.id, line)));
+        }
+        applyPlan(plan);
+        store.appendJob(job.id, `Role map saved: ${plan.rows.map((row) => `${row.role}=${row.model}`).join(', ')}\n`);
+        store.finishJob(job.id, 'done');
+      } catch (error) {
+        store.appendJob(job.id, `Failed: ${error instanceof Error ? error.message : String(error)}\n`);
+        store.finishJob(job.id, 'failed');
+      }
+    })();
+    return { job, plan };
+  });
   app.post('/api/setup/actions/:id/preview', async (req) => {
     const model = (req.body as { model?: string } | undefined)?.model;
     return setupPreview((req.params as { id: string }).id, model);
@@ -1254,7 +1358,9 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const raw = req.body as unknown;
     const audio = Buffer.isBuffer(raw) ? raw : raw instanceof ArrayBuffer ? Buffer.from(raw) : Buffer.alloc(0);
     try {
-      const text = await transcribe(fetchImpl, audio, String(req.headers['content-type'] || 'audio/webm'));
+      // No hint by default: Whisper detects Hebrew and English itself, and a bilingual user may speak either.
+      const hint = String((req.query as { lang?: string }).lang || '');
+      const text = await transcribe(fetchImpl, audio, String(req.headers['content-type'] || 'audio/webm'), hint === 'he' || hint === 'en' ? hint : undefined);
       return { text };
     } catch (error) {
       if (error instanceof VoiceError) return reply.code(error.statusCode).send({ error: error.message, code: error.code, hint: error.hint });
@@ -1262,10 +1368,13 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     }
   });
   app.post('/api/voice/speak', async (req, reply) => {
-    const body = parse(z.object({ text: z.string().min(1).max(2000) }), req.body);
+    const body = parse(z.object({ text: z.string().min(1).max(2000), lang: z.enum(['he', 'en']).optional() }), req.body);
     try {
-      const audio = await speak(fetchImpl, body.text);
+      const account = accountOf(req);
+      const cloud = account.role === 'owner' || account.limits.cloud !== false;
+      const audio = await speak(fetchImpl, body.text, { lang: body.lang, geminiKey: cloud ? process.env.GEMINI_API_KEY : '' });
       reply.header('content-type', audio.type);
+      reply.header('x-tts-engine', audio.engine);
       return reply.send(audio.bytes);
     } catch (error) {
       if (error instanceof VoiceError) return reply.code(error.statusCode).send({ error: error.message, code: error.code, hint: error.hint });
@@ -1313,6 +1422,22 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     if (!memory) return { tracked: false };
     const cfg = budgetConfig(store.getSettings());
     return { tracked: true, budgetBytes: cfg.budgetBytes, usage: await memory.usage(), active: memory.snapshotActive(), queue: memory.snapshotQueue(), summary: (await budgetReport(memory, cfg)).detail };
+  });
+  registerMonitor(app, {
+    store, redact: (text) => vault.redact(text),
+    health: async () => {
+      const [checks, ocrUp, piperUp] = await Promise.all([healthChecks(store, docker, fetchImpl, config.dataDir, engine.memory), serviceUp(fetchImpl, OCR_URL), serviceUp(fetchImpl, PIPER_URL)]);
+      return [...checks,
+        { id: 'ocr', ok: Boolean(ocrUp), optional: true, detail: ocrUp ? `OCR service up (${(ocrUp.langs as string[] | undefined)?.join('+') ?? 'tesseract'})` : 'OCR service not running' },
+        { id: 'piper', ok: Boolean(piperUp), optional: true, detail: piperUp ? 'Piper voices up' : 'Piper voices not running' }];
+    },
+    memory: async () => {
+      const memory = engine.memory;
+      if (!memory) return { tracked: false };
+      const cfg = budgetConfig(store.getSettings());
+      return { tracked: true, budgetGiB: Math.round((cfg.budgetBytes / 2 ** 30) * 10) / 10, usage: await memory.usage(), active: memory.snapshotActive(), queue: memory.snapshotQueue() };
+    },
+    ownerOnly: (req) => { if (accountOf(req).role !== 'owner') throw http(403, 'Only the owner can manage monitoring tokens.'); },
   });
   app.get('/api/debug/health', async () => ({ checks: await healthChecks(store, docker, fetchImpl, config.dataDir, engine.memory) }));
   app.post('/api/debug/health/:id', async (req) => {
@@ -1393,7 +1518,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     })();
   });
 
-  registerLibrary(app, ctx);
+  registerLibrary(app, ctx, ocr);
 }
 
 /** Resolves a chat model by id, API name, or name. Unknown or disabled models are a 400 that lists the valid ones. */
@@ -1471,7 +1596,7 @@ function http(statusCode: number, message: string) {
   return error;
 }
 
-function registerLibrary(app: FastifyInstance, ctx: Ctx) {
+function registerLibrary(app: FastifyInstance, ctx: Ctx, ocr: ReturnType<typeof registerOcr>) {
   const { store, engine, vault, config, fetchImpl } = ctx;
   const embed = () => ollamaEmbedder(fetchImpl, store.getSettings().autoModels.embed || 'nomic-embed-text');
 
@@ -1495,7 +1620,7 @@ function registerLibrary(app: FastifyInstance, ctx: Ctx) {
     for (const file of body.files) {
       const bytes = Buffer.from(file.contentBase64, 'base64');
       try {
-        results.push({ name: file.name, ...(await ingestBuffer(store, id, { name: file.name, bytes }, embed())) });
+        results.push({ name: file.name, ...(await ingestBuffer(store, id, { name: file.name, bytes }, embed(), (data) => ocr.ocrBytesForKb(data, mine(req)))) });
       } catch (error) {
         if (!(error instanceof KbInputError)) throw error;
         results.push({ name: file.name, error: error.message });
@@ -1678,31 +1803,60 @@ function hookUrl(id: string, kind: TriggerKind) {
   return kind === 'github' ? `/api/hooks/github/${id}` : kind === 'webhook' ? `/api/hooks/${id}` : null;
 }
 
+/** Pull one Ollama model, streaming progress text to `onText`. Ollama reports failures (unknown model, disk full) as an {"error"} line inside a 200 stream. */
+export async function ollamaPull(fetchImpl: typeof fetch, base: string, name: string, onText: (text: string) => void) {
+  const response = await fetchImpl(`${base}/api/pull`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, stream: true }) });
+  if (!response.ok || !response.body) throw new Error(`Ollama pull failed (${response.status}).`);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let pending = '';
+  let failure = '';
+  const handle = (line: string) => { try { const row = JSON.parse(line) as { error?: string }; if (row.error) failure = row.error; } catch { /* progress text */ } };
+  while (true) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    const text = decoder.decode(chunk.value, { stream: true });
+    onText(text);
+    pending += text;
+    const lines = pending.split('\n');
+    pending = lines.pop() ?? '';
+    lines.forEach(handle);
+  }
+  handle(pending);
+  if (failure) throw new Error(`Ollama could not pull ${name}: ${failure}`);
+}
+
+/** Compact pull progress: one line per model per 10% instead of Ollama's raw stream. */
+export function pullProgress(name: string, emit: (line: string) => void) {
+  let last = -1;
+  let pending = '';
+  return (text: string) => {
+    pending += text;
+    const lines = pending.split('\n');
+    pending = lines.pop() ?? '';
+    for (const line of lines) {
+      try {
+        const row = JSON.parse(line) as { status?: string; total?: number; completed?: number };
+        if (row.total && row.completed !== undefined) {
+          const pct = Math.floor((row.completed / row.total) * 10) * 10;
+          if (pct > last) { last = pct; emit(`${name}: ${pct}% of ${(row.total / 2 ** 30).toFixed(1)} GB\n`); }
+        } else if (row.status && !/^pulling [0-9a-f]{6,}/.test(row.status)) emit(`${name}: ${row.status}\n`);
+      } catch { /* partial */ }
+    }
+  };
+}
+
 async function runSetup(action: string, model: string | undefined, jobId: string, ctx: Ctx) {
   const { store, docker, fetchImpl } = ctx;
   try {
     if (action === 'pull-model' || action === 'pull-embed') {
       const name = action === 'pull-embed' ? 'nomic-embed-text' : (model || 'gemma4:e4b');
       const base = (process.env.OLLAMA_HOST || lastScan?.ollama?.url || 'http://127.0.0.1:11434').replace(/\/$/, '');
-      const response = await fetchImpl(`${base}/api/pull`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, stream: true }) });
-      if (!response.ok || !response.body) throw new Error(`Ollama pull failed (${response.status}).`);
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      // Ollama reports a failed pull (unknown model, disk full) as an {"error"} line inside a 200 stream.
-      let pending = '';
-      let failure = '';
-      while (true) {
-        const chunk = await reader.read();
-        if (chunk.done) break;
-        const text = decoder.decode(chunk.value, { stream: true });
-        store.appendJob(jobId, text);
-        pending += text;
-        const lines = pending.split('\n');
-        pending = lines.pop() ?? '';
-        for (const line of lines) { try { const row = JSON.parse(line) as { error?: string }; if (row.error) failure = row.error; } catch { /* progress text */ } }
-      }
-      try { const row = JSON.parse(pending) as { error?: string }; if (row.error) failure = row.error; } catch { /* no trailing line */ }
-      if (failure) throw new Error(`Ollama could not pull ${name}: ${failure}`);
+      await ollamaPull(fetchImpl, base, name, (text) => store.appendJob(jobId, text));
+    } else if (action === 'bench-runtime') {
+      const base = (process.env.OLLAMA_HOST || lastScan?.ollama?.url || 'http://127.0.0.1:11434').replace(/\/$/, '');
+      const report = await benchRuntime(fetchImpl, base, { model: model || undefined, log: (line) => store.appendJob(jobId, line) });
+      saveBench(ctx.config.dataDir, report);
     } else if (action === 'start-searxng') {
       if (!(await docker.ping())) throw new Error(`Docker is not available at ${docker.describe()}.`);
       const config = searxngConfig(ctx.config.dataDir);

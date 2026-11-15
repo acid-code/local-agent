@@ -1,3 +1,4 @@
+import { hebrewVariants, stripNiqqud } from '@local-agent/shared';
 import { discoverRules, rulesBrief } from './rules.js';
 import { OWNER_ID } from './accounts.js';
 import type { Store } from './db.js';
@@ -103,38 +104,65 @@ export function skillNudge(turn: number, toolNames: string[]): string {
 // ── Search past chats ────────────────────────────────────────────────────────
 
 const ftsReady = new WeakSet<Store>();
+/**
+ * Past-chat search index. Trigram tokens match inside words, which Hebrew needs (prefixes are glued on: הבית holds בית)
+ * and English does not mind. The older unicode61 table is dropped once.
+ */
 function syncFts(store: Store) {
   if (!ftsReady.has(store)) {
-    store.db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content, message_id UNINDEXED, session_id UNINDEXED, tokenize = 'unicode61 remove_diacritics 2')`);
-    store.db.exec('CREATE TABLE IF NOT EXISTS messages_fts_state (id INTEGER PRIMARY KEY CHECK (id = 1), last_rowid INTEGER NOT NULL)');
+    store.db.exec('DROP TABLE IF EXISTS messages_fts; DROP TABLE IF EXISTS messages_fts_state');
+    store.db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS messages_tri USING fts5(content, message_id UNINDEXED, session_id UNINDEXED, tokenize = 'trigram remove_diacritics 1')`);
+    store.db.exec('CREATE TABLE IF NOT EXISTS messages_tri_state (id INTEGER PRIMARY KEY CHECK (id = 1), last_rowid INTEGER NOT NULL)');
     ftsReady.add(store);
   }
-  const last = (store.db.prepare('SELECT last_rowid AS r FROM messages_fts_state WHERE id = 1').get() as { r: number } | undefined)?.r ?? 0;
+  const last = (store.db.prepare('SELECT last_rowid AS r FROM messages_tri_state WHERE id = 1').get() as { r: number } | undefined)?.r ?? 0;
   const rows = store.db.prepare(`SELECT rowid AS r, id, session_id, content FROM messages WHERE rowid > ? AND role IN ('user', 'assistant') ORDER BY rowid LIMIT 5000`).all(last) as { r: number; id: string; session_id: string; content: string }[];
   if (!rows.length) return;
-  const insert = store.db.prepare('INSERT INTO messages_fts (content, message_id, session_id) VALUES (?, ?, ?)');
-  for (const row of rows) insert.run(row.content.slice(0, 20_000), row.id, row.session_id);
-  store.db.prepare('INSERT INTO messages_fts_state (id, last_rowid) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET last_rowid = excluded.last_rowid').run(rows[rows.length - 1]!.r);
+  const insert = store.db.prepare('INSERT INTO messages_tri (content, message_id, session_id) VALUES (?, ?, ?)');
+  for (const row of rows) insert.run(stripNiqqud(row.content.slice(0, 20_000)), row.id, row.session_id);
+  store.db.prepare('INSERT INTO messages_tri_state (id, last_rowid) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET last_rowid = excluded.last_rowid').run(rows[rows.length - 1]!.r);
   if (rows.length === 5000) syncFts(store);
 }
 
-function ftsQuery(text: string) {
-  const words = text.toLowerCase().match(/[\p{L}\p{N}_]{2,}/gu) ?? [];
-  return words.slice(0, 8).map((word) => `"${word}"*`).join(' OR ');
+/** Trigram MATCH terms: words of 3+ letters, Hebrew ones also without their prefixes. Shorter words cannot match a trigram index. */
+export function ftsQuery(text: string) {
+  const words = stripNiqqud(text.toLowerCase()).match(/[\p{L}\p{N}_]{3,}/gu) ?? [];
+  const terms = new Set<string>();
+  for (const word of words.slice(0, 8)) {
+    for (const form of /[\u05D0-\u05EA]/.test(word) ? hebrewVariants(word) : [word]) if (form.length >= 3) terms.add(form);
+  }
+  return [...terms].map((term) => `"${term.replace(/"/g, '""')}"`).join(' OR ');
+}
+
+/** A short window around the first match, whole words, with matches wrapped in «». Works for Hebrew prefixes too. */
+export function snippetOf(body: string, terms: string[], width = 90) {
+  const lower = body.toLowerCase();
+  const at = terms.map((term) => lower.indexOf(term)).filter((index) => index >= 0).sort((a, b) => a - b)[0] ?? 0;
+  let start = Math.max(0, at - width / 2);
+  let end = Math.min(body.length, at + width);
+  while (start > 0 && /\S/.test(body[start - 1]!)) start -= 1;
+  while (end < body.length && /\S/.test(body[end]!)) end += 1;
+  let text = body.slice(start, end).replace(/\s+/g, ' ').trim();
+  if (terms.length) {
+    const pattern = new RegExp(`(${terms.map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'giu');
+    text = text.replace(pattern, '«$1»');
+  }
+  return `${start > 0 ? '… ' : ''}${text}${end < body.length ? ' …' : ''}`;
 }
 
 export function searchChats(store: Store, opts: { query: string; ownerId: string; exclude?: string | null; limit?: number }) {
   syncFts(store);
   const match = ftsQuery(opts.query);
   if (!match) return [];
-  const hits = store.db.prepare(`SELECT f.session_id AS sid, f.message_id AS mid, snippet(messages_fts, 0, '«', '»', ' … ', 14) AS snip, bm25(messages_fts) AS score
-    FROM messages_fts f JOIN chat_sessions s ON s.id = f.session_id
-    WHERE messages_fts MATCH ? AND s.owner_id = ? AND s.archived = 0 AND (? IS NULL OR f.session_id <> ?)
-    ORDER BY score LIMIT 60`).all(match, opts.ownerId, opts.exclude ?? null, opts.exclude ?? null) as { sid: string; mid: string; snip: string; score: number }[];
+  const hits = store.db.prepare(`SELECT f.session_id AS sid, f.message_id AS mid, f.content AS body, bm25(messages_tri) AS score
+    FROM messages_tri f JOIN chat_sessions s ON s.id = f.session_id
+    WHERE messages_tri MATCH ? AND s.owner_id = ? AND s.archived = 0 AND (? IS NULL OR f.session_id <> ?)
+    ORDER BY score LIMIT 60`).all(match, opts.ownerId, opts.exclude ?? null, opts.exclude ?? null) as { sid: string; mid: string; body: string; score: number }[];
+  const terms = [...new Set((match.match(/"((?:[^"]|"")+)"/g) ?? []).map((term) => term.slice(1, -1).replace(/""/g, '"')))].sort((a, b) => b.length - a.length);
   const grouped = new Map<string, { sid: string; hits: { mid: string; snip: string }[]; score: number }>();
   for (const hit of hits) {
     const group = grouped.get(hit.sid) ?? { sid: hit.sid, hits: [], score: hit.score };
-    if (group.hits.length < 3) group.hits.push({ mid: hit.mid, snip: hit.snip });
+    if (group.hits.length < 3) group.hits.push({ mid: hit.mid, snip: snippetOf(hit.body, terms) });
     grouped.set(hit.sid, group);
   }
   return [...grouped.values()].slice(0, Math.min(10, opts.limit ?? 5)).map((group) => {

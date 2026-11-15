@@ -183,6 +183,24 @@ export class DockerCtl {
     return container.id;
   }
 
+  /** Build an image from an in-memory context. Each log line goes to onLog (for live job status). */
+  async build(tag: string, files: { name: string; content: Buffer | string; mode?: number }[], onLog: (line: string) => void = () => undefined, labels: Record<string, string> = {}) {
+    const { Readable } = await import('node:stream');
+    const stream = await this.api().buildImage(Readable.from([tarFiles(files)]) as never, { t: tag, labels: withManagedLabels(labels), rm: true, forcerm: true } as never);
+    await new Promise<void>((resolve, reject) => {
+      this.api().modem.followProgress(stream as unknown as NodeJS.ReadableStream, (error: Error | null, rows: { error?: string }[]) => {
+        const failed = error?.message || rows?.find((row) => row.error)?.error;
+        failed ? reject(new Error(failed)) : resolve();
+      }, (row: { stream?: string; status?: string; error?: string }) => { const text = row.stream || row.status || row.error; if (text?.trim()) onLog(text.trimEnd()); });
+    });
+  }
+
+  /** State of one managed container by name, or null when there is none. */
+  async containerState(name: string): Promise<{ id: string; state: string; status: string } | null> {
+    const row = (await this.list()).find((item) => item.name === name);
+    return row ? { id: row.id, state: row.state, status: row.status } : null;
+  }
+
   async hasImage(image: string) {
     try { await this.api().getImage(image).inspect(); return true; } catch { return false; }
   }
@@ -363,6 +381,12 @@ export function mcpContainerSpec(input: {
 }
 
 /** A one-file ustar archive, enough for Docker putArchive. */
+/** Several files in one tar (a docker build context). */
+export function tarFiles(files: { name: string; content: Buffer | string; mode?: number }[]): Buffer {
+  const parts = files.map((file) => { const one = tarFile(file.name, Buffer.isBuffer(file.content) ? file.content : Buffer.from(file.content), file.mode); return one.subarray(0, one.length - 1024); });
+  return Buffer.concat([...parts, Buffer.alloc(1024, 0)]);
+}
+
 export function tarFile(name: string, content: Buffer, mode = 0o644): Buffer {
   const header = Buffer.alloc(512, 0);
   const put = (value: string, offset: number, length: number) => header.write(value.slice(0, length), offset, length, 'utf8');

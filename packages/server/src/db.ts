@@ -26,6 +26,10 @@ export interface Agent {
   notify: 'all' | 'mute';
   /** Gallery persona this one was added from, if any. */
   templateId?: string | null;
+  /** Reply language: auto follows the member, match follows each message, or pinned. */
+  language?: 'auto' | 'match' | 'en' | 'he';
+  /** Hebrew cleanup pass for this persona; inherit uses the member's setting. */
+  hebrewCleanup?: 'inherit' | 'auto' | 'on' | 'off';
   createdAt: string; updatedAt: string; ownerId: string;
 }
 export interface Room { id: string; name: string; createdAt: string; agentIds: string[] }
@@ -247,6 +251,8 @@ export class Store {
     addAgentCol('last_read_at', `last_read_at TEXT`);
     addAgentCol('notify', `notify TEXT NOT NULL DEFAULT 'all'`);
     addAgentCol('template_id', 'template_id TEXT');
+    addAgentCol('language', `language TEXT NOT NULL DEFAULT 'auto'`);
+    addAgentCol('hebrew_cleanup', `hebrew_cleanup TEXT NOT NULL DEFAULT 'inherit'`);
     // Agent self-management and background helpers.
     const colsOf = (table: string) => this.many<Raw>(`PRAGMA table_info(${table})`).map((row) => String(row.name));
     const addCol = (table: string, name: string, ddl: string) => { if (!colsOf(table).includes(name)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`); };
@@ -505,9 +511,9 @@ export class Store {
     const current = this.getAgent(id);
     if (!current) return null;
     const next = { ...current, ...patch, updatedAt: now() };
-    this.db.prepare(`UPDATE agents SET name=?, title=?, description=?, system_prompt=?, model_id=?, routing=?, strategy=?, tool_allowlist=?, memory_enabled=?, avatar_kind=?, avatar_ref=?, accent=?, emoji=?, pinned=?, hidden=?, sort_order=?, notify=?, template_id=?, updated_at=? WHERE id=?`).run(
+    this.db.prepare(`UPDATE agents SET name=?, title=?, description=?, system_prompt=?, model_id=?, routing=?, strategy=?, tool_allowlist=?, memory_enabled=?, avatar_kind=?, avatar_ref=?, accent=?, emoji=?, pinned=?, hidden=?, sort_order=?, notify=?, template_id=?, language=?, hebrew_cleanup=?, updated_at=? WHERE id=?`).run(
       next.name, next.title, next.description, next.systemPrompt, next.modelId, next.routing, next.strategy, JSON.stringify(next.toolAllowlist), next.memoryEnabled ? 1 : 0,
-      next.avatarKind, next.avatarRef, next.accent, next.emoji, next.pinned ? 1 : 0, next.hidden ? 1 : 0, next.sortOrder, next.notify === 'mute' ? 'mute' : 'all', next.templateId ?? null, next.updatedAt, id,
+      next.avatarKind, next.avatarRef, next.accent, next.emoji, next.pinned ? 1 : 0, next.hidden ? 1 : 0, next.sortOrder, next.notify === 'mute' ? 'mute' : 'all', next.templateId ?? null, next.language || 'auto', next.hebrewCleanup || 'inherit', next.updatedAt, id,
     );
     if (patch.workshopIds) this.setAgentWorkshops(id, patch.workshopIds);
     return this.getAgent(id);
@@ -670,7 +676,7 @@ export class Store {
 
   updateMessageContent(id: string, content: string) {
     this.db.prepare('UPDATE messages SET content = ? WHERE id = ?').run(content, id);
-    try { this.db.prepare('UPDATE messages_fts SET content = ? WHERE message_id = ?').run(content.slice(0, 20_000), id); } catch { /* search index not built yet */ }
+    try { this.db.prepare('UPDATE messages_tri SET content = ? WHERE message_id = ?').run(content.slice(0, 20_000).replace(/[\u0591-\u05C7]/g, ''), id); } catch { /* search index not built yet */ }
   }
 
   archiveMessagesAfter(sessionId: string, messageId: string) {
@@ -1066,6 +1072,7 @@ function mapAgent(row: Raw): Agent {
     avatarKind: kind === 'builtin' || kind === 'upload' ? kind : 'initials', avatarRef: String(row.avatar_ref || ''), accent: String(row.accent || '#e4b56a'), emoji: String(row.emoji || ''),
     pinned: Boolean(row.pinned), hidden: Boolean(row.hidden), sortOrder: Number(row.sort_order || 0), lastReadAt: row.last_read_at ? String(row.last_read_at) : null,
     unread: 0, workshopIds: [], notify: row.notify === 'mute' ? 'mute' : 'all', templateId: row.template_id ? String(row.template_id) : null,
+    language: (['match', 'en', 'he'].includes(String(row.language)) ? String(row.language) : 'auto') as Agent['language'], hebrewCleanup: (['auto', 'on', 'off'].includes(String(row.hebrew_cleanup)) ? String(row.hebrew_cleanup) : 'inherit') as Agent['hebrewCleanup'],
     createdAt: String(row.created_at), updatedAt: String(row.updated_at), ownerId: String(row.owner_id || 'owner'),
   };
 }

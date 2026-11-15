@@ -130,6 +130,25 @@ function resolveRole(role: AutoRole, map: AutoMap, models: AutoCandidate[]): { m
   return { model: main, reasoning: false, quotaFallback: false };
 }
 
+/**
+ * How well a model writes Hebrew, 0 = not at all. Gemini is best; Gemma and Qwen handle it, bigger is better;
+ * tiny English-first models (SmolLM, TinyLlama, Phi) are poor. Used only to rank, never to block.
+ */
+export function hebrewScore(model: Pick<AutoCandidate, 'apiName' | 'name' | 'local' | 'providerKind'>): number {
+  const label = `${model.apiName} ${model.name}`.toLowerCase();
+  if (!model.local && model.providerKind === 'gemini') return 100;
+  if (/smollm|tinyllama|phi|nomic|embed/.test(label)) return 0;
+  const size = Number(label.match(/(\d+(?:\.\d+)?)b\b/)?.[1] ?? (label.includes('e4b') ? 4 : label.includes('e2b') ? 2 : 3));
+  const family = /gemma|aya|command-r|dicta/.test(label) ? 1 : /qwen/.test(label) ? 0.85 : /llama|mistral/.test(label) ? 0.6 : 0.5;
+  return Math.min(95, Math.round((10 + Math.log2(1 + size) * 15) * family));
+}
+
+/** The strongest Hebrew writer among usable chat models: Gemini when its quota is open, else the best local that fits. */
+export function pickHebrewModel(models: AutoCandidate[], fits?: (model: AutoCandidate) => boolean): AutoCandidate | undefined {
+  const pool = models.filter((model) => model.enabled && !model.embedding && model.providerKind !== 'rehearsal' && (model.local ? (fits ? fits(model) : true) : model.providerKind === 'gemini' && model.quotaOpen !== false));
+  return pool.map((model) => ({ model, score: hebrewScore(model) })).filter((row) => row.score > 0).sort((a, b) => b.score - a.score)[0]?.model;
+}
+
 function taskRole(text: string, stage?: 'plan' | 'implement'): AutoRole {
   if (stage === 'implement') return 'coder';
   if (stage === 'plan') return 'thinking';
@@ -154,6 +173,10 @@ export function decideAuto(input: {
   models: AutoCandidate[];
   pinId?: string | null;
   residentLarge?: string[];
+  /** The member reads Hebrew or the message is Hebrew: prefer the strongest Hebrew writer (except for code turns). */
+  hebrew?: boolean;
+  /** Local models that fit the RAM budget right now; Hebrew routing skips the rest. */
+  fits?: (model: AutoCandidate) => boolean;
 }): AutoDecision {
   const command = readChatCommand(input.text);
   const body = command.rest || input.text;
@@ -183,7 +206,18 @@ export function decideAuto(input: {
     role = stepUp(base);
     why = failures >= 2 ? 'failures' : think ? 'think' : 'overflow';
   }
-  const resolved = resolveRole(role, input.map, input.models);
+  let resolved = resolveRole(role, input.map, input.models);
+  if (input.hebrew && role !== 'coder' && why !== 'smart') {
+    const hebrew = pickHebrewModel(input.models, input.fits);
+    if (hebrew && hebrewScore(hebrew) > hebrewScore(resolved.model) && (hebrew.local || why !== 'task' || hebrewScore(resolved.model) < 60)) {
+      resolved = { model: hebrew, reasoning: resolved.reasoning, quotaFallback: false };
+      const decision = {
+        role, modelId: hebrew.id, modelName: hebrew.name, reasoning: resolved.reasoning, switched: hebrew.id !== main.id, escalated: why !== 'task',
+        reason: `Switched to ${hebrew.name} — it writes the best Hebrew of the models that fit.`, unload: unloadOf(hebrew), trace: `auto:hebrew:${role}`,
+      };
+      return decision;
+    }
+  }
   const switched = why !== 'task' || resolved.model.id !== main.id || resolved.reasoning;
   const escalated = why !== 'task';
   let reason = `Staying on ${resolved.model.name}.`;

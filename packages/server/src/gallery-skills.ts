@@ -4,6 +4,37 @@ const s = (slug: string, name: string, description: string, body: string): Galle
 
 /** Skills shipped with the gallery. Several personas share some of them (they live in one catalog). */
 export const SK = {
+  // ── Slides ──
+  slides: s('hebrew-slides', 'Slides (Hebrew and English)', 'Build a real .pptx deck with make_slides: outline first, one idea per slide, charts from real numbers, speaker notes, right-to-left Hebrew with an embedded Hebrew font, and edit rounds from the saved spec.', `
+## When
+The user asks for a presentation, deck, slides, a pitch, a lecture or a talk, in Hebrew or English.
+
+## Steps
+1. Ask at most two questions if they matter: audience and length (default 6–10 slides), language (default: the user's), any numbers or files to use.
+2. Write a one-line outline per slide in the chat and wait for an OK when the deck is longer than 6 slides. Otherwise build it right away.
+3. Call **make_slides** with the whole deck JSON:
+   - First slide layout "title" (title + subtitle). Use "section" to open a part, "quote" for one strong sentence.
+   - 3–5 bullets per slide, each under ~12 words. One idea per slide.
+   - Charts only from numbers the user gave or you found and cited: chart {type, labels, series:[{name, values}]}; one number per label.
+   - speaker notes in "notes": 2–4 sentences the presenter can say, in the deck's language.
+   - Pictures: image {prompt} makes one with the image model (describe the scene, no text in the picture); image {fileId} reuses a file.
+   - lang "he" for Hebrew (right-to-left, embedded Heebo or Assistant font), "en" for English, or "auto".
+4. Reply with the [file:<id>] and a short list of the slides. Offer one round of changes.
+
+## Hebrew
+- Natural Modern Hebrew, no English words except names, brands and technical terms. Keep gender consistent; address the audience in plural.
+- Numbers, dates and ₪ stay as digits. Do not translate product names.
+- Headline style: short noun phrases ("הכנסות לפי חודש"), not full sentences.
+
+## Edit rounds
+1. Call **read_slides** with the deck's file id to get its JSON.
+2. Change only what was asked (wording, order, a chart, add or drop a slide).
+3. Call make_slides with the new JSON and revise_file_id = the old file id. A new version (v2, v3…) is saved next to the old one.
+4. Say what changed in one or two lines.
+
+## Never
+- Invent numbers, quotes or sources for charts.
+- Put more than ~60 words on a slide; move the rest to notes.`),
   // ── Research ──
   triangulate: s('source-triangulation', 'Source triangulation', 'Verify a claim with three independent sources of different types before stating it as fact.', `
 ## When

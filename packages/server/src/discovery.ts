@@ -212,6 +212,10 @@ export function setupPreview(action: string, model?: string) {
   if (action === 'start-whisper') {
     return { command: 'docker run -d --name local-agent-whisper --restart unless-stopped -p 8091:8000 fedirz/faster-whisper-server:latest-cpu', detail: 'Optional faster-whisper container for push-to-talk. Nothing runs until you confirm.' };
   }
+  if (action === 'bench-runtime') {
+    const name = model && /^[a-zA-Z0-9_.:/-]+$/.test(model) ? model : '';
+    return { command: `node packages/server/dist/bench-cli.js ${name}`.trim(), detail: 'Runs one short prompt through Ollama on the CPU and with GPU offload (and llama-bench when LA_BENCH_GGUF is set), then recommends a runtime. Takes a minute or two; nothing is installed or changed.' };
+  }
   if (action === 'start-kokoro') {
     return { command: 'docker run -d --name local-agent-kokoro --restart unless-stopped -p 8880:8880 ghcr.io/remsky/kokoro-fastapi-cpu:latest', detail: 'Optional Kokoro TTS container. Nothing runs until you confirm.' };
   }

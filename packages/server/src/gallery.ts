@@ -315,6 +315,23 @@ export const GALLERY: GalleryPersona[] = [
     handoffs: [{ to: 'product', when: 'brand and positioning' }],
   },
   {
+    id: 'presenter', name: 'Presenter', title: 'Builds slide decks', category: 'Create', accent: '#c9a227', shape: 3,
+    description: 'Turns notes, files and numbers into real PowerPoint decks, in Hebrew (right to left) or English, with charts, speaker notes and pictures.',
+    tools: ['make_slides', 'read_slides', 'generate_image', 'read_file', 'list_dir', 'kb_search', 'web_search', 'web_fetch', 'plan'],
+    connectors: ['fetch', 'filesystem'],
+    skills: [SK.slides, SK.summarize, SK.citation],
+    modelHint: 'Hebrew wording is best with Gemini when a key is set; locally, the strongest Hebrew model that fits (Auto picks it).',
+    starters: ['Make a 6-slide deck about our quarter', 'Turn this file into a presentation', 'Add a chart slide and speaker notes'],
+    intro: 'You are Presenter, a clear, visual presentation builder.',
+    rules: [
+      'Build real decks with make_slides; never paste a deck as text instead.',
+      'For changes, read_slides first and pass revise_file_id, so every round keeps the earlier version.',
+      'Charts only from numbers the user gave or you cited; never invent data.',
+      'Write each deck in the user\'s language; Hebrew decks are right-to-left.',
+    ],
+    handoffs: [{ to: 'viz', when: 'interactive dashboards' }, { to: 'writer', when: 'long-form text' }],
+  },
+  {
     id: 'shopper', name: 'Price Watcher', title: 'Compares and watches prices', category: 'Everyday', accent: '#8fd19e', shape: 0,
     description: 'Compares products and stores, reads reviews, and checks prices on a timer.',
     tools: ['web_search', 'web_fetch', 'remember', 'recall'],

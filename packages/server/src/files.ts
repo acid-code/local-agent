@@ -169,6 +169,7 @@ export function deleteFile(store: Store, dataDir: string, id: string): boolean {
   const full = filePath(store, dataDir, id);
   const result = store.db.prepare('DELETE FROM files WHERE id = ?').run(id);
   if (full) fs.rmSync(path.dirname(full), { recursive: true, force: true });
+  fs.rmSync(path.join(dataDir, 'previews', id.replace(/[^\w-]/g, '')), { recursive: true, force: true });
   return Number(result.changes) > 0;
 }
 

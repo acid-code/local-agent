@@ -6,6 +6,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import { AtSign, Check, Copy, CornerUpLeft, FileText, Quote } from 'lucide-react';
 import { fileMeta, linkCitations, parseCiteHref, type Cite } from '../lib/files';
+import { t } from '../i18n';
 
 /** How citation chips and code-block quotes reach the chat. */
 export interface CiteHandlers { open: (cite: Cite) => void; quoteCode?: (code: string, sourceId: string) => void }
@@ -24,7 +25,7 @@ export function CiteChip({ cite, children }: { cite: Cite; children?: ReactNode 
     ? <><FileName id={cite.id} fallback="file" />{cite.anchor ? ` · ${cite.anchor.replace('=', ' ')}` : ''}</>
     : children;
   return (
-    <button type="button" className={`cite-chip ${cite.kind}`} onClick={(event) => { event.preventDefault(); handlers?.open(cite); }} title={cite.kind === 'msg' ? 'Jump to the quoted message' : cite.kind === 'file' ? 'Open the file preview' : 'Open in the preview'}>
+    <button type="button" className={`cite-chip ${cite.kind}`} onClick={(event) => { event.preventDefault(); handlers?.open(cite); }} title={cite.kind === 'msg' ? t('Jump to the quoted message') : cite.kind === 'file' ? t('Open the file preview') : t('Open in the preview')}>
       {icon}<span className="ellipsis">{label}</span>
     </button>
   );
@@ -74,8 +75,8 @@ function CodeBlock({ children, sourceId, onQuote }: { children: ReactNode; sourc
       <div className="code-head">
         <span className="code-lang">{lang}</span>
         <span className="spacer" />
-        {onQuote && sourceId && <button type="button" className="code-btn" title="Quote this code in your reply" onClick={() => onQuote(textOf(children), sourceId)}><Quote size={13} aria-hidden /> Quote</button>}
-        <button type="button" className="code-btn" title="Copy code" onClick={() => { void navigator.clipboard?.writeText(textOf(children)).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }); }}>{copied ? <Check size={13} aria-hidden /> : <Copy size={13} aria-hidden />} {copied ? 'Copied' : 'Copy'}</button>
+        {onQuote && sourceId && <button type="button" className="code-btn" title={t('Quote this code in your reply')} onClick={() => onQuote(textOf(children), sourceId)}><Quote size={13} aria-hidden />{' '}{t('Quote')}</button>}
+        <button type="button" className="code-btn" title={t('Copy code')} onClick={() => { void navigator.clipboard?.writeText(textOf(children)).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }); }}>{copied ? <Check size={13} aria-hidden /> : <Copy size={13} aria-hidden />} {copied ? t('Copied') : t('Copy')}</button>
       </div>
       <pre>{children}</pre>
     </div>

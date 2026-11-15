@@ -4,6 +4,7 @@ import { api, post } from '../lib/api';
 import { humanSize, rawUrl, type FileMeta } from '../lib/files';
 import { errorText, toast } from '../lib/toast';
 import { Markdown } from './Markdown';
+import { t, fmt } from '../i18n';
 
 interface Helper { id: string; agentName: string; task: string; status: 'running' | 'waiting' | 'done' | 'failed' | 'stopped'; result: string | null; error: string | null; childSessionId: string; childRunId: string | null; cli: string | null; maxSteps: number; timeoutMs: number; createdAt: string; endedAt: string | null }
 interface Approval { id: string; runId: string; reason: string }
@@ -18,7 +19,7 @@ const STATUS_LABEL: Record<Helper['status'], string> = { running: 'Running', wai
 const ago = (iso?: string | null) => {
   if (!iso) return '';
   const minutes = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
-  return minutes < 1 ? 'just now' : minutes < 60 ? `${minutes} min ago` : minutes < 1440 ? `${Math.round(minutes / 60)} h ago` : new Date(iso).toLocaleDateString();
+  return minutes < 1440 ? fmt.ago(iso) : fmt.date(iso);
 };
 
 /** Everything this chat set in motion: helpers, timers and triggers it created, files both ways, and replies that can be rolled back. */
@@ -49,18 +50,18 @@ export function ContextPanel({ sessionId, tick, onClose, onOpenFile, onRolledBac
 
   if (transcript) {
     return (
-      <aside className="side-panel open context-pane" aria-label="Helper transcript">
+      <aside className="side-panel open context-pane" aria-label={t('Helper transcript')}>
         <div className="panel-head pane-head">
-          <button className="icon-btn" aria-label="Back to chat context" onClick={() => setTranscript(null)}><ArrowLeft size={16} /></button>
-          <strong className="grow ellipsis">{transcript.helper.agentName} · helper</strong>
+          <button className="icon-btn" aria-label={t('Back to chat context')} onClick={() => setTranscript(null)}><ArrowLeft size={16} /></button>
+          <strong className="grow ellipsis">{transcript.helper.agentName}{' '}{t('· helper')}</strong>
           <span className={`ctx-status ${transcript.helper.status}`}>{STATUS_LABEL[transcript.helper.status]}</span>
-          <button className="icon-btn" aria-label="Close" onClick={onClose}><X size={16} /></button>
+          <button className="icon-btn" aria-label={t('Close')} onClick={onClose}><X size={16} /></button>
         </div>
         <div className="panel-body ctx-transcript">
-          <p className="faint">Read-only. This helper ran on its own with up to {transcript.helper.maxSteps} steps and {Math.round(transcript.helper.timeoutMs / 60000)} min.</p>
+          <p className="faint">{t('Read-only. This helper ran on its own with up to')}{' '}{transcript.helper.maxSteps}{' '}{t('steps and')}{' '}{Math.round(transcript.helper.timeoutMs / 60000)} min.</p>
           {transcript.messages.map((row) => row.role === 'tool'
             ? <details key={row.id} className="ctx-tool"><summary className="faint">{row.toolName || 'tool'} output</summary><pre className="mono tool-output">{row.content.slice(0, 3000)}</pre></details>
-            : <div key={row.id} className={`ctx-msg ${row.role}`}><small className="faint">{row.role === 'user' ? 'Task' : transcript.helper.agentName}</small><Markdown text={row.content} sourceId={row.id} /></div>)}
+            : <div key={row.id} className={`ctx-msg ${row.role}`}><small className="faint">{row.role === 'user' ? t('Task') : transcript.helper.agentName}</small><Markdown text={row.content} sourceId={row.id} /></div>)}
         </div>
       </aside>
     );
@@ -68,13 +69,13 @@ export function ContextPanel({ sessionId, tick, onClose, onOpenFile, onRolledBac
 
   const files = data?.files;
   return (
-    <aside className="side-panel open context-pane" aria-label="Chat context">
-      <div className="panel-head pane-head"><strong className="grow">This chat</strong><button className="icon-btn" aria-label="Close" onClick={onClose}><X size={16} /></button></div>
+    <aside className="side-panel open context-pane" aria-label={t('Chat context')}>
+      <div className="panel-head pane-head"><strong className="grow">{t('This chat')}</strong><button className="icon-btn" aria-label={t('Close')} onClick={onClose}><X size={16} /></button></div>
       {!data ? <div className="panel-body"><div className="skeleton-lines"><span /><span /></div></div> : (
         <div className="panel-body pane-overview">
           <section className="pane-section">
-            <h4>Helpers</h4>
-            {data.helpers.length === 0 ? <p className="faint">None yet. A persona can start helpers in the background for side tasks.</p> : (
+            <h4>{t('Helpers')}</h4>
+            {data.helpers.length === 0 ? <p className="faint">{t('None yet. A persona can start helpers in the background for side tasks.')}</p> : (
               <ul className="ctx-list">
                 {data.helpers.map((helper) => (
                   <li key={helper.id} className="ctx-item">
@@ -89,13 +90,13 @@ export function ContextPanel({ sessionId, tick, onClose, onOpenFile, onRolledBac
                     {helper.error && helper.status !== 'done' && <p className="faint ctx-err">{helper.error}</p>}
                     <div className="row ctx-actions">
                       <span className="faint grow">{ago(helper.endedAt || helper.createdAt)}</span>
-                      {(helper.status === 'running' || helper.status === 'waiting') && <button className="btn ghost small" onClick={() => void act(() => post(`/api/helpers/${helper.id}/stop`, {}), 'Helper stopped.')}><Square size={13} aria-hidden /> Stop</button>}
-                      <button className="btn ghost small" onClick={() => void openTranscript(helper)}>Transcript</button>
+                      {(helper.status === 'running' || helper.status === 'waiting') && <button className="btn ghost small" onClick={() => void act(() => post(`/api/helpers/${helper.id}/stop`, {}), 'Helper stopped.')}><Square size={13} aria-hidden />{' '}{t('Stop')}</button>}
+                      <button className="btn ghost small" onClick={() => void openTranscript(helper)}>{t('Transcript')}</button>
                     </div>
                     {data.approvals.filter((row) => row.runId === helper.childRunId).map((approval) => (
                       <div key={approval.id} className="ctx-approval">
                         <p dir="auto">{approval.reason}</p>
-                        <div className="row"><button className="btn primary small" onClick={() => void act(() => post(`/api/approvals/${approval.id}`, { decision: 'approve' }))}>Approve</button><button className="btn ghost small" onClick={() => void act(() => post(`/api/approvals/${approval.id}`, { decision: 'deny' }))}>Deny</button></div>
+                        <div className="row"><button className="btn primary small" onClick={() => void act(() => post(`/api/approvals/${approval.id}`, { decision: 'approve' }))}>{t('Approve')}</button><button className="btn ghost small" onClick={() => void act(() => post(`/api/approvals/${approval.id}`, { decision: 'deny' }))}>{t('Deny')}</button></div>
                       </div>
                     ))}
                   </li>
@@ -105,25 +106,25 @@ export function ContextPanel({ sessionId, tick, onClose, onOpenFile, onRolledBac
           </section>
 
           <section className="pane-section">
-            <h4>Timers and triggers</h4>
-            {data.timers.length + data.triggers.length === 0 ? <p className="faint">Nothing scheduled from this chat.</p> : (
+            <h4>{t('Timers and triggers')}</h4>
+            {data.timers.length + data.triggers.length === 0 ? <p className="faint">{t('Nothing scheduled from this chat.')}</p> : (
               <ul className="pane-list ctx-sched">
                 {data.timers.map((timer) => (
                   <li key={timer.id}>
                     <CalendarClock size={14} aria-hidden />
-                    <span className="grow ellipsis" title={timer.nextRunAt ? `Next: ${new Date(timer.nextRunAt).toLocaleString()}` : undefined}>{timer.name}{!timer.enabled && <span className="faint"> · paused</span>}</span>
+                    <span className="grow ellipsis" title={timer.nextRunAt ? t('Next: {0}', [fmt.dateTime(timer.nextRunAt)]) : undefined}>{timer.name}{!timer.enabled && <span className="faint">{' '}{t('· paused')}</span>}</span>
                     <span className="faint mono">{timer.cron}</span>
-                    <button className="icon-btn sm" aria-label={timer.enabled ? `Pause ${timer.name}` : `Resume ${timer.name}`} onClick={() => void act(() => api(`/api/schedules/${timer.id}`, { method: 'PATCH', body: JSON.stringify(timer.enabled ? { enabled: false } : { enabled: true, cron: timer.cron }) }))}>{timer.enabled ? <Pause size={13} /> : <Play size={13} />}</button>
-                    <button className="icon-btn sm" aria-label={`Delete ${timer.name}`} onClick={() => { if (window.confirm(`Delete timer “${timer.name}”?`)) void act(() => api(`/api/schedules/${timer.id}`, { method: 'DELETE' }), 'Timer deleted.'); }}><Trash2 size={13} /></button>
+                    <button className="icon-btn sm" aria-label={timer.enabled ? t('Pause {0}', [timer.name]) : t('Resume {0}', [timer.name])} onClick={() => void act(() => api(`/api/schedules/${timer.id}`, { method: 'PATCH', body: JSON.stringify(timer.enabled ? { enabled: false } : { enabled: true, cron: timer.cron }) }))}>{timer.enabled ? <Pause size={13} /> : <Play size={13} />}</button>
+                    <button className="icon-btn sm" aria-label={t('Delete {0}', [timer.name])} onClick={() => { if (window.confirm(t('Delete timer “{0}”?', [timer.name]))) void act(() => api(`/api/schedules/${timer.id}`, { method: 'DELETE' }), 'Timer deleted.'); }}><Trash2 size={13} /></button>
                   </li>
                 ))}
                 {data.triggers.map((trigger) => (
                   <li key={trigger.id}>
                     <Zap size={14} aria-hidden />
-                    <span className="grow ellipsis">{trigger.name}{!trigger.enabled && <span className="faint"> · paused</span>}</span>
+                    <span className="grow ellipsis">{trigger.name}{!trigger.enabled && <span className="faint">{' '}{t('· paused')}</span>}</span>
                     <span className="faint">{trigger.kind}</span>
-                    <button className="icon-btn sm" aria-label={trigger.enabled ? `Pause ${trigger.name}` : `Resume ${trigger.name}`} onClick={() => void act(() => api(`/api/triggers/${trigger.id}`, { method: 'PATCH', body: JSON.stringify({ enabled: !trigger.enabled }) }))}>{trigger.enabled ? <Pause size={13} /> : <Play size={13} />}</button>
-                    <button className="icon-btn sm" aria-label={`Delete ${trigger.name}`} onClick={() => { if (window.confirm(`Delete trigger “${trigger.name}”?`)) void act(() => api(`/api/triggers/${trigger.id}`, { method: 'DELETE' }), 'Trigger deleted.'); }}><Trash2 size={13} /></button>
+                    <button className="icon-btn sm" aria-label={trigger.enabled ? t('Pause {0}', [trigger.name]) : t('Resume {0}', [trigger.name])} onClick={() => void act(() => api(`/api/triggers/${trigger.id}`, { method: 'PATCH', body: JSON.stringify({ enabled: !trigger.enabled }) }))}>{trigger.enabled ? <Pause size={13} /> : <Play size={13} />}</button>
+                    <button className="icon-btn sm" aria-label={t('Delete {0}', [trigger.name])} onClick={() => { if (window.confirm(t('Delete trigger “{0}”?', [trigger.name]))) void act(() => api(`/api/triggers/${trigger.id}`, { method: 'DELETE' }), 'Trigger deleted.'); }}><Trash2 size={13} /></button>
                   </li>
                 ))}
               </ul>
@@ -131,21 +132,21 @@ export function ContextPanel({ sessionId, tick, onClose, onOpenFile, onRolledBac
           </section>
 
           <section className="pane-section">
-            <h4>Files</h4>
-            <FileGroup title="From you" files={files!.uploads} empty="No uploads in this chat." onOpen={onOpenFile} />
-            <FileGroup title="From agents" files={files!.produced} empty="Nothing produced yet." onOpen={onOpenFile} />
+            <h4>{t('Files')}</h4>
+            <FileGroup title={t('From you')} files={files!.uploads} empty="No uploads in this chat." onOpen={onOpenFile} />
+            <FileGroup title={t('From agents')} files={files!.produced} empty="Nothing produced yet." onOpen={onOpenFile} />
           </section>
 
           {data.checkpoints.length > 0 && (
             <section className="pane-section">
-              <h4>File edits</h4>
+              <h4>{t('File edits')}</h4>
               <ul className="pane-list">
                 {data.checkpoints.map((checkpoint) => (
                   <li key={checkpoint.runId}>
                     <FileText size={14} aria-hidden />
                     <span className="grow ellipsis" title={checkpoint.labels}>{checkpoint.edits} edit{checkpoint.edits === 1 ? '' : 's'} · {checkpoint.labels}</span>
                     <span className="faint">{ago(checkpoint.createdAt)}</span>
-                    <button className="btn ghost small" title="Undo every file change this reply made" onClick={() => { if (window.confirm(`Undo ${checkpoint.edits} file edit${checkpoint.edits === 1 ? '' : 's'} from this reply?`)) void act(async () => { await post(`/api/runs/${checkpoint.runId}/rollback`, {}); onRolledBack(); }, 'Rolled back.'); }}><RotateCcw size={13} aria-hidden /> Roll back</button>
+                    <button className="btn ghost small" title={t('Undo every file change this reply made')} onClick={() => { if (window.confirm(t('Undo {0} file edit{1} from this reply?', [checkpoint.edits, checkpoint.edits === 1 ? '' : 's']))) void act(async () => { await post(`/api/runs/${checkpoint.runId}/rollback`, {}); onRolledBack(); }, 'Rolled back.'); }}><RotateCcw size={13} aria-hidden />{' '}{t('Roll back')}</button>
                   </li>
                 ))}
               </ul>
@@ -168,7 +169,7 @@ function FileGroup({ title, files, empty, onOpen }: { title: string; files: Prod
               <FileText size={14} aria-hidden />
               <button className="link-btn grow ellipsis" onClick={() => onOpen(file.id)}>{file.name}</button>
               {file.helperId && <span className="faint">helper</span>}
-              <a className="faint" href={rawUrl(file.id, true)} aria-label={`Download ${file.name}`}>{humanSize(file.size)}</a>
+              <a className="faint" href={rawUrl(file.id, true)} aria-label={t('Download {0}', [file.name])}>{humanSize(file.size)}</a>
             </li>
           ))}
         </ul>

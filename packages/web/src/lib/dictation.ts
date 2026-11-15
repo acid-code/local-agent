@@ -1,3 +1,4 @@
+import { t } from '../i18n';
 /** Browser speech recognition (Chrome/Edge: webkitSpeechRecognition). Used when the server has no Whisper. */
 interface RecognitionLike {
   lang: string; continuous: boolean; interimResults: boolean;
@@ -16,10 +17,11 @@ export function browserDictationSupported() {
 export function startDictation(onText: (text: string) => void, onError: (message: string) => void): () => void {
   const w = window as unknown as { SpeechRecognition?: new () => RecognitionLike; webkitSpeechRecognition?: new () => RecognitionLike };
   const Ctor = w.SpeechRecognition || w.webkitSpeechRecognition;
-  if (!Ctor) { onError('This browser has no built-in dictation.'); return () => undefined; }
+  if (!Ctor) { onError(t('This browser has no built-in dictation.')); return () => undefined; }
   const rec = new Ctor();
   const chosen = (() => { try { return localStorage.getItem('la-voice-lang'); } catch { return null; } })();
-  rec.lang = chosen && chosen !== 'auto' ? chosen : navigator.language || 'en-US';
+  // Browser dictation needs one language: the chosen voice language, else Hebrew when the UI is Hebrew.
+  rec.lang = chosen && chosen !== 'auto' ? chosen : document.documentElement.lang === 'he' ? 'he-IL' : navigator.language || 'en-US';
   rec.continuous = true;
   rec.interimResults = false;
   rec.onresult = (event) => {

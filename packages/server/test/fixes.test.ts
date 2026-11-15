@@ -432,10 +432,10 @@ describe('knowledge base uploads', () => {
     expect(blank.json().error).toMatch(/blank.txt has no text to index/);
     const png = await app.inject({ method: 'POST', url: `/api/kb/collections/${id}/files`, cookies, payload: { files: [{ name: 'pic.png', contentBase64: b64(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 1])) }] } });
     expect(png.statusCode).toBe(400);
-    expect(png.json().error).toMatch(/binary file|Unsupported file type \.png/);
+    expect(png.json().error).toMatch(/binary file|Unsupported file type \.png|No OCR engine|OCR service|vision/);
     const mixed = await app.inject({ method: 'POST', url: `/api/kb/collections/${id}/files`, cookies, payload: { files: [{ name: 'ok.txt', contentBase64: b64('The secret bird name is BLUE HERON.') }, { name: 'pic.png', contentBase64: b64('x') }] } });
     expect(mixed.statusCode).toBe(200);
-    expect(mixed.json().results[1].error).toMatch(/Unsupported file type \.png/);
+    expect(mixed.json().results[1].error).toMatch(/Unsupported file type \.png|No OCR engine|OCR service/);
     const missing = await app.inject({ method: 'POST', url: '/api/kb/collections/nope/files', cookies, payload: { files: [{ name: 'a.txt', contentBase64: b64('hi') }] } });
     expect(missing.statusCode).toBe(404);
 

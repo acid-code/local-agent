@@ -1,0 +1,127 @@
+import fs from 'node:fs';
+import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
+import { hebrewScore, isHebrewText } from '@local-agent/shared';
+import { accountOf, getAccount, mustOwn, OWNER_ID } from './accounts.js';
+import type { Store } from './db.js';
+import type { DockerCtl } from './docker.js';
+import type { Engine } from './engine.js';
+import { roughModelGiB } from './engine.js';
+import { filePath, getFile } from './files.js';
+import { cleanupHebrew } from './hebrew-cleanup.js';
+import { getLanguage } from './language.js';
+import { ollamaRoot } from './ollama.js';
+import { buildService, IMAGE_EXT, liveRunners, recognize, serviceStatus, startService, type OcrMode, type OcrResult, type ServiceId } from './ocr.js';
+
+/**
+ * OCR endpoints, the agent tool's reader, background indexing of uploaded images, and the app's own service containers
+ * (OCR, Piper) with download-ahead and live job logs.
+ */
+export function registerOcr(app: FastifyInstance, deps: { store: Store; engine: Engine; docker: DockerCtl; fetchImpl: typeof fetch; dataDir: string }) {
+  const { store, engine, docker, fetchImpl, dataDir } = deps;
+  const fail = (statusCode: number, message: string) => Object.assign(new Error(message), { statusCode });
+
+  async function runnersFor(ownerId: string) {
+    const account = getAccount(store, ownerId);
+    const cloudAllowed = !account || account.role === 'owner' || account.limits.cloud !== false;
+    return liveRunners({ fetchImpl, memory: engine.memory, ollamaRoot: ollamaRoot(), cloudAllowed, geminiKey: process.env.GEMINI_API_KEY, visionModel: process.env.OCR_VISION_MODEL });
+  }
+
+  /** Best local Hebrew writer that fits the RAM budget, for the OCR cleanup pass. */
+  async function cleanupModel(): Promise<string | null> {
+    try {
+      const response = await fetchImpl(`${ollamaRoot()}/api/tags`, { signal: AbortSignal.timeout(2000) });
+      const names = ((await response.json()) as { models?: { name: string }[] }).models?.map((row) => row.name) ?? [];
+      const budget = store.getSettings().ramBudgetGiB;
+      return names.map((name) => ({ name, score: hebrewScore({ apiName: name, name, local: true, providerKind: 'ollama' }) }))
+        .filter((row) => row.score > 0 && roughModelGiB(row.name) <= budget * 0.85 && !/vl|vision|embed/.test(row.name))
+        .sort((a, b) => b.score - a.score)[0]?.name ?? null;
+    } catch { return null; }
+  }
+
+  async function polish(result: OcrResult, ownerId: string, want: boolean | undefined): Promise<OcrResult & { cleaned?: boolean }> {
+    const setting = getLanguage(store, ownerId).cleanup;
+    const on = want ?? (setting === 'on' || (setting === 'auto' && result.model?.startsWith('gemini') !== true));
+    if (!on || !isHebrewText(result.text)) return result;
+    const model = await cleanupModel();
+    if (!model) return result;
+    const cleaned = await cleanupHebrew(result.text, async (prompt) => {
+      const response = await fetchImpl(`${ollamaRoot()}/api/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, signal: AbortSignal.timeout(120_000), body: JSON.stringify({ model, stream: false, think: false, options: { temperature: 0 }, messages: [{ role: 'user', content: prompt }] }) });
+      const json = await response.json() as { message?: { content?: string }; error?: string };
+      if (!response.ok) throw new Error(json.error || `HTTP ${response.status}`);
+      return json.message?.content || '';
+    }, { kind: 'ocr' });
+    if (!cleaned.changed) return { ...result, cleaned: false };
+    return { ...result, text: cleaned.text, cleaned: true, notes: [...result.notes, `Hebrew cleaned up by ${model}.`] };
+  }
+
+  async function readFile(fileId: string, mode: OcrMode, ownerId: string, cleanup?: boolean) {
+    const file = getFile(store, fileId);
+    const full = file ? filePath(store, dataDir, fileId) : null;
+    if (!file || !full || (file.ownerId && file.ownerId !== ownerId)) throw fail(404, 'File not found.');
+    if (!IMAGE_EXT.test(file.name) && !String(file.mime).startsWith('image/')) throw fail(400, 'That file is not an image.');
+    const result = await polish(await recognize(fs.readFileSync(full), { mode }, await runnersFor(ownerId)), ownerId, cleanup);
+    // Library search finds photos by their text from now on.
+    if (result.text) store.db.prepare('UPDATE files SET text_index = ? WHERE id = ?').run(result.text.slice(0, 200_000), fileId);
+    return result;
+  }
+  engine.ocrReader = (fileId, mode, ownerId) => readFile(fileId, mode, ownerId);
+
+  app.post('/api/ocr', async (req) => {
+    const parsed = z.object({ fileId: z.string().min(1), mode: z.enum(['auto', 'printed', 'handwriting']).optional(), cleanup: z.boolean().optional() }).safeParse(req.body ?? {});
+    if (!parsed.success) throw fail(400, parsed.error.issues[0]?.message || 'Invalid input.');
+    mustOwn(store, req, 'file', parsed.data.fileId, 'File not found.');
+    try {
+      return { result: await readFile(parsed.data.fileId, parsed.data.mode ?? 'auto', accountOf(req).id, parsed.data.cleanup) };
+    } catch (error) {
+      const statusCode = (error as { statusCode?: number }).statusCode;
+      throw statusCode ? error : fail(502, error instanceof Error ? error.message : 'OCR failed.');
+    }
+  });
+
+  // The app's own services (owner only: not in the member allowlist).
+  app.get('/api/services', async () => ({ services: await Promise.all((['ocr', 'piper'] as ServiceId[]).map((id) => serviceStatus(docker, fetchImpl, id))) }));
+  app.post('/api/services/:id/:action', async (req) => {
+    const { id, action } = req.params as { id: string; action: string };
+    if (id !== 'ocr' && id !== 'piper') throw fail(404, 'No such service.');
+    if (action !== 'download' && action !== 'start' && action !== 'stop') throw fail(404, 'Unknown action.');
+    if (!docker.available() || !(await docker.ping())) throw fail(503, 'Docker is not available.');
+    const job = store.createJob(`service-${action}-${id}`, `${action} ${id}`);
+    void (async () => {
+      const log = (line: string) => store.appendJob(job.id, line);
+      try {
+        if (action === 'download') await buildService(docker, id, log);
+        else if (action === 'start') await startService(docker, id, log);
+        else {
+          const state = await docker.containerState(id === 'ocr' ? 'local-agent-ocr' : 'local-agent-piper');
+          if (state) await docker.remove(state.id);
+          log('stopped\n');
+        }
+        store.finishJob(job.id, 'completed');
+      } catch (error) {
+        log(`\n${error instanceof Error ? error.message : 'failed'}\n`);
+        store.finishJob(job.id, 'failed');
+      }
+    })();
+    return { job };
+  });
+
+  /** After an image upload: index its printed text in the background when the OCR service is up (no vision model, no wait). */
+  return {
+    indexImage(file: { id: string; name: string; mime?: string }, ownerId = OWNER_ID) {
+      if (!IMAGE_EXT.test(file.name)) return;
+      void (async () => {
+        const runners = await runnersFor(ownerId);
+        if (!runners.tesseract) return;
+        const full = filePath(store, dataDir, file.id);
+        if (!full) return;
+        const result = await recognize(fs.readFileSync(full), { mode: 'printed' }, { tesseract: runners.tesseract, vision: null });
+        if (result.text && (result.confidence ?? 0) >= 50) store.db.prepare('UPDATE files SET text_index = ? WHERE id = ?').run(result.text.slice(0, 200_000), file.id);
+      })().catch(() => undefined);
+    },
+    async ocrBytesForKb(bytes: Buffer, ownerId: string) {
+      const result = await recognize(bytes, { mode: 'auto' }, await runnersFor(ownerId));
+      return result.text;
+    },
+  };
+}
