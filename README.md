@@ -130,3 +130,7 @@ More detail is in `ARCHITECTURE.md`. What is real, what is partial, and what com
 ## Remote monitoring
 
 Read-only, token-protected run traces, errors and health over Tailscale: see [docs/monitoring.md](docs/monitoring.md).
+
+## Models for your machine
+
+Per-role defaults, the Ryzen 780M mini PC guide, the installer and the runtime bench: see [docs/models.md](docs/models.md).

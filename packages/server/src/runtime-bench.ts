@@ -46,7 +46,7 @@ async function ollamaRun(fetchImpl: typeof fetch, base: string, model: string, c
     if (!response.ok || json.error) return { runtime, ok: false, error: json.error || `HTTP ${response.status}` };
     const ps = await fetchImpl(`${base}/api/ps`).then((res) => res.json() as Promise<{ models?: { name: string; size?: number; size_vram?: number }[] }>).catch(() => ({ models: [] }));
     const row = ps.models?.find((item) => item.name === model || item.name.startsWith(`${model}:`));
-    const gpuShare = row?.size ? Math.round(((row.size_vram ?? 0) / row.size) * 100) / 100 : undefined;
+    const gpuShare = cpu ? 0 : row?.size ? Math.round(((row.size_vram ?? 0) / row.size) * 100) / 100 : undefined;
     return {
       runtime, ok: true, gpuShare, seconds: Math.round((Date.now() - started) / 100) / 10,
       promptTps: json.prompt_eval_duration ? Math.round(((json.prompt_eval_count ?? 0) / (json.prompt_eval_duration / 1e9)) * 10) / 10 : undefined,
@@ -72,7 +72,8 @@ async function llamaBench(gguf: string | undefined): Promise<BenchRun | null> {
 export function choose(runs: BenchRun[], machine: BenchReport['machine']): { pick: string; why: string } {
   const ok = runs.filter((row) => row.ok && row.decodeTps);
   const cpu = ok.find((row) => row.runtime === 'ollama-cpu');
-  const gpu = ok.find((row) => row.runtime === 'ollama-gpu' && (row.gpuShare ?? 0) > 0);
+  // Ollama can report size_vram on a GPU-less box, so a GPU run only counts when a GPU is actually visible.
+  const gpu = machine.gpu || machine.vulkan || machine.rocm ? ok.find((row) => row.runtime === 'ollama-gpu' && (row.gpuShare ?? 0) > 0) : undefined;
   const llama = ok.filter((row) => row.runtime.startsWith('llamacpp')).sort((a, b) => b.decodeTps! - a.decodeTps!)[0];
   if (!cpu && !gpu) return { pick: 'none', why: 'No Ollama run finished; check that Ollama is running and the model is pulled.' };
   const best = [cpu, gpu, llama].filter(Boolean).sort((a, b) => b!.decodeTps! - a!.decodeTps!)[0]!;
@@ -87,7 +88,7 @@ export function choose(runs: BenchRun[], machine: BenchReport['machine']): { pic
   return { pick: 'ollama-cpu', why: `The GPU was not clearly faster (${gpu?.decodeTps ?? 'no GPU run'} vs CPU ${cpu?.decodeTps} t/s); stay on the CPU and keep the iGPU free.` };
 }
 
-export async function benchRuntime(fetchImpl: typeof fetch, base: string, opts: { model?: string; gguf?: string; log?: (line: string) => void } = {}): Promise<BenchReport> {
+export async function benchRuntime(fetchImpl: typeof fetch, base: string, opts: { model?: string; gguf?: string; gpuBase?: string; log?: (line: string) => void } = {}): Promise<BenchReport> {
   const log = opts.log ?? (() => undefined);
   const machine = await machineInfo();
   log(`Machine: ${machine.cpu}, ${machine.ramGiB} GB RAM, GPU ${machine.gpu ?? 'none'}${machine.vulkan ? ` (Vulkan: ${machine.vulkan})` : ''}${machine.rocm ? ` (ROCm: ${machine.rocm})` : ''}\n`);
@@ -99,8 +100,9 @@ export async function benchRuntime(fetchImpl: typeof fetch, base: string, opts: 
   if (!model) throw new Error('Pull a chat model first (any 1-4B model works for the bench).');
   const runs: BenchRun[] = [];
   for (const cpu of [true, false]) {
-    log(`Ollama ${cpu ? 'CPU only' : 'with GPU offload'} on ${model}…\n`);
-    const result = await ollamaRun(fetchImpl, base, model, cpu);
+    const target = !cpu && opts.gpuBase ? opts.gpuBase : base;
+    log(`Ollama ${cpu ? 'CPU only' : 'with GPU offload'} on ${model}${target !== base ? ` (Vulkan server at ${target})` : ''}…\n`);
+    const result = await ollamaRun(fetchImpl, target, model, cpu);
     runs.push(result);
     log(result.ok ? `  decode ${result.decodeTps} t/s, prompt ${result.promptTps} t/s${result.gpuShare !== undefined ? `, ${Math.round(result.gpuShare * 100)}% on GPU` : ''}\n` : `  failed: ${result.error}\n`);
   }
