@@ -1,7 +1,7 @@
 {
   "name": "local-agent-desktop",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Windows shell for the local-agent web console. It stores a server URL and loads that origin with a normal cookie login.",
   "author": "local-agent",
   "main": "main.js",
@@ -12,34 +12,5 @@
   "devDependencies": {
     "electron": "33.4.11",
     "electron-builder": "25.1.8"
-  },
-  "build": {
-    "appId": "com.localagent.desktop",
-    "productName": "local-agent",
-    "directories": {
-      "output": "release"
-    },
-    "files": [
-      "main.js",
-      "preload.js",
-      "setup.html",
-      "package.json"
-    ],
-    "win": {
-      "signAndEditExecutable": false,
-      "target": [
-        "portable",
-        "nsis"
-      ]
-    },
-    "portable": {
-      "artifactName": "local-agent-portable.${ext}"
-    },
-    "nsis": {
-      "artifactName": "local-agent-setup.${ext}",
-      "oneClick": true,
-      "perMachine": false,
-      "allowToChangeInstallationDirectory": false
-    }
   }
 }

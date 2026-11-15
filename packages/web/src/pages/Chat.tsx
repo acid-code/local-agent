@@ -30,7 +30,7 @@ interface Session { id: string; title: string; agentId: string | null; mode: 'ch
 type Agent = PanelAgent & FaceAgent;
 interface Message { id: string; role: string; content: string; createdAt?: string; agentId?: string | null; toolName?: string | null; routingNote?: string | null; toolCalls?: { name: string }[] | null }
 interface Step { id: string; kind: string; name: string; status: string; latencyMs?: number; output?: unknown; error?: string | null }
-interface Plan { id: string; items: { id: string; text: string; status: string }[] }
+interface Plan { id: string; items: { id: string; text: string; status: string; note?: string | null }[] }
 interface Edit { id: string; label: string; diff: string; revertedAt: string | null }
 interface Offer { id: string; kind: string; masked: string }
 interface CheckItem { id: string; title: string; ok: boolean; detail: string; optional: boolean }
@@ -350,6 +350,7 @@ export function Chat() {
       if (data.type === 'step' && data.step) {
         setSteps((value) => [...value.filter((step) => step.id !== data.step.id), data.step]);
         if (data.step.kind === 'model' && data.step.name) setLastModel(String(data.step.name));
+        if (data.step.name === 'tasks' && data.step.status === 'completed' && current) void api<{ plan: Plan | null }>(`/api/sessions/${current}?limit=1`).then((fresh) => setPlan(fresh.plan)).catch(() => undefined);
       }
       if (data.type === 'message') {
         if (data.message?.sessionId && data.message.sessionId !== currentRef.current) return;
@@ -891,13 +892,15 @@ export function Chat() {
               <div className="row"><button className="btn primary" onClick={retry}><RotateCcw size={15} />{' '}{t('Try again')}</button><button className="btn ghost" onClick={() => setTrace(true)}>{t('Open trace')}</button></div>
             </div>
           )}
-          {mode === 'code' && plan && (
-            <div className="card">
-              <h3>{t('Plan')}</h3>
+          {plan && plan.items.length > 0 && (
+            <div className="card task-list">
+              <h3>{mode === 'code' ? t('Plan') : t('Tasks')} <span className="faint small">{plan.items.filter((item) => item.status === 'done').length}/{plan.items.length}</span></h3>
               {plan.items.map((item) => (
-                <label key={item.id} className="row">
+                <label key={item.id} className="row" title={item.note ?? undefined}>
                   <input type="checkbox" checked={item.status === 'done'} onChange={async (event) => { await api(`/api/plan-items/${item.id}`, { method: 'PATCH', body: JSON.stringify({ status: event.target.checked ? 'done' : 'pending' }) }); if (current) void openSession(current); }} />
-                  <span>{item.text}</span>
+                  <span dir="auto" className={item.status === 'blocked' ? 'bad' : item.status === 'doing' ? 'strong' : undefined}>{item.text}</span>
+                  {item.status === 'doing' && <span className="badge">{t('working')}</span>}
+                  {item.status === 'blocked' && <span className="badge bad">{t('blocked')}</span>}
                 </label>
               ))}
             </div>

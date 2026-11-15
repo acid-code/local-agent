@@ -172,6 +172,9 @@ describe('checkpoints and rollback', () => {
       { toolCalls: [{ id: 'w2', name: 'write_file', arguments: JSON.stringify({ path: 'new.txt', content: 'fresh\n' }) }] },
       { text: 'Edited.' },
     ];
+    // Cautious mode: workspace writes (low risk) ask first.
+    const cautious = { ...built.store.getSettings(), approvalMode: 'cautious' as const };
+    built.store.saveSettings(cautious, 'test', { settings: cautious });
     const run = await built.engine.startTurn({ sessionId: session.id, agentId: agent.id, content: 'edit files' });
     const decided = new Set<string>();
     const nextApproval = () => built.store.listApprovals('pending').find((row) => row.runId === run.id && !decided.has(row.id));

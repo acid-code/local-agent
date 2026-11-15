@@ -1359,4 +1359,12 @@ export const he: Record<string, string> = {
   "Embeddings": "הטמעות",
   "Image": "תמונה",
   "Benchmark runtimes": "השוואת סביבות הרצה",
+  "Ask before": "לשאול לפני",
+  "Cautious: any change, even inside the workspace": "זהיר: כל שינוי, גם בתוך סביבת העבודה",
+  "Balanced: deleting, containers, scripts and anything risky": "מאוזן: מחיקה, קונטיינרים, סקריפטים וכל דבר מסוכן",
+  "Autonomous: only high risk (push, send, pay, delete, sudo)": "אוטונומי: רק סיכון גבוה (push, שליחה, תשלום, מחיקה, sudo)",
+  "High-risk actions always ask, in every mode. Reading and searching never ask.": "פעולות בסיכון גבוה תמיד דורשות אישור, בכל מצב. קריאה וחיפוש אף פעם לא.",
+  "Tasks": "משימות",
+  "working": "בעבודה",
+  "blocked": "חסום",
 };
