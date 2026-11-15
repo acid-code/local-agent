@@ -1,3 +1,4 @@
+import { getLanguage, setLanguage } from './language.js';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { FREE_TIER_SNAPSHOT, geminiQuotaDay, quotaAvailability } from '@local-agent/shared';
@@ -65,6 +66,13 @@ export function registerAccounts(app: FastifyInstance, ctx: { store: Store; conf
     const theme = parse(themeSchema, req.body);
     setTheme(store, accountOf(req).id, theme);
     return { theme };
+  });
+
+  // UI language and the Hebrew cleanup pass, per account (members included).
+  app.get('/api/me/language', async (req) => ({ language: getLanguage(store, accountOf(req).id) }));
+  app.put('/api/me/language', async (req) => {
+    const body = parse(z.object({ choice: z.enum(['auto', 'en', 'he']).optional(), resolved: z.enum(['en', 'he']).optional(), cleanup: z.enum(['auto', 'on', 'off']).optional() }), req.body);
+    return { language: setLanguage(store, accountOf(req).id, body) };
   });
 
   /** Shared Gemini quota, read-only. The owner sets the limits; members see what is left today. */

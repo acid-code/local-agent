@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api, post } from '../lib/api';
 import { PageHeader } from '../components/ui';
 import { RefreshCw } from 'lucide-react';
+import { t } from '../i18n';
 
 interface Item { id: string; title: string; ok: boolean; detail: string; optional: boolean }
 interface Preview { command: string; detail: string }
@@ -28,7 +29,7 @@ export function Setup() {
 
   return (
     <div className="page">
-      <PageHeader title="Setup" description="Nothing runs until you can read the exact command. Scan this machine, then pull a small model or start SearXNG if you want them." actions={<button className="btn primary" disabled={scanning} onClick={() => void scan()}><RefreshCw size={15} aria-hidden className={scanning ? 'spin' : undefined} /> {scanning ? 'Scanning…' : 'Scan again'}</button>} />
+      <PageHeader title={t('Setup')} description={t('Nothing runs until you can read the exact command. Scan this machine, then pull a small model or start SearXNG if you want them.')} actions={<button className="btn primary" disabled={scanning} onClick={() => void scan()}><RefreshCw size={15} aria-hidden className={scanning ? 'spin' : undefined} /> {scanning ? t('Scanning…') : t('Scan again')}</button>} />
       <div className="checklist" style={{ marginTop: 16 }}>
         {items.map((item) => (
           <article key={item.id} className="card check">
@@ -42,11 +43,11 @@ export function Setup() {
         ))}
       </div>
       <div className="card" style={{ marginTop: 16 }}>
-        <h3>One-click actions</h3>
-        <label className="field"><span>Ollama model</span><input value={model} onChange={(event) => setModel(event.target.value)} /></label>
+        <h3>{t('One-click actions')}</h3>
+        <label className="field"><span>{t('Ollama model')}</span><input value={model} onChange={(event) => setModel(event.target.value)} /></label>
         <div className="row">
           {[['pull-model', 'Pull model'], ['pull-embed', 'Pull nomic-embed-text'], ['start-searxng', 'Start SearXNG'], ['pull-sandbox', 'Pull sandbox image'], ['pull-mcp-runtime', 'Pull MCP runtime'], ['start-whisper', 'Start faster-whisper'], ['start-kokoro', 'Start Kokoro']].map(([id, label]) => (
-            <button key={id} className="btn" onClick={async () => { setAction(id); setPreview(await post<Preview>(`/api/setup/actions/${id}/preview`, { model })); }}>{label}</button>
+            <button key={id} className="btn" onClick={async () => { setAction(id); setPreview(await post<Preview>(`/api/setup/actions/${id}/preview`, { model })); }}>{t(label)}</button>
           ))}
         </div>
         {preview && (
@@ -60,7 +61,7 @@ export function Setup() {
                 setLog(data.job.output);
                 if (data.job.status !== 'running') clearInterval(timer);
               }, 1000);
-            }}>Run this command</button>
+            }}>{t('Run this command')}</button>
             {log && <pre className="command">{log}</pre>}
           </div>
         )}

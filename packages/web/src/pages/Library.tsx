@@ -3,6 +3,7 @@ import { api, post } from '../lib/api';
 import { EmptyState, PageHeader } from '../components/ui';
 import { FileText, Library as LibraryIcon, Plus } from 'lucide-react';
 import { humanSize, rawUrl, type FileMeta } from '../lib/files';
+import { t } from '../i18n';
 
 interface KbFile { id: string; name: string; bytes: number }
 
@@ -36,24 +37,24 @@ function ChatFiles() {
   }, [chat, source]);
   const title = new Map(chats.map((row) => [row.id, row.title]));
   return (
-    <section className="card chat-files" aria-label="Chat files">
+    <section className="card chat-files" aria-label={t('Chat files')}>
       <div className="row chat-files-head">
-        <h3 className="grow">Chat files</h3>
-        <select aria-label="Chat" value={chat} onChange={(event) => setChat(event.target.value)}>
-          <option value="">All chats</option>
+        <h3 className="grow">{t('Chat files')}</h3>
+        <select aria-label={t('Chat')} value={chat} onChange={(event) => setChat(event.target.value)}>
+          <option value="">{t('All chats')}</option>
           {chats.map((row) => <option key={row.id} value={row.id}>{row.title}</option>)}
         </select>
-        <div className="seg" role="group" aria-label="Direction">
+        <div className="seg" role="group" aria-label={t('Direction')}>
           {([['', 'All'], ['upload', 'From you'], ['agent', 'From agents']] as const).map(([value, label]) => <button key={value} type="button" className={source === value ? 'on' : ''} aria-pressed={source === value} onClick={() => setSource(value)}>{label}</button>)}
         </div>
       </div>
-      {files === null ? <div className="skeleton-lines"><span /></div> : files.length === 0 ? <p className="faint">No files here yet.</p> : (
+      {files === null ? <div className="skeleton-lines"><span /></div> : files.length === 0 ? <p className="faint">{t('No files here yet.')}</p> : (
         <ul className="pane-list">
           {files.map((file) => (
             <li key={file.id}>
               <FileText size={14} aria-hidden />
               <a className="grow ellipsis" href={rawUrl(file.id)} target="_blank" rel="noreferrer">{file.name}</a>
-              <span className="faint">{file.source === 'upload' ? 'from you' : 'from agent'}</span>
+              <span className="faint">{file.source === 'upload' ? t('from you') : t('from agent')}</span>
               {!chat && file.sessionId && <span className="faint ellipsis chat-files-chat">{title.get(file.sessionId) || ''}</span>}
               <span className="faint mono">{humanSize(file.size)}</span>
             </li>
@@ -92,7 +93,7 @@ export function Library() {
 
   return (
     <div className="page">
-      <PageHeader title="Library" description="Documents your personas can search and cite: PDF, DOCX, Markdown, text, HTML or code. Collections are shared or kept to one persona." actions={<button className="btn primary" aria-expanded={adding} onClick={() => setAdding((v) => !v)}><Plus size={16} aria-hidden /> New collection</button>} />
+      <PageHeader title={t('Library')} description={t('Documents your personas can search and cite: PDF, DOCX, Markdown, text, HTML or code. Collections are shared or kept to one persona.')} actions={<button className="btn primary" aria-expanded={adding} onClick={() => setAdding((v) => !v)}><Plus size={16} aria-hidden />{' '}{t('New collection')}</button>} />
       {adding && (
       <form className="card section" onSubmit={async (event) => {
         event.preventDefault();
@@ -101,36 +102,36 @@ export function Library() {
         setName('Notes');
         await load(); setAdding(false);
       }}>
-        <label className="field"><span>Collection</span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
-        <label className="field"><span>Scope</span>
+        <label className="field"><span>{t('Collection')}</span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
+        <label className="field"><span>{t('Scope')}</span>
           <select value={agentId} onChange={(event) => setAgentId(event.target.value)}>
-            <option value="">Shared</option>
+            <option value="">{t('Shared')}</option>
             {agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
           </select>
         </label>
-        <button className="btn primary">Create collection</button>
+        <button className="btn primary">{t('Create collection')}</button>
       </form>
       )}
       <ChatFiles />
-      {!adding && collections.length === 0 && <EmptyState icon={LibraryIcon} title="No collections yet" action={<button className="btn primary" onClick={() => setAdding(true)}>New collection</button>}>Create a collection, then drop files into it. Answers cite the passage they came from.</EmptyState>}
+      {!adding && collections.length === 0 && <EmptyState icon={LibraryIcon} title={t('No collections yet')} action={<button className="btn primary" onClick={() => setAdding(true)}>{t('New collection')}</button>}>{t('Create a collection, then drop files into it. Answers cite the passage they came from.')}</EmptyState>}
       {collections.map((collection) => (
         <article key={collection.id} className="card">
           <h3>{collection.name}</h3>
-          <p className="muted">{collection.agentId ? 'One persona' : 'Shared'} · {collection.documents} files · {collection.chunks} chunks · {collection.bytes} bytes · {collection.embedder}</p>
+          <p className="muted">{collection.agentId ? t('One persona') : t('Shared')} · {collection.documents}{' '}{t('files ·')}{' '}{collection.chunks}{' '}{t('chunks ·')}{' '}{collection.bytes}{' '}{t('bytes ·')}{' '}{collection.embedder}</p>
           <div className="row">
-            <button className="btn" onClick={() => setActive(collection.id)}>{active === collection.id ? 'Selected' : 'Use this one'}</button>
-            {collection.rootPath && <button className="btn" onClick={async () => { await post(`/api/kb/collections/${collection.id}/reindex`, {}); setNote('Re-indexed.'); await load(); }}>Re-index folder</button>}
+            <button className="btn" onClick={() => setActive(collection.id)}>{active === collection.id ? t('Selected') : t('Use this one')}</button>
+            {collection.rootPath && <button className="btn" onClick={async () => { await post(`/api/kb/collections/${collection.id}/reindex`, {}); setNote('Re-indexed.'); await load(); }}>{t('Re-index folder')}</button>}
             <button className="btn" onClick={() => run(async () => {
-              if (!window.confirm(`Delete ${collection.name} and its ${collection.documents} files from the index?`)) return;
+              if (!window.confirm(t('Delete {0} and its {1} files from the index?', [collection.name, collection.documents]))) return;
               await api(`/api/kb/collections/${collection.id}`, { method: 'DELETE' });
               if (active === collection.id) setActive('');
               setNote(`Deleted ${collection.name}.`);
               await load();
-            })}>Delete</button>
+            })}>{t('Delete')}</button>
           </div>
           {active === collection.id && files.map((file) => (
             <p key={file.id} className="row faint">{file.name} · {file.bytes} bytes
-              <button className="btn" onClick={() => run(async () => { await api(`/api/kb/collections/${collection.id}/files/${file.id}`, { method: 'DELETE' }); setNote(`Removed ${file.name}.`); await load(); await loadFiles(); })}>Remove</button>
+              <button className="btn" onClick={() => run(async () => { await api(`/api/kb/collections/${collection.id}/files/${file.id}`, { method: 'DELETE' }); setNote(`Removed ${file.name}.`); await load(); await loadFiles(); })}>{t('Remove')}</button>
             </p>
           ))}
         </article>
@@ -148,16 +149,16 @@ export function Library() {
           await load();
           await loadFiles();
         }}>
-          <h3>Drop files</h3>
+          <h3>{t('Drop files')}</h3>
           <input name="files" type="file" multiple accept=".pdf,.docx,.md,.txt,.html,.htm,.ts,.tsx,.js,.py,.go,.rs,.json,.yml,.yaml" />
-          <button className="btn primary">Index</button>
-          <label className="field"><span>Or a folder on this machine</span><input value={folder} onChange={(event) => setFolder(event.target.value)} placeholder="/home/asaf/notes" /></label>
-          <button className="btn" type="button" onClick={async () => { await post(`/api/kb/collections/${active}/folder`, { path: folder }); setNote('Folder indexed. Changes are picked up on the next re-index.'); await load(); }}>Index folder</button>
+          <button className="btn primary">{t('Index')}</button>
+          <label className="field"><span>{t('Or a folder on this machine')}</span><input value={folder} onChange={(event) => setFolder(event.target.value)} placeholder="/home/asaf/notes" /></label>
+          <button className="btn" type="button" onClick={async () => { await post(`/api/kb/collections/${active}/folder`, { path: folder }); setNote('Folder indexed. Changes are picked up on the next re-index.'); await load(); }}>{t('Index folder')}</button>
         </form>
       )}
       <form className="card" onSubmit={async (event) => { event.preventDefault(); setHits((await post<{ hits: Hit[] }>('/api/kb/search', { query, collectionId: active || undefined })).hits); }}>
-        <label className="field"><span>Try a query</span><input value={query} onChange={(event) => setQuery(event.target.value)} /></label>
-        <button className="btn">Search</button>
+        <label className="field"><span>{t('Try a query')}</span><input value={query} onChange={(event) => setQuery(event.target.value)} /></label>
+        <button className="btn">{t('Search')}</button>
       </form>
       {note && <p className="muted">{note}</p>}
       {hits.map((hit) => (

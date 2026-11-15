@@ -1,8 +1,13 @@
+import { hebrewVariants } from './hebrew.js';
+
 /** Deterministic feature-hash embeddings. Used when Gemini Embedding is closed or unset. */
 
 export function hashEmbed(text: string, dim = 256): Float32Array {
   const vector = new Float32Array(dim);
-  const tokens = text.toLowerCase().split(/[^a-z0-9]+/).filter((token) => token.length > 1);
+  // Any script; Hebrew words lose their glued-on prefixes (הבית → בית) so forms of one word share a bucket.
+  const tokens = (text.toLowerCase().replace(/[\u0591-\u05C7]/g, '').match(/[\p{L}\p{N}]+/gu) ?? [])
+    .filter((token) => token.length > 1)
+    .map((token) => (/[\u05D0-\u05EA]/.test(token) ? hebrewVariants(token).at(-1)! : token));
   const grams = tokens.length ? tokens : [text.slice(0, 48).toLowerCase() || 'empty'];
   for (let index = 0; index < grams.length; index += 1) {
     const gram = grams[index + 1] ? `${grams[index]}_${grams[index + 1]}` : grams[index]!;

@@ -5,6 +5,7 @@ import { AlertCircle, CalendarClock, CheckCircle2, ChevronRight, CircleDashed, F
 import { api } from '../lib/api';
 import { humanSize } from '../lib/files';
 import { Face, type FaceAgent } from './Face';
+import { t, fmt } from '../i18n';
 
 interface StateAgent extends FaceAgent { id: string; title?: string }
 interface Session { id: string; title: string; agentId: string | null; mode: 'chat' | 'code'; workshopId?: string | null }
@@ -18,10 +19,10 @@ interface Voice { whisper: boolean; kokoro: boolean }
 const ACTIVE = new Set(['queued', 'running', 'awaiting_approval', 'paused']);
 const ago = (iso: string) => {
   const ms = Date.now() - new Date(iso).getTime();
-  return ms < 60_000 ? 'just now' : ms < 3_600_000 ? `${Math.floor(ms / 60_000)} min ago` : ms < 86_400_000 ? `${Math.floor(ms / 3_600_000)} h ago` : new Date(iso).toLocaleDateString();
+  return ms < 86_400_000 ? fmt.ago(iso) : fmt.date(iso);
 };
 const LANGS: [string, string][] = [['auto', 'Auto-detect'], ['en-US', 'English'], ['he-IL', 'Hebrew'], ['ar', 'Arabic'], ['ru-RU', 'Russian'], ['es-ES', 'Spanish'], ['fr-FR', 'French'], ['de-DE', 'German']];
-const nextAt = (iso: string | null) => (iso ? new Date(iso).toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : 'not scheduled');
+const nextAt = (iso: string | null) => (iso ? fmt.date(iso, { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : t('not scheduled'));
 
 /** The active persona at a glance: what it is coding, what is coming up, the computer it runs on, and voice. */
 export function PersonaStatePanel({ agent, sessions, tick, onClose, onOpenSession, onOpenFile, onOpenPersona }: {
@@ -73,7 +74,7 @@ export function PersonaStatePanel({ agent, sessions, tick, onClose, onOpenSessio
       <li key={run.id}>
         <button className={`state-card state-row${failed ? ' failed' : ''}`} onClick={() => onOpenSession(run.sessionId)} title={`${label} · ${ago(run.startedAt)}`}>
           {failed ? <AlertCircle size={18} className="state-ico bad" aria-hidden /> : done ? <CheckCircle2 size={18} className="state-ico ok" aria-hidden /> : <CircleDashed size={18} className="state-ico live" aria-hidden />}
-          <span className="grow"><span className="ellipsis" dir="auto">{session?.title || 'Chat'}</span><small className="faint">{label} · <span className="run-no">#{runNumber(run)}</span></small></span>
+          <span className="grow"><span className="ellipsis" dir="auto">{session?.title || t('Chat')}</span><small className="faint">{label} · <span className="run-no">#{runNumber(run)}</span></small></span>
           <ChevronRight size={16} className="faint" aria-hidden />
         </button>
       </li>
@@ -97,59 +98,59 @@ export function PersonaStatePanel({ agent, sessions, tick, onClose, onOpenSessio
   return (
     <aside className="side-panel state-panel" aria-label={`${agent.name} status`} style={agent.accent ? { ['--persona' as string]: agent.accent } : undefined}>
       <div className="state-hero">
-        <button className="icon-btn round state-close" aria-label="Close status panel" onClick={onClose}><X size={18} /></button>
-        <button className="state-face" onClick={onOpenPersona} title="Persona info"><Face agent={agent} size={76} /></button>
+        <button className="icon-btn round state-close" aria-label={t('Close status panel')} onClick={onClose}><X size={18} /></button>
+        <button className="state-face" onClick={onOpenPersona} title={t('Persona info')}><Face agent={agent} size={76} /></button>
         <strong className="state-name ellipsis" dir="auto" title={agent.title ? `${agent.name} · ${agent.title}` : agent.name}>{agent.name}{agent.title ? <span className="state-title"> · {agent.title}</span> : null}</strong>
-        <div className="seg state-tabs" role="group" aria-label="Status views">
-          <button aria-pressed={tab === 'activity'} onClick={() => setTab('activity')}>Activity</button>
-          <button aria-pressed={tab === 'library'} onClick={() => setTab('library')}>Library</button>
+        <div className="seg state-tabs" role="group" aria-label={t('Status views')}>
+          <button aria-pressed={tab === 'activity'} onClick={() => setTab('activity')}>{t('Activity')}</button>
+          <button aria-pressed={tab === 'library'} onClick={() => setTab('library')}>{t('Library')}</button>
         </div>
       </div>
       {tab === 'activity' ? (
         <div className="panel-body state-body">
           <section className="state-sec">
-            <h4>Coding</h4>
-            {coding.length ? <ul className="state-list">{coding.map(runRow)}</ul> : <p className="faint state-empty center">Ask {agent.name} to change code in a repo, and its runs show up here</p>}
-            {working.length > 0 && <><h5 className="faint">Working now</h5><ul className="state-list">{working.map(runRow)}</ul></>}
+            <h4>{t('Coding')}</h4>
+            {coding.length ? <ul className="state-list">{coding.map(runRow)}</ul> : <p className="faint state-empty center">{t('Ask')}{' '}{agent.name}{' '}{t('to change code in a repo, and its runs show up here')}</p>}
+            {working.length > 0 && <><h5 className="faint">{t('Working now')}</h5><ul className="state-list">{working.map(runRow)}</ul></>}
           </section>
           <section className="state-sec">
-            <h4>Upcoming</h4>
+            <h4>{t('Upcoming')}</h4>
             {upcoming.length ? (
               <ul className="state-list">
                 {upcoming.map((row) => 'cron' in row
                   ? <li key={row.id}><Link className="state-card state-row" to="/schedules"><CalendarClock size={18} className="state-ico" aria-hidden /><span className="grow"><span className="ellipsis">{row.name}</span><small className="faint">{nextAt(row.nextRunAt)} · {row.cron}</small></span><ChevronRight size={16} className="faint" aria-hidden /></Link></li>
                   : <li key={row.id}><Link className="state-card state-row" to="/triggers"><Zap size={18} className="state-ico" aria-hidden /><span className="grow"><span className="ellipsis">{row.name}</span><small className="faint">when {row.kind} fires</small></span><ChevronRight size={16} className="faint" aria-hidden /></Link></li>)}
               </ul>
-            ) : <p className="faint state-empty center">Ask {agent.name} to do something on a schedule, and it shows up here</p>}
+            ) : <p className="faint state-empty center">{t('Ask')}{' '}{agent.name}{' '}{t('to do something on a schedule, and it shows up here')}</p>}
           </section>
           <section className="state-sec">
-            <h4>Computer</h4>
+            <h4>{t('Computer')}</h4>
             <div className="state-card computer-card">
               <span className="grow">
-                <span className="ellipsis" dir="auto">{agent.name}'s computer</span>
-                <small className="faint">{busy ? 'Working' : 'Asleep'}{memory ? ` · ${memory.availableGiB.toFixed(1)} of ${memory.totalGiB.toFixed(0)} GB free` : ''}</small>
-                {memory && <span className="state-meter" role="meter" aria-label="Memory in use" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(100 - (memory.availableGiB / memory.totalGiB) * 100)}><span style={{ width: `${Math.round(100 - (memory.availableGiB / memory.totalGiB) * 100)}%` }} /></span>}
+                <span className="ellipsis" dir="auto">{agent.name}{t('\'s computer')}</span>
+                <small className="faint">{busy ? t('Working') : t('Asleep')}{memory ? t(' · {0} of {1} GB free', [memory.availableGiB.toFixed(1), memory.totalGiB.toFixed(0)]) : ''}</small>
+                {memory && <span className="state-meter" role="meter" aria-label={t('Memory in use')} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(100 - (memory.availableGiB / memory.totalGiB) * 100)}><span style={{ width: `${Math.round(100 - (memory.availableGiB / memory.totalGiB) * 100)}%` }} /></span>}
               </span>
               <span className={`computer-thumb${busy ? ' awake' : ''}`} aria-hidden><Face agent={agent} size={26} /></span>
             </div>
-            {resources && <p className="faint state-detail">Disk {(resources.current.disk.freeBytes / 1024 ** 3).toFixed(0)} GB free{resources.current.gpu?.name ? ` · ${resources.current.gpu.name}` : ' · no GPU'}</p>}
+            {resources && <p className="faint state-detail">{t('Disk')}{' '}{(resources.current.disk.freeBytes / 1024 ** 3).toFixed(0)}{' '}{t('GB free')}{resources.current.gpu?.name ? ` · ${resources.current.gpu.name}` : t(' · no GPU')}</p>}
           </section>
           <section className="state-sec">
-            <h4>Voice chat</h4>
+            <h4>{t('Voice chat')}</h4>
             <div className="state-card voice-card">
-              <label className="voice-row"><span>Voice</span>
-                <select value={voiceName} onChange={(event) => setVoiceName(event.target.value)} aria-label="Voice">
-                  <option value="default">{voice?.kokoro ? 'Kokoro (local)' : 'Browser default'}</option>
+              <label className="voice-row"><span>{t('Voice')}</span>
+                <select value={voiceName} onChange={(event) => setVoiceName(event.target.value)} aria-label={t('Voice')}>
+                  <option value="default">{voice?.kokoro ? t('Kokoro (local)') : t('Browser default')}</option>
                   {voices.map((name) => <option key={name} value={name}>{name}</option>)}
                 </select>
               </label>
-              <label className="voice-row"><span>Language</span>
-                <select value={voiceLang} onChange={(event) => setVoiceLang(event.target.value)} aria-label="Language">
-                  {LANGS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              <label className="voice-row"><span>{t('Language')}</span>
+                <select value={voiceLang} onChange={(event) => setVoiceLang(event.target.value)} aria-label={t('Language')}>
+                  {LANGS.map(([value, label]) => <option key={value} value={value}>{t(label)}</option>)}
                 </select>
               </label>
             </div>
-            <p className="faint state-detail">{voice ? <>Hold the mic to talk · {voice.whisper ? 'local Whisper' : 'browser dictation'}</> : 'Hold the mic button to talk.'}</p>
+            <p className="faint state-detail">{voice ? <>{t('Hold the mic to talk ·')}{' '}{voice.whisper ? t('local Whisper') : t('browser dictation')}</> : t('Hold the mic button to talk.')}</p>
           </section>
         </div>
       ) : (
@@ -157,11 +158,11 @@ export function PersonaStatePanel({ agent, sessions, tick, onClose, onOpenSessio
           {files.length ? (
             <ul className="state-list">
               {files.slice(0, 40).map((file) => (
-                <li key={file.id}><button className="state-row" onClick={() => onOpenFile(file.id)}><FileText size={14} aria-hidden /><span className="grow"><span className="ellipsis" dir="auto">{file.name}</span><small className="faint">{file.source === 'agent' ? 'from the agent' : 'from you'} · {humanSize(file.size)} · {ago(file.createdAt)}</small></span></button></li>
+                <li key={file.id}><button className="state-row" onClick={() => onOpenFile(file.id)}><FileText size={14} aria-hidden /><span className="grow"><span className="ellipsis" dir="auto">{file.name}</span><small className="faint">{file.source === 'agent' ? t('from the agent') : t('from you')} · {humanSize(file.size)} · {ago(file.createdAt)}</small></span></button></li>
               ))}
             </ul>
-          ) : <p className="faint state-empty">Files you share with {agent.name}, and files it makes, show up here.</p>}
-          <Link className="link-btn state-more" to="/library">Open the Library</Link>
+          ) : <p className="faint state-empty">{t('Files you share with')}{' '}{agent.name}{t(', and files it makes, show up here.')}</p>}
+          <Link className="link-btn state-more" to="/library">{t('Open the Library')}</Link>
         </div>
       )}
     </aside>

@@ -20,6 +20,7 @@ import {
   type RouteDecision,
   type RunCursor,
   type ToolCall,
+  isHebrewText,
 } from '@local-agent/shared';
 import { Bus } from './bus.js';
 import type { Agent, ModelRow, RunRow, Store } from './db.js';
@@ -39,8 +40,12 @@ import { isMissingModelError, isToolUnsupportedError, ollamaCapabilities } from 
 import { scanMachine } from './discovery.js';
 import { CrashError, InterruptedToolError, StopError, clampText, now } from './util.js';
 import type { Vault } from './vault.js';
+import { cleanupHebrew } from './hebrew-cleanup.js';
+import { ocrTool, type OcrMode, type OcrResult } from './ocr.js';
+import { getLanguage, languageHint, replyLanguage, wantsCleanup } from './language.js';
 import { CITE_HINT, findContextTool, shareFileTool } from './files.js';
 import { generateImage, imageTool, localStatus } from './images.js';
+import { slidesTools } from './slides.js';
 import { NO_MODEL_MESSAGE } from './usable-models.js';
 import { BudgetError, type Lease, type MemoryBudget } from './memory.js';
 import { MEMBER_DENIED_TOOLS, OWNER_ID, foreignPath, getAccount } from './accounts.js';
@@ -59,6 +64,8 @@ export class Engine {
   private readonly dwell = new Map<string, { modelId: string; previousId: string | null; until: number; explicit: boolean }>();
   residentLarge: string[] = [];
   extraTools: Tool[] = [];
+  /** Set by the routes once OCR is wired: reads an image file for the read_image_text tool. */
+  ocrReader: ((fileId: string, mode: OcrMode, ownerId: string) => Promise<OcrResult>) | null = null;
   /** Tools from installed MCP servers (owner personas only). */
   mcpTools: () => McpAgentTool[] = () => [];
   libraryDir = '';
@@ -551,6 +558,7 @@ export class Engine {
     const cost = ((usage.inputTokens * (model.priceIn ?? 0)) + (usage.outputTokens * (model.priceOut ?? 0))) / 1_000_000;
     const note = [current.cursor.switched ? current.cursor.routingReason : '', built.cutNote].filter(Boolean).join(' ') || null;
     text = this.vault.redact(text);
+    if (!toolCalls?.length && text.trim()) text = await this.polishHebrew(run, agent, model, text);
     const assistant = this.store.insertMessage({
       sessionId: run.sessionId, role: 'assistant', content: text, toolCalls: toolCalls?.length ? toolCalls : null,
       agentId: agent.id, runId: run.id, toolCallId: null, toolName: null, imageUrl: null, routingNote: note,
@@ -798,6 +806,8 @@ export class Engine {
       text, stage: run.cursor.stage, failures: this.localFailureCount(run.agentId), map: settings.autoModels, models: pool,
       pinId: session?.modelPin || run.cursor.messageModelId || null,
       residentLarge: [...new Set([...this.residentLarge, ...this.heldLarge.values()])],
+      hebrew: this.replyLang(run.agentId, text) === 'he',
+      fits: (model) => roughModelGiB(model.apiName) <= settings.ramBudgetGiB * 0.85,
     });
     return {
       kind: auto.role === 'coder' ? 'code' : auto.role === 'thinking' || auto.role === 'cloud' ? 'hard-reasoning' : 'chat',
@@ -886,7 +896,8 @@ export class Engine {
     const rulesNote = session ? projectRules(chatWorkspacePaths(this.store, run.sessionId, session.ownerId || OWNER_ID), disabledRules(this.store, run.sessionId)) : '';
     const toolNames = this.tools(agent, session?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId)).map((tool) => tool.name);
     const nudge = run.cursor.helperId ? '' : skillNudge(run.cursor.turn, toolNames);
-    const system = `${agent.systemPrompt}${sharedRepoBrief(this.store)}${chatWorkspaces}${rulesNote}${memoryNote}${stageNote}${roleNote}${kbHint}${CITE_HINT}${nudge}`;
+    const languageNote = languageHint(this.replyLang(agent, user?.content ?? ''));
+    const system = `${agent.systemPrompt}${sharedRepoBrief(this.store)}${chatWorkspaces}${rulesNote}${memoryNote}${stageNote}${roleNote}${kbHint}${CITE_HINT}${nudge}${languageNote}`;
     const preambleGuess = `${system}\n${notes.map((note) => note.content).join('\n')}`;
     if (model.providerId === 'prov_gemini' && estimateTokens(preambleGuess, 'gemini') > budget * 0.75) {
       const key = process.env.GEMINI_API_KEY;
@@ -970,6 +981,40 @@ export class Engine {
     }
     indexText(this.store, this.vectors, { sessionId, agentId: agent.id, text: slice.map((message) => message.content).join('\n').slice(0, 4000) });
     void created;
+  }
+
+  /** The language this turn is answered in: the persona override, the member's language, or the message's. */
+  replyLang(agentOrId: Agent | string | undefined, text: string): 'en' | 'he' {
+    const agent = typeof agentOrId === 'string' ? this.store.getAgent(agentOrId) : agentOrId;
+    const prefs = getLanguage(this.store, agent?.ownerId || OWNER_ID);
+    return replyLanguage(prefs, agent?.language, text);
+  }
+
+  private userText(run: RunRow): string {
+    const messages = this.store.listMessages(run.sessionId);
+    const user = (run.cursor.userMessageId && messages.find((message) => message.id === run.cursor.userMessageId)) || [...messages].reverse().find((message) => message.role === 'user');
+    return user?.content ?? '';
+  }
+
+  /** Hebrew cleanup pass on a finished reply (small local models by default). Never fails the turn. */
+  private async polishHebrew(run: RunRow, agent: Agent, model: ModelRow, text: string): Promise<string> {
+    if (model.profileId === 'rehearsal' || run.cursor.helperId) return text;
+    if (this.replyLang(agent, this.userText(run)) !== 'he' && !isHebrewText(text)) return text;
+    const member = getLanguage(this.store, agent.ownerId || OWNER_ID);
+    const setting = agent.hebrewCleanup && agent.hebrewCleanup !== 'inherit' ? agent.hebrewCleanup : member.cleanup;
+    if (!wantsCleanup(setting, model)) return text;
+    this.bus.publish({ type: 'status', runId: run.id, status: 'running', detail: 'Polishing the Hebrew' });
+    const result = await cleanupHebrew(text, async (prompt) => {
+      const provider = this.provider(model);
+      let out = '';
+      for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, signal: AbortSignal.timeout(60_000), noThink: true })) {
+        if (event.type === 'token') out += event.text;
+      }
+      return out;
+    });
+    if (result.changed) this.store.addLog('info', `Hebrew cleanup: ${result.before} → ${result.after} foreign words.`, run.id, 'router');
+    else if (result.reason !== 'already clean') this.store.addLog('info', `Hebrew cleanup kept the original: ${result.reason}.`, run.id, 'router');
+    return result.text;
   }
 
   private async trySummarize(model: ModelRow, prompt: string): Promise<string | null> {
@@ -1096,6 +1141,8 @@ export class Engine {
     names.add('repo_sync');
     names.add('find_context');
     names.add('share_file');
+    names.add('read_slides');
+    if (this.ocrReader) names.add('read_image_text');
     for (const name of ['manage_timer', 'manage_trigger', 'spawn_agent', 'helpers', 'memory_file', 'search_chats', 'propose_skill', 'run_tool_script', 'time_now', 'think']) names.add(name);
     if (this.store.getSettings().imageGen.mode !== 'off') names.add('generate_image');
     if (stage === 'plan') {
@@ -1115,7 +1162,7 @@ export class Engine {
     if (helper) for (const name of HELPER_DENIED) names.delete(name);
     // Built-in connectors the owner switched off take their tools with them.
     for (const name of disabledConnectorTools(this.store)) names.delete(name);
-    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), ...this.autonomy.tools(), memoryFileTool(), searchChatsTool(), proposeSkillTool(), ...CONNECTOR_TOOLS(), ...this.extraTools, ...mcp.map((row) => row.tool)];
+    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), ...slidesTools({ dataDir: this.libraryDir, image: async (prompt, ctx) => ({ fileId: (await generateImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }, { prompt, ownerId: ctx.ownerId, shape: 'landscape', sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal })).file.id }) }), ...this.autonomy.tools(), memoryFileTool(), searchChatsTool(), proposeSkillTool(), ...CONNECTOR_TOOLS(), ...(this.ocrReader ? [ocrTool(this.ocrReader)] : []), ...this.extraTools, ...mcp.map((row) => row.tool)];
     const seen = new Set<string>();
     const chosen = catalog.filter((tool) => {
       if (!names.has(tool.name) || seen.has(tool.name)) return false;
@@ -1642,4 +1689,10 @@ export function memAvailableGiB() {
 
 function quotaDay(date = new Date()) {
   return geminiQuotaDay(date);
+}
+
+/** Resident size from the tag (Q4 weights ≈ 0.6 GB per billion parameters plus runtime); unknown sizes count as small. */
+export function roughModelGiB(apiName: string): number {
+  const size = Number(apiName.toLowerCase().match(/(\d+(?:\.\d+)?)b\b/)?.[1] ?? 4);
+  return size * 0.6 + 1;
 }

@@ -3,6 +3,7 @@ import { AtSign, ChevronLeft, File, FileUp, Folder, Paperclip, X } from 'lucide-
 import { api } from '../lib/api';
 import { humanSize, uploadFile, type FileMeta } from '../lib/files';
 import { errorText, toast } from '../lib/toast';
+import { t } from '../i18n';
 
 export interface GitRootInfo { id: string; label: string; path: string; kind: 'workspace' | 'project'; workshops: string[] }
 export type MentionPick =
@@ -94,35 +95,35 @@ export function MentionPicker({ query, setQuery, defaultRoot, sessionId, onPick,
   }
 
   return (
-    <div className="mention-picker" role="dialog" aria-label="Reference a file or folder" onKeyDown={onKey}>
+    <div className="mention-picker" role="dialog" aria-label={t('Reference a file or folder')} onKeyDown={onKey}>
       <div className="pick-head">
         <AtSign size={16} />
-        <input ref={input} value={query} onChange={(event) => { setQuery(event.target.value); setActive(0); }} placeholder="file, folder/, path#L10-20, or paste a full path" aria-label="Search files" />
-        <button className="icon-btn" aria-label="Close" onClick={onClose}><X size={16} /></button>
+        <input ref={input} value={query} onChange={(event) => { setQuery(event.target.value); setActive(0); }} placeholder={t('file, folder/, path#L10-20, or paste a full path')} aria-label={t('Search files')} />
+        <button className="icon-btn" aria-label={t('Close')} onClick={onClose}><X size={16} /></button>
       </div>
       <div className="pick-body">
-        <button className="pick-item upload" onClick={() => upload.current?.click()} disabled={busy}><FileUp size={16} /> {busy ? 'Uploading…' : 'Upload from this device'}<span className="faint">laptop or phone, up to 50 MB</span></button>
+        <button className="pick-item upload" onClick={() => upload.current?.click()} disabled={busy}><FileUp size={16} /> {busy ? t('Uploading…') : t('Upload from this device')}<span className="faint">{t('laptop or phone, up to 50 MB')}</span></button>
         <input ref={upload} type="file" multiple hidden onChange={(event) => { void onFiles(event.target.files); event.target.value = ''; }} />
-        {pasted && <button className={cls()} onClick={items[0]!.run}><File size={16} /> Use path <span className="mono ellipsis">{query}</span></button>}
+        {pasted && <button className={cls()} onClick={items[0]!.run}><File size={16} />{' '}{t('Use path')}{' '}<span className="mono ellipsis">{query}</span></button>}
         {!pasted && (
           <>
             <div className="pick-section">
-              <select aria-label="Folder" value={root} onChange={(event) => { setRoot(event.target.value); setDir(''); }}>
+              <select aria-label={t('Folder')} value={root} onChange={(event) => { setRoot(event.target.value); setDir(''); }}>
                 {roots.map((r) => <option key={r.id} value={r.id}>{r.label}{r.workshops.length ? ` (${r.workshops.join(', ')})` : ''}</option>)}
               </select>
-              {(browseDir || dir) && <button className="btn ghost small" onClick={() => { const up = browseDir.includes('/') ? browseDir.slice(0, browseDir.lastIndexOf('/')) : ''; setDir(up); setQuery(up ? `${up}/` : ''); }}><ChevronLeft size={14} /> Up</button>}
-              <button className="btn ghost small" onClick={() => onPick({ kind: 'path', root, path: browseDir, dir: true, label: browseDir || rootInfo?.label || '.' })}><Folder size={14} /> @ this folder</button>
+              {(browseDir || dir) && <button className="btn ghost small" onClick={() => { const up = browseDir.includes('/') ? browseDir.slice(0, browseDir.lastIndexOf('/')) : ''; setDir(up); setQuery(up ? `${up}/` : ''); }}><ChevronLeft size={14} />{' '}{t('Up')}</button>}
+              <button className="btn ghost small" onClick={() => onPick({ kind: 'path', root, path: browseDir, dir: true, label: browseDir || rootInfo?.label || '.' })}><Folder size={14} />{' '}{t('@ this folder')}</button>
             </div>
             <p className="faint pick-path mono ellipsis">{rootInfo?.path}{browseDir ? `/${browseDir}` : ''}</p>
             {shown.map((entry) => (
               <button key={entry.path} className={cls()} onClick={() => entry.dir && !range.start ? (setDir(entry.path), setQuery(`${entry.path}/`)) : onPick({ kind: 'path', root, path: entry.path, dir: entry.dir, start: range.start, end: range.end, label: entry.path })}>
-                {entry.dir ? <Folder size={16} /> : <File size={16} />}<span className="ellipsis">{entry.name}{entry.dir ? '/' : ''}</span>{!entry.dir && <span className="faint">{humanSize(entry.size)}{range.start ? ` · L${range.start}-${range.end}` : ''}</span>}
+                {entry.dir ? <Folder size={16} /> : <File size={16} />}<span className="ellipsis">{entry.name}{entry.dir ? '/' : ''}</span>{!entry.dir && <span className="faint">{humanSize(entry.size)}{range.start ? t(' · L{0}-{1}', [range.start, range.end]) : ''}</span>}
               </button>
             ))}
-            {shown.length === 0 && <p className="faint pick-empty">{entries.length ? 'No match in this folder.' : 'This folder is empty.'}</p>}
+            {shown.length === 0 && <p className="faint pick-empty">{entries.length ? t('No match in this folder.') : t('This folder is empty.')}</p>}
           </>
         )}
-        {files.length > 0 && <p className="pick-label faint"><Paperclip size={12} /> Uploaded and shared files</p>}
+        {files.length > 0 && <p className="pick-label faint"><Paperclip size={12} />{' '}{t('Uploaded and shared files')}</p>}
         {files.map((file) => (
           <button key={file.id} className={cls()} onClick={() => onPick({ kind: 'file', id: file.id, label: file.name })}>
             <Paperclip size={16} /><span className="ellipsis">{file.name}</span><span className="faint">{humanSize(file.size)}</span>

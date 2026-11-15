@@ -5,6 +5,7 @@ import { api } from '../lib/api';
 import { errorText, toast } from '../lib/toast';
 import { PageHeader } from '../components/ui';
 import { Face } from '../components/Face';
+import { t, fmt } from '../i18n';
 
 interface GalleryPersona {
   id: string; name: string; title: string; description: string; accent: string; shape: number; category: string;
@@ -30,7 +31,7 @@ export function Gallery() {
     setBusy(row.id);
     try {
       const { agent } = await api<{ agent: { id: string; name: string } }>(`/api/gallery/${row.id}`, { method: 'POST' });
-      toast(`${agent.name} is ready.`, 'ok');
+      toast(t('{0} is ready.', [agent.name]), 'ok');
       window.dispatchEvent(new Event('la-personas-changed'));
       await load();
       navigate(`/?persona=${agent.id}`);
@@ -39,9 +40,9 @@ export function Gallery() {
 
   return (
     <div className="page gallery-page">
-      <PageHeader title="Persona gallery" description="Ready-made personas with their own skills, rules and tools. Add one with a click; you can change anything afterwards." />
-      <div className="seg gallery-cats" role="group" aria-label="Categories">
-        {categories.map((name) => <button key={name} aria-pressed={category === name} onClick={() => setCategory(name)}>{name}</button>)}
+      <PageHeader title={t('Persona gallery')} description={t('Ready-made personas with their own skills, rules and tools. Add one with a click; you can change anything afterwards.')} />
+      <div className="seg gallery-cats" role="group" aria-label={t('Categories')}>
+        {categories.map((name) => <button key={name} aria-pressed={category === name} onClick={() => setCategory(name)}>{name === 'All' ? t('All') : name}</button>)}
       </div>
       <div className="gallery-grid">
         {shown.map((row) => (
@@ -53,24 +54,24 @@ export function Gallery() {
                 <p className="faint gallery-title">{row.title} · {row.category}</p>
               </div>
               {row.added
-                ? <span className="badge ok gallery-added"><Check size={12} aria-hidden /> Added</span>
-                : <button className="btn small primary" disabled={busy === row.id} onClick={() => void add(row)}><Plus size={14} aria-hidden /> {busy === row.id ? 'Adding…' : 'Add'}</button>}
+                ? <span className="badge ok gallery-added"><Check size={12} aria-hidden />{' '}{t('Added')}</span>
+                : <button className="btn small primary" disabled={busy === row.id} onClick={() => void add(row)}><Plus size={14} aria-hidden /> {busy === row.id ? t('Adding…') : t('Add')}</button>}
             </header>
             <p className="gallery-desc">{row.description}</p>
-            <div className="gallery-chips" aria-label="Skills">
+            <div className="gallery-chips" aria-label={t('Skills')}>
               {row.skills.map((skill) => <span key={skill.slug} className="chip" title={skill.description}>{skill.name}</span>)}
             </div>
-            <div className="gallery-chips connectors" aria-label="Connectors">
-              {row.connectors.map((item) => <span key={item.id} className={`chip conn ${item.status}`} title={item.builtIn ? `Built-in · ${item.status}` : item.status}><span className={`dot ${item.status === 'healthy' || item.status === 'connected' ? 'on' : ''}`} aria-hidden />{item.name}{item.builtIn ? '' : item.status === 'connected' ? '' : ' · connect'}</span>)}
+            <div className="gallery-chips connectors" aria-label={t('Connectors')}>
+              {row.connectors.map((item) => <span key={item.id} className={`chip conn ${item.status}`} title={item.builtIn ? t('Built-in · {0}', [item.status]) : item.status}><span className={`dot ${item.status === 'healthy' || item.status === 'connected' ? 'on' : ''}`} aria-hidden />{item.name}{item.builtIn ? '' : item.status === 'connected' ? '' : t(' · connect')}</span>)}
             </div>
-            <button className="link-btn faint" aria-expanded={open === row.id} onClick={() => setOpen(open === row.id ? null : row.id)}>{open === row.id ? 'Less' : 'Rules, tools and teammates'}</button>
+            <button className="link-btn faint" aria-expanded={open === row.id} onClick={() => setOpen(open === row.id ? null : row.id)}>{open === row.id ? t('Less') : t('Rules, tools and teammates')}</button>
             {open === row.id && (
               <div className="gallery-more">
-                <p className="faint"><strong>Model:</strong> {row.modelHint}</p>
-                <p className="faint"><strong>Tools:</strong> {row.tools.join(', ')}</p>
+                <p className="faint"><strong>{t('Model:')}</strong> {row.modelHint}</p>
+                <p className="faint"><strong>{t('Tools:')}</strong> {row.tools.join(', ')}</p>
                 <ul className="gallery-rules">{row.rules.map((rule, index) => <li key={index}>{rule}</li>)}</ul>
-                {row.handoffs.length > 0 && <p className="faint"><strong>Hands off to:</strong> {row.handoffs.map((h) => `${h.name} (${h.when})`).join('; ')}</p>}
-                {row.starters.length > 0 && <p className="faint"><strong>Try:</strong> “{row.starters[0]}”</p>}
+                {row.handoffs.length > 0 && <p className="faint"><strong>{t('Hands off to:')}</strong> {row.handoffs.map((h) => `${h.name} (${h.when})`).join('; ')}</p>}
+                {row.starters.length > 0 && <p className="faint"><strong>{t('Try:')}</strong> “{row.starters[0]}”</p>}
               </div>
             )}
           </article>

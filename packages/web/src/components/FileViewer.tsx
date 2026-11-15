@@ -1,9 +1,11 @@
+import { api } from '../lib/api';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Download, ExternalLink, FileArchive, FileQuestion, Quote, Share2, X } from 'lucide-react';
+import { Download, ExternalLink, FileArchive, FileQuestion, Quote, Share2, X, ScanText, Copy } from 'lucide-react';
 import hljs from 'highlight.js/lib/common';
 import { Markdown } from './Markdown';
 import { extOf, fileMeta, humanSize, kindOf, openExternally, pathRawUrl, rawUrl, saveFile, shareFile, type FileKind } from '../lib/files';
-import { toast } from '../lib/toast';
+import { errorText, toast } from '../lib/toast';
+import { t as tr } from '../i18n';
 
 export type ViewerSource = { kind: 'file'; id: string; name?: string } | { kind: 'path'; root: string; path: string };
 export interface QuotePick { ref: string; text: string; label: string }
@@ -38,12 +40,25 @@ export function FileViewer({ source, anchor, onClose, onQuote }: { source: Viewe
 
   const kind = kindOf(name, mime);
   const label = name;
+  const [ocr, setOcr] = useState<{ busy: boolean; text?: string; how?: string; mode?: 'auto' | 'handwriting' } | null>(null);
+  /** OCR the picture (printed or handwriting, English/Hebrew), show the text and copy it. */
+  const readText = async (mode: 'auto' | 'handwriting') => {
+    if (source.kind !== 'file') return;
+    setOcr({ busy: true, mode });
+    try {
+      const { result } = await api<{ result: { text: string; engine: string; model?: string; confidence: number | null; notes: string[] } }>('/api/ocr', { method: 'POST', body: JSON.stringify({ fileId: source.id, mode }) });
+      const how = result.engine === 'vision' ? tr('Read by {0}', [result.model || 'a vision model']) : tr('Tesseract · confidence {0}%', [Math.round(result.confidence ?? 0)]);
+      setOcr({ busy: false, text: result.text, how, mode });
+      if (result.text) { await navigator.clipboard?.writeText(result.text).then(() => toast(tr('Text copied.'), 'ok')).catch(() => undefined); }
+      else toast(tr('No text found in this picture.'), 'info');
+    } catch (error) { setOcr(null); toast(errorText(error), 'error'); }
+  };
   const quote = (text: string, at?: string) => {
     if (!onQuote) return;
     const clean = text.trim();
-    if (!clean) { toast('Select some text in the preview first.', 'info'); return; }
+    if (!clean) { toast(tr('Select some text in the preview first.'), 'info'); return; }
     onQuote({ ref: refFor(source, at), text: clean.slice(0, 2000), label: `${label}${at ? ` · ${at.replace('=', ' ')}` : ''}` });
-    toast('Quote added to the message box.', 'ok');
+    toast(tr('Quote added to the message box.'), 'ok');
   };
   const quoteSelection = () => {
     const sel = window.getSelection();
@@ -52,7 +67,7 @@ export function FileViewer({ source, anchor, onClose, onQuote }: { source: Viewe
   };
 
   return (
-    <div className="viewer-backdrop" role="dialog" aria-modal="true" aria-label={`Preview ${name}`} onClick={onClose}>
+    <div className="viewer-backdrop" role="dialog" aria-modal="true" aria-label={tr('Preview {0}', [name])} onClick={onClose}>
       <div className="viewer" onClick={(event) => event.stopPropagation()}>
         <header className="viewer-head">
           <div className="viewer-title">
@@ -60,15 +75,26 @@ export function FileViewer({ source, anchor, onClose, onQuote }: { source: Viewe
             <span className="faint">{kindLabel(kind, name)}{size !== null ? ` · ${humanSize(size)}` : ''}</span>
           </div>
           <div className="viewer-actions">
-            {onQuote && <button className="btn ghost small" onClick={quoteSelection} title="Quote the selected text"><Quote size={15} /> <span>Quote</span></button>}
-            <button className="icon-btn" aria-label="Download" title="Download / save" onClick={() => saveFile(url, name, mime)}><Download size={18} /></button>
-            <button className="icon-btn" aria-label="Open in new tab" title="Open in new tab / another app" onClick={() => openExternally(url, name, mime)}><ExternalLink size={18} /></button>
-            <button className="icon-btn" aria-label="Share" title="Share" onClick={() => void shareFile(url, name, mime)}><Share2 size={18} /></button>
-            <button className="icon-btn" aria-label="Close preview" onClick={onClose}><X size={20} /></button>
+            {onQuote && <button className="btn ghost small" onClick={quoteSelection} title={tr('Quote the selected text')}><Quote size={15} /> <span>{tr('Quote')}</span></button>}
+            {kind === 'image' && source.kind === 'file' && <button className="btn ghost small" disabled={ocr?.busy} onClick={() => void readText('auto')} title={tr('Read the text in this picture and copy it')}><ScanText size={15} /> <span>{ocr?.busy ? tr('Reading…') : tr('Copy text')}</span></button>}
+            <button className="icon-btn" aria-label={tr('Download')} title={tr('Download / save')} onClick={() => saveFile(url, name, mime)}><Download size={18} /></button>
+            <button className="icon-btn" aria-label={tr('Open in new tab')} title={tr('Open in new tab / another app')} onClick={() => openExternally(url, name, mime)}><ExternalLink size={18} /></button>
+            <button className="icon-btn" aria-label={tr('Share')} title={tr('Share')} onClick={() => void shareFile(url, name, mime)}><Share2 size={18} /></button>
+            <button className="icon-btn" aria-label={tr('Close preview')} onClick={onClose}><X size={20} /></button>
           </div>
         </header>
         <div className="viewer-body" ref={body}>
-          {missing ? <Info icon={<FileQuestion size={28} />} title="This file is gone." detail="It was deleted, or the id is wrong." /> : <Body kind={kind} url={url} name={name} anchor={anchor} quote={onQuote ? quote : undefined} />}
+          {missing ? <Info icon={<FileQuestion size={28} />} title={tr('This file is gone.')} detail="It was deleted, or the id is wrong." /> : <Body kind={kind} url={url} name={name} anchor={anchor} quote={onQuote ? quote : undefined} />}
+          {ocr && !ocr.busy && ocr.text !== undefined && (
+            <section className="ocr-panel" aria-label={tr('Text in this picture')}>
+              <header><strong>{tr('Text in this picture')}</strong><span className="faint">{ocr.how}</span><span className="spacer" />
+                {ocr.mode !== 'handwriting' && <button className="btn ghost small" onClick={() => void readText('handwriting')}>{tr('Read as handwriting')}</button>}
+                <button className="btn ghost small" onClick={() => void navigator.clipboard?.writeText(ocr.text || '').then(() => toast(tr('Text copied.'), 'ok'))}><Copy size={14} /> {tr('Copy')}</button>
+                {onQuote && <button className="btn ghost small" onClick={() => quote(ocr.text || '')}><Quote size={14} /> {tr('Quote')}</button>}
+              </header>
+              <div className="ocr-text">{(ocr.text || tr('No text found in this picture.')).split('\n').map((line, index) => <p key={index} dir="auto">{line || '\u00a0'}</p>)}</div>
+            </section>
+          )}
         </div>
       </div>
     </div>
@@ -77,7 +103,7 @@ export function FileViewer({ source, anchor, onClose, onQuote }: { source: Viewe
 
 function kindLabel(kind: FileKind, name: string) {
   const ext = extOf(name).toUpperCase();
-  return ({ image: 'Image', pdf: 'PDF', markdown: 'Markdown', code: `${ext} source`, text: 'Text', csv: 'Table', json: 'JSON', docx: 'Word document', pptx: 'PowerPoint', xlsx: 'Spreadsheet', video: 'Video', audio: 'Audio', zip: ext === 'APK' ? 'Android app' : 'Archive', binary: ext ? `${ext} file` : 'File' } as Record<FileKind, string>)[kind];
+  return ({ image: 'Image', pdf: 'PDF', markdown: 'Markdown', code: `${ext} source`, text: tr('Text'), csv: 'Table', json: 'JSON', docx: 'Word document', pptx: 'PowerPoint', xlsx: 'Spreadsheet', video: 'Video', audio: 'Audio', zip: ext === 'APK' ? 'Android app' : 'Archive', binary: ext ? `${ext} file` : 'File' } as Record<FileKind, string>)[kind];
 }
 
 function Info({ icon, title, detail, children }: { icon: ReactNode; title: string; detail?: string; children?: ReactNode }) {
@@ -110,10 +136,10 @@ function Body({ kind, url, name, anchor, quote }: { kind: FileKind; url: string;
   if (kind === 'audio') return <div className="viewer-center"><audio src={url} controls preload="metadata" /></div>;
   if (kind === 'pdf') return <PdfView url={url} anchor={anchor} quote={quote} />;
   if (kind === 'docx') return <DocxView url={url} quote={quote} />;
-  if (kind === 'pptx') return <PptxView url={url} anchor={anchor} quote={quote} />;
+  if (kind === 'pptx') return <PptxView url={url} anchor={anchor} quote={quote} fileId={/\/api\/files\/([^/]+)\/raw/.exec(url)?.[1]} />;
   if (kind === 'xlsx') return <XlsxView url={url} />;
   if (kind === 'zip') return <ZipView url={url} name={name} />;
-  if (kind === 'binary') return <Info icon={<FileQuestion size={28} />} title="No preview for this type." detail="Download it, or open it with another app." />;
+  if (kind === 'binary') return <Info icon={<FileQuestion size={28} />} title={tr('No preview for this type.')} detail="Download it, or open it with another app." />;
   return <TextView url={url} kind={kind} name={name} anchor={anchor} quote={quote} />;
 }
 
@@ -123,8 +149,8 @@ function TextView({ url, kind, name, anchor, quote }: { url: string; kind: FileK
   const first = range ? Number(range[1]) : 0;
   const last = range ? Number(range[2] || range[1]) : 0;
   useEffect(() => { if (data && first) document.getElementById(`ln-${first}`)?.scrollIntoView({ block: 'center' }); }, [data, first]);
-  if (error) return <Info icon={<FileQuestion size={28} />} title="Could not load the file." detail={error} />;
-  if (data === undefined) return <p className="faint viewer-pad">Loading…</p>;
+  if (error) return <Info icon={<FileQuestion size={28} />} title={tr('Could not load the file.')} detail={error} />;
+  if (data === undefined) return <p className="faint viewer-pad">{tr('Loading…')}</p>;
   const cut = data.length > 1_000_000;
   const text = cut ? data.slice(0, 1_000_000) : data;
   if (kind === 'markdown') return <div className="viewer-pad prose-wrap" dir="auto"><Markdown text={text} /></div>;
@@ -143,11 +169,11 @@ function CodeLines({ text, lang, first, last, quote, cut }: { text: string; lang
   const lines = text.split('\n');
   return (
     <div className="code-view">
-      {first > 0 && quote && <div className="viewer-bar"><span className="faint">Lines {first}–{last}</span><button className="btn ghost small" onClick={() => quote(lines.slice(first - 1, last).join('\n'), `L${first}-${last}`)}><Quote size={14} /> Quote these lines</button></div>}
+      {first > 0 && quote && <div className="viewer-bar"><span className="faint">{tr('Lines')}{' '}{first}–{last}</span><button className="btn ghost small" onClick={() => quote(lines.slice(first - 1, last).join('\n'), `L${first}-${last}`)}><Quote size={14} />{' '}{tr('Quote these lines')}</button></div>}
       <pre className="hljs"><code>{html.map((line, i) => (
         <div key={i} id={`ln-${i + 1}`} className={i + 1 >= first && i + 1 <= last ? 'ln hl' : 'ln'}><span className="ln-no">{i + 1}</span><span dangerouslySetInnerHTML={{ __html: line || ' ' }} /></div>
       ))}</code></pre>
-      {cut && <p className="faint viewer-pad">Showing the first 1 MB. Download for the rest.</p>}
+      {cut && <p className="faint viewer-pad">{tr('Showing the first 1 MB. Download for the rest.')}</p>}
     </div>
   );
 }
@@ -178,7 +204,7 @@ export function parseCsv(text: string, sep = ','): string[][] {
 }
 
 function Table({ rows, header = true }: { rows: (string | number | null)[][]; header?: boolean }) {
-  if (!rows.length) return <p className="faint viewer-pad">Empty.</p>;
+  if (!rows.length) return <p className="faint viewer-pad">{tr('Empty.')}</p>;
   const shown = rows.slice(0, 1000);
   const head = header ? shown[0]! : null;
   const rest = header ? shown.slice(1) : shown;
@@ -188,7 +214,7 @@ function Table({ rows, header = true }: { rows: (string | number | null)[][]; he
         {head && <thead><tr><th className="rn">#</th>{head.map((cell, i) => <th key={i} dir="auto">{String(cell ?? '')}</th>)}</tr></thead>}
         <tbody>{rest.map((row, r) => <tr key={r}><td className="rn">{r + 1}</td>{row.map((cell, i) => <td key={i} dir="auto">{String(cell ?? '')}</td>)}</tr>)}</tbody>
       </table>
-      {rows.length > 1000 && <p className="faint viewer-pad">Showing 1,000 of {rows.length} rows.</p>}
+      {rows.length > 1000 && <p className="faint viewer-pad">{tr('Showing 1,000 of')}{' '}{rows.length} rows.</p>}
     </div>
   );
 }
@@ -200,7 +226,7 @@ function CsvTable({ text, tab }: { text: string; tab: boolean }) {
 
 function JsonView({ text }: { text: string }) {
   const parsed = useMemo(() => { try { return { value: JSON.parse(text) as unknown }; } catch (error) { return { error: (error as Error).message }; } }, [text]);
-  if ('error' in parsed) return <div><p className="badge warn viewer-pad">Not valid JSON: {parsed.error}</p><CodeLines text={text} lang="json" first={0} last={0} cut={false} /></div>;
+  if ('error' in parsed) return <div><p className="badge warn viewer-pad">{tr('Not valid JSON:')}{' '}{parsed.error}</p><CodeLines text={text} lang="json" first={0} last={0} cut={false} /></div>;
   const value = parsed.value;
   if (Array.isArray(value) && value.length && value.every((row) => row && typeof row === 'object' && !Array.isArray(row))) {
     const cols = [...new Set(value.slice(0, 200).flatMap((row) => Object.keys(row as object)))].slice(0, 30);
@@ -252,17 +278,17 @@ function PdfView({ url, anchor, quote }: { url: string; anchor?: string; quote?:
     })();
     return () => { cancelled = true; };
   }, [data, target]);
-  if (error) return <Info icon={<FileQuestion size={28} />} title="Could not load the PDF." detail={error} />;
+  if (error) return <Info icon={<FileQuestion size={28} />} title={tr('Could not load the PDF.')} detail={error} />;
   return (
     <div className="pdf-view" ref={host}>
       {status && <p className="faint viewer-pad">{status}</p>}
       {Array.from({ length: Math.min(pages, 60) }, (_, i) => i + 1).map((n) => (
         <section key={n} id={`pdf-p-${n}`} className={n === target ? 'pdf-page target' : 'pdf-page'}>
-          <div className="viewer-bar"><span className="faint">Page {n} of {pages}</span>{quote && <button className="btn ghost small" onClick={() => quote(texts.current.get(n) || '', `page=${n}`)}><Quote size={14} /> Quote page</button>}</div>
+          <div className="viewer-bar"><span className="faint">{tr('Page')}{' '}{n} of {pages}</span>{quote && <button className="btn ghost small" onClick={() => quote(texts.current.get(n) || '', `page=${n}`)}><Quote size={14} />{' '}{tr('Quote page')}</button>}</div>
           <canvas id={`pdf-c-${n}`} />
         </section>
       ))}
-      {pages > 60 && <p className="faint viewer-pad">Showing 60 of {pages} pages. Download for the rest.</p>}
+      {pages > 60 && <p className="faint viewer-pad">{tr('Showing 60 of')}{' '}{pages}{' '}{tr('pages. Download for the rest.')}</p>}
     </div>
   );
 }
@@ -277,19 +303,27 @@ function DocxView({ url, quote }: { url: string; quote?: QuoteFn }) {
       .then((result: { value: string }) => setHtml(result.value.replace(/<(script|iframe|object|embed)[\s\S]*?<\/\1>/gi, '').replace(/\son\w+="[^"]*"/gi, '')))
       .catch((err: Error) => setFail(err.message));
   }, [data]);
-  if (error || fail) return <Info icon={<FileQuestion size={28} />} title="Could not open this document." detail={error || fail} />;
-  if (html === null) return <p className="faint viewer-pad">Converting…</p>;
+  if (error || fail) return <Info icon={<FileQuestion size={28} />} title={tr('Could not open this document.')} detail={error || fail} />;
+  if (html === null) return <p className="faint viewer-pad">{tr('Converting…')}</p>;
   return (
     <div className="doc-view" dir="auto">
-      {quote && <p className="faint viewer-pad small-note">Select a passage and press Quote to cite it.</p>}
+      {quote && <p className="faint viewer-pad small-note">{tr('Select a passage and press Quote to cite it.')}</p>}
       <article className="doc-page prose" dangerouslySetInnerHTML={{ __html: html || '<p>(empty document)</p>' }} />
     </div>
   );
 }
 
 interface Slide { n: number; title: string; body: string[]; image?: string }
-function PptxView({ url, anchor, quote }: { url: string; anchor?: string; quote?: QuoteFn }) {
+function PptxView({ url, anchor, quote, fileId }: { url: string; anchor?: string; quote?: QuoteFn; fileId?: string }) {
   const { data, error } = useFetched<ArrayBuffer>(url, 'buffer');
+  // Real slide pictures when the server can render them (LibreOffice); the text outline below is the fallback.
+  const [pictures, setPictures] = useState(0);
+  useEffect(() => {
+    if (!fileId) return;
+    let live = true;
+    void fetch(`/api/files/${fileId}/slides`, { credentials: 'same-origin' }).then((res) => (res.ok ? res.json() : { pages: 0 })).then((body: { pages: number }) => { if (live) setPictures(body.pages || 0); }).catch(() => undefined);
+    return () => { live = false; };
+  }, [fileId, url]);
   const [slides, setSlides] = useState<Slide[] | null>(null);
   const [fail, setFail] = useState('');
   const target = Number(/slide=(\d+)/.exec(anchor || '')?.[1] || 0);
@@ -310,7 +344,7 @@ function PptxView({ url, anchor, quote }: { url: string; anchor?: string; quote?
           const media = rels ? /Target="\.\.\/media\/([^"]+\.(?:png|jpe?g|gif))"/i.exec(rels)?.[1] : undefined;
           let image: string | undefined;
           if (media && zip.file(`ppt/media/${media}`)) { image = URL.createObjectURL(await zip.file(`ppt/media/${media}`)!.async('blob')); urls.push(image); }
-          out.push({ n, title: paras[0] || `Slide ${n}`, body: paras.slice(1), image });
+          out.push({ n, title: paras[0] || tr('Slide {0}', [n]), body: paras.slice(1), image });
         }
         setSlides(out);
       } catch (err) { setFail((err as Error).message); }
@@ -318,15 +352,16 @@ function PptxView({ url, anchor, quote }: { url: string; anchor?: string; quote?
     return () => { urls.forEach((u) => URL.revokeObjectURL(u)); urls = []; };
   }, [data]);
   useEffect(() => { if (slides && target) document.getElementById(`slide-${target}`)?.scrollIntoView({ block: 'start' }); }, [slides, target]);
-  if (error || fail) return <Info icon={<FileQuestion size={28} />} title="Could not open this presentation." detail={error || fail} />;
-  if (!slides) return <p className="faint viewer-pad">Reading slides…</p>;
-  if (!slides.length) return <Info icon={<FileQuestion size={28} />} title="No slides found." />;
+  if (error || fail) return <Info icon={<FileQuestion size={28} />} title={tr('Could not open this presentation.')} detail={error || fail} />;
+  if (!slides) return <p className="faint viewer-pad">{tr('Reading slides…')}</p>;
+  if (!slides.length) return <Info icon={<FileQuestion size={28} />} title={tr('No slides found.')} />;
   return (
     <div className="slides">
       {slides.map((slide) => (
         <section key={slide.n} id={`slide-${slide.n}`} className={slide.n === target ? 'slide target' : 'slide'}>
-          <div className="viewer-bar"><span className="faint">Slide {slide.n}</span>{quote && <button className="btn ghost small" onClick={() => quote([slide.title, ...slide.body].join('\n'), `slide=${slide.n}`)}><Quote size={14} /> Quote slide</button>}</div>
-          <div className="slide-card">
+          <div className="viewer-bar"><span className="faint">{tr('Slide')}{' '}{slide.n}</span>{quote && <button className="btn ghost small" onClick={() => quote([slide.title, ...slide.body].join('\n'), `slide=${slide.n}`)}><Quote size={14} />{' '}{tr('Quote slide')}</button>}</div>
+          {pictures >= slide.n && <img className="slide-picture" src={`/api/files/${fileId}/slides/${slide.n}`} alt={slide.title} loading="lazy" />}
+          <div className={pictures >= slide.n ? 'slide-card slide-card-text' : 'slide-card'}>
             <h3 dir="auto">{slide.title}</h3>
             {slide.body.length > 0 && <ul>{slide.body.map((line, i) => <li key={i} dir="auto">{line}</li>)}</ul>}
             {slide.image && <img src={slide.image} alt="" />}
@@ -387,8 +422,8 @@ function XlsxView({ url }: { url: string }) {
       } catch (err) { setFail((err as Error).message); }
     })();
   }, [data]);
-  if (error || fail) return <Info icon={<FileQuestion size={28} />} title="Could not open this spreadsheet." detail={error || fail} />;
-  if (!sheets) return <p className="faint viewer-pad">Reading sheets…</p>;
+  if (error || fail) return <Info icon={<FileQuestion size={28} />} title={tr('Could not open this spreadsheet.')} detail={error || fail} />;
+  if (!sheets) return <p className="faint viewer-pad">{tr('Reading sheets…')}</p>;
   return (
     <div>
       {sheets.length > 1 && <div className="sheet-tabs">{sheets.map((sheet, i) => <button key={sheet.name} className={i === active ? 'on' : ''} onClick={() => setActive(i)}>{sheet.name}</button>)}</div>}
@@ -410,7 +445,7 @@ function ZipView({ url, name }: { url: string; name: string }) {
   const apk = extOf(name) === 'apk';
   return (
     <div className="viewer-pad">
-      <Info icon={<FileArchive size={28} />} title={apk ? 'Android app package' : 'Archive'} detail={apk ? 'On the phone, use Open with to install it. Android asks before installing apps from outside the Play Store.' : 'Download it to extract the files.'} />
+      <Info icon={<FileArchive size={28} />} title={apk ? tr('Android app package') : tr('Archive')} detail={apk ? 'On the phone, use Open with to install it. Android asks before installing apps from outside the Play Store.' : 'Download it to extract the files.'} />
       {error && <p className="badge warn">{error}</p>}
       {entries && entries.length > 0 && (
         <details className="zip-list" open>

@@ -1,3 +1,4 @@
+import { syncAccountLanguage } from './components/LanguagePicker';
 import { useEffect, useState } from 'react';
 import { setRole } from './lib/role';
 import { Navigate, Route, Routes, useNavigate } from 'react-router-dom';
@@ -20,6 +21,7 @@ import { Setup } from './pages/Setup';
 import { Tools } from './pages/Tools';
 import { Workspace } from './pages/Workspace';
 import { loadAccountTheme } from './lib/theme';
+import { t } from './i18n';
 
 export type Role = 'owner' | 'member';
 export interface Me { needsSetup: boolean; authenticated: boolean; username?: string; displayName?: string; role?: Role; limits?: { cloud: boolean; maxAgents: number } }
@@ -29,13 +31,13 @@ export function App() {
   const navigate = useNavigate();
 
   useEffect(() => {
-    api<Me>('/api/auth/me').then((data) => { setMe(data); if (data.authenticated) void loadAccountTheme(); }).catch((error: ApiError) => {
+    api<Me>('/api/auth/me').then((data) => { setMe(data); if (data.authenticated) { void loadAccountTheme(); void syncAccountLanguage(); } }).catch((error: ApiError) => {
       if (error.status === 401) setMe({ needsSetup: false, authenticated: false });
     });
   }, []);
 
-  if (!me) return <div className="login"><p className="muted">Opening the workshop…</p></div>;
-  if (!me.authenticated) return <Login me={me} onIn={() => { void api<Me>('/api/auth/me').then((data) => { setMe(data); void loadAccountTheme(); }); navigate('/'); }} />;
+  if (!me) return <div className="login"><p className="muted">{t('Opening the workshop…')}</p></div>;
+  if (!me.authenticated) return <Login me={me} onIn={() => { void api<Me>('/api/auth/me').then((data) => { setMe(data); void loadAccountTheme(); void syncAccountLanguage(); }); navigate('/'); }} />;
 
   const owner = me.role !== 'member';
   setRole(owner ? 'owner' : 'member');

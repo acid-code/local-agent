@@ -5,13 +5,13 @@ import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { FREE_TIER_OBSERVED_AT, FREE_TIER_SNAPSHOT, VERSION, geminiQuotaDay, nextCron, quotaAvailability } from '@local-agent/shared';
+import { MACHINE_PROFILES, autoMapFor, profileFor, residentGiB, FREE_TIER_OBSERVED_AT, FREE_TIER_SNAPSHOT, VERSION, geminiQuotaDay, nextCron, quotaAvailability } from '@local-agent/shared';
 import { authenticate, hashPassword, noteFailure, rateLimit, setSession, verifyPassword } from './auth.js';
 import { TEMPLATES } from './catalog.js';
 import { detectCodingClis, listEdits, readPlan, replacePlan, revertBatch, RollbackConflict, updatePlanItem } from './coding.js';
 import { secretDrift, secretNames, writeSecret } from './config.js';
 import type { DockerCtl } from './docker.js';
-import { checklist, scanMachine, setupPreview } from './discovery.js';
+import { checklist, readGpu, scanMachine, setupPreview } from './discovery.js';
 import type { McpRuntime } from './mcp.js';
 import type { McpServer } from './db.js';
 import { importConfigs, searchRegistry, trustOf, vetSpec, type VettingReport } from './mcp.js';
@@ -51,6 +51,9 @@ import { cloneInto, gitRoot, gitStatus, listDir, listGitRoots, openPullRequest, 
 import { MAX_FILE_BYTES, deleteFile, filePath, getFile, getMessageRow, listFiles, mimeFor, saveFile, searchMessages } from './files.js';
 import type { Store } from './db.js';
 import type { Vault } from './vault.js';
+import { renderSlides } from './slides.js';
+import { benchRuntime, loadBench, machineInfo, saveBench } from './runtime-bench.js';
+import { registerOcr } from './ocr-routes.js';
 import { MEMBER_DENIED_TOOLS, OWNER_ID, accountOf, foreignPath, mustOwn, ownerOf, workspaceFor } from './accounts.js';
 import { memberByUsername } from './accounts.js';
 import { registerAccounts } from './members.js';
@@ -83,6 +86,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   registerAccounts(app, { store, config });
   registerWorkspaceRoutes(app, { store });
   registerMedia(app, { store, dataDir: config.dataDir, vault, fetchImpl, memory: () => engine.memory });
+  const ocr = registerOcr(app, { store, engine, docker, fetchImpl, dataDir: config.dataDir });
 
   app.get('/api/auth/me', async (req) => {
     const owner = store.getOwner();
@@ -451,6 +455,8 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       sortOrder: z.number().int().optional(),
       workshopIds: z.array(z.string()).optional(),
       notify: z.enum(['all', 'mute']).optional(),
+      language: z.enum(['auto', 'match', 'en', 'he']).optional(),
+      hebrewCleanup: z.enum(['inherit', 'auto', 'on', 'off']).optional(),
     }), req.body);
     mustOwn(store, req, 'agent', (req.params as { id: string }).id, 'Persona not found.');
     if (body.toolAllowlist) body.toolAllowlist = memberTools(req, body.toolAllowlist);
@@ -560,7 +566,9 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const bytes = Buffer.from(body.contentBase64, 'base64');
     ensureDiskRoom(config.dataDir, bytes.length);
     try {
-      return { file: saveFile(store, config.dataDir, { name: body.name, bytes, sessionId: body.sessionId ?? null, source: 'upload', ownerId: me(req) }) };
+      const file = saveFile(store, config.dataDir, { name: body.name, bytes, sessionId: body.sessionId ?? null, source: 'upload', ownerId: me(req) });
+      ocr.indexImage(file, me(req));
+      return { file };
     } catch (error) {
       if (isDiskFullError(error)) throw http(507, 'The disk is full. Free some space, then try again.');
       throw http(400, error instanceof Error ? error.message : 'Could not save the file.');
@@ -576,6 +584,27 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const file = getFile(store, (req.params as { id: string }).id);
     if (!file) throw http(404, 'File not found.');
     return { file };
+  });
+  // Slide pictures for .pptx previews (rendered once with LibreOffice when it is installed).
+  app.get('/api/files/:id/slides', async (req) => {
+    const id = (req.params as { id: string }).id;
+    mustOwn(store, req, 'file', id, 'File not found.');
+    const file = getFile(store, id);
+    const full = file ? filePath(store, config.dataDir, id) : null;
+    if (!file || !full || !/\.pptx$/i.test(file.name)) throw http(404, 'File not found.');
+    const pages = await renderSlides(config.dataDir, id, full).catch((error: Error) => { store.addLog('warn', `Slide preview failed: ${error.message}`); return [] as string[]; });
+    return { pages: pages.length, renderer: pages.length ? 'libreoffice' : null };
+  });
+  app.get('/api/files/:id/slides/:n', async (req, reply) => {
+    const { id, n } = req.params as { id: string; n: string };
+    mustOwn(store, req, 'file', id, 'File not found.');
+    const full = filePath(store, config.dataDir, id);
+    if (!full) throw http(404, 'File not found.');
+    const pages = await renderSlides(config.dataDir, id, full).catch(() => [] as string[]);
+    const page = pages[Number(n) - 1];
+    if (!page) throw http(404, 'No such slide.');
+    reply.header('content-type', 'image/png').header('cache-control', 'private, max-age=3600');
+    return reply.send(fs.readFileSync(page));
   });
   app.get('/api/files/:id/raw', async (req, reply) => {
     const id = (req.params as { id: string }).id;
@@ -889,7 +918,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       content: z.string().min(1), agentId: z.string().optional(), modelId: z.string().optional(), imageUrl: z.string().optional(),
       mentions: z.array(z.union([
         z.object({ kind: z.literal('path'), root: z.string().min(1), path: z.string(), start: z.number().int().positive().optional(), end: z.number().int().positive().optional() }),
-        z.object({ kind: z.literal('file'), id: z.string().min(1) }),
+        z.object({ kind: z.literal('file'), id: z.string().min(1), ocr: z.enum(['auto', 'printed', 'handwriting']).optional() }),
       ])).max(12).optional(),
     }), req.body);
     const modelId = body.modelId ? allowedModel(req, chatModelId(store, body.modelId)) : undefined;
@@ -903,7 +932,20 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     }
     if (engine.sessionBusy(id)) throw http(409, 'A reply is still running in this chat. Wait for it or press Stop, then send again.');
     const offers = vault.capture(null, body.content);
-    const context = body.mentions?.length ? expandMentions(store, body.mentions, me(req)) : '';
+    let context = body.mentions?.length ? expandMentions(store, body.mentions.map((mention) => (mention.kind === 'file' ? { kind: 'file' as const, id: mention.id } : mention)), me(req)) : '';
+    // Photos sent with "read text" on: OCR text rides along as context (printed via Tesseract, handwriting via a vision model).
+    for (const mention of body.mentions ?? []) {
+      if (mention.kind !== 'file' || !mention.ocr || !engine.ocrReader) continue;
+      const file = getFile(store, mention.id);
+      if (!file || !(/^image\//.test(file.mime) || /\.(jpe?g|png|webp|heic|heif|tiff?|bmp|gif)$/i.test(file.name))) continue;
+      try {
+        const result = await engine.ocrReader(mention.id, mention.ocr, me(req));
+        const how = `${result.engine === 'vision' ? `vision model ${result.model}` : `Tesseract, confidence ${Math.round(result.confidence ?? 0)}`}; direction ${result.direction}`;
+        context += `${context ? '\n\n' : ''}### Text read from ${file.name} (${how})\n${result.text || '(no text found)'}${result.notes.length ? `\n(${result.notes.join(' ')})` : ''}`;
+      } catch (error) {
+        context += `${context ? '\n\n' : ''}### Text read from ${file.name}\n(OCR failed: ${error instanceof Error ? error.message : 'error'})`;
+      }
+    }
     const content = context ? `${body.content}${CONTEXT_MARK}${context}` : body.content;
     const run = await engine.startTurn({ sessionId: id, agentId, content: vault.redact(content), imageUrl: body.imageUrl, modelId });
     return { run, offers };
@@ -1179,6 +1221,24 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     }
     return { scan: lastScan, checklist: checklist(lastScan, store) };
   });
+  // Machine profile: role defaults, runtime advice and the last bench, for the setup wizard.
+  app.get('/api/setup/profile', async () => {
+    const machine = await machineInfo();
+    const gtt = readGpu()?.gttBytes;
+    const profile = profileFor({ ...machine, gpu: machine.gpu ?? undefined, gttGiB: gtt ? gtt / 2 ** 30 : undefined });
+    const { match: _match, ...plain } = profile;
+    return { machine, profile: plain, residentGiB: residentGiB(profile), autoMap: autoMapFor(profile), bench: loadBench(config.dataDir), profiles: MACHINE_PROFILES.map((row) => ({ id: row.id, title: row.title })) };
+  });
+  app.post('/api/setup/profile/apply', async (req) => {
+    const body = parse(z.object({ confirm: z.literal(true), id: z.string().optional() }), req.body);
+    const machine = await machineInfo();
+    const profile = (body.id ? MACHINE_PROFILES.find((row) => row.id === body.id) : null) ?? profileFor({ ...machine, gpu: machine.gpu ?? undefined });
+    const settings = store.getSettings();
+    const image = profile.roles.find((row) => row.role === 'image')?.model;
+    const next = { ...settings, autoModels: { ...settings.autoModels, ...autoMapFor(profile) }, ramBudgetGiB: profile.ramCapGiB, imageGen: { ...settings.imageGen, localModel: image || settings.imageGen.localModel } };
+    store.saveSettings(next, `Applied machine profile ${profile.id}`, { settings: next });
+    return { applied: profile.id, autoModels: next.autoModels, ramBudgetGiB: next.ramBudgetGiB, imageModel: next.imageGen.localModel };
+  });
   app.post('/api/setup/actions/:id/preview', async (req) => {
     const model = (req.body as { model?: string } | undefined)?.model;
     return setupPreview((req.params as { id: string }).id, model);
@@ -1254,7 +1314,9 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const raw = req.body as unknown;
     const audio = Buffer.isBuffer(raw) ? raw : raw instanceof ArrayBuffer ? Buffer.from(raw) : Buffer.alloc(0);
     try {
-      const text = await transcribe(fetchImpl, audio, String(req.headers['content-type'] || 'audio/webm'));
+      // No hint by default: Whisper detects Hebrew and English itself, and a bilingual user may speak either.
+      const hint = String((req.query as { lang?: string }).lang || '');
+      const text = await transcribe(fetchImpl, audio, String(req.headers['content-type'] || 'audio/webm'), hint === 'he' || hint === 'en' ? hint : undefined);
       return { text };
     } catch (error) {
       if (error instanceof VoiceError) return reply.code(error.statusCode).send({ error: error.message, code: error.code, hint: error.hint });
@@ -1262,10 +1324,13 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     }
   });
   app.post('/api/voice/speak', async (req, reply) => {
-    const body = parse(z.object({ text: z.string().min(1).max(2000) }), req.body);
+    const body = parse(z.object({ text: z.string().min(1).max(2000), lang: z.enum(['he', 'en']).optional() }), req.body);
     try {
-      const audio = await speak(fetchImpl, body.text);
+      const account = accountOf(req);
+      const cloud = account.role === 'owner' || account.limits.cloud !== false;
+      const audio = await speak(fetchImpl, body.text, { lang: body.lang, geminiKey: cloud ? process.env.GEMINI_API_KEY : '' });
       reply.header('content-type', audio.type);
+      reply.header('x-tts-engine', audio.engine);
       return reply.send(audio.bytes);
     } catch (error) {
       if (error instanceof VoiceError) return reply.code(error.statusCode).send({ error: error.message, code: error.code, hint: error.hint });
@@ -1393,7 +1458,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     })();
   });
 
-  registerLibrary(app, ctx);
+  registerLibrary(app, ctx, ocr);
 }
 
 /** Resolves a chat model by id, API name, or name. Unknown or disabled models are a 400 that lists the valid ones. */
@@ -1471,7 +1536,7 @@ function http(statusCode: number, message: string) {
   return error;
 }
 
-function registerLibrary(app: FastifyInstance, ctx: Ctx) {
+function registerLibrary(app: FastifyInstance, ctx: Ctx, ocr: ReturnType<typeof registerOcr>) {
   const { store, engine, vault, config, fetchImpl } = ctx;
   const embed = () => ollamaEmbedder(fetchImpl, store.getSettings().autoModels.embed || 'nomic-embed-text');
 
@@ -1495,7 +1560,7 @@ function registerLibrary(app: FastifyInstance, ctx: Ctx) {
     for (const file of body.files) {
       const bytes = Buffer.from(file.contentBase64, 'base64');
       try {
-        results.push({ name: file.name, ...(await ingestBuffer(store, id, { name: file.name, bytes }, embed())) });
+        results.push({ name: file.name, ...(await ingestBuffer(store, id, { name: file.name, bytes }, embed(), (data) => ocr.ocrBytesForKb(data, mine(req)))) });
       } catch (error) {
         if (!(error instanceof KbInputError)) throw error;
         results.push({ name: file.name, error: error.message });
@@ -1703,6 +1768,10 @@ async function runSetup(action: string, model: string | undefined, jobId: string
       }
       try { const row = JSON.parse(pending) as { error?: string }; if (row.error) failure = row.error; } catch { /* no trailing line */ }
       if (failure) throw new Error(`Ollama could not pull ${name}: ${failure}`);
+    } else if (action === 'bench-runtime') {
+      const base = (process.env.OLLAMA_HOST || lastScan?.ollama?.url || 'http://127.0.0.1:11434').replace(/\/$/, '');
+      const report = await benchRuntime(fetchImpl, base, { model: model || undefined, log: (line) => store.appendJob(jobId, line) });
+      saveBench(ctx.config.dataDir, report);
     } else if (action === 'start-searxng') {
       if (!(await docker.ping())) throw new Error(`Docker is not available at ${docker.describe()}.`);
       const config = searxngConfig(ctx.config.dataDir);

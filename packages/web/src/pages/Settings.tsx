@@ -1,3 +1,4 @@
+import { LanguageSettings } from '../components/LanguagePicker';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { api, post } from '../lib/api';
@@ -7,9 +8,10 @@ import { AccountCard, People, QuotaCard } from '../components/People';
 import { ImageRole } from '../components/ImageRole';
 import { EmptyState, PageHeader } from '../components/ui';
 import { useUsableModels } from '../lib/models';
-import { Activity, Archive, Bot, Bug, Check, Cpu, FolderGit2, Globe, KeyRound, Palette, ScrollText, ShieldCheck, Users, type LucideIcon } from 'lucide-react';
+import { Activity, Archive, Bot, Bug, Check, Cpu, FolderGit2, Globe, KeyRound, Palette, ScrollText, ShieldCheck, Users, type LucideIcon, Languages } from 'lucide-react';
 import { useWorkspaces } from '../components/PersonaPanel';
 import { Face, type FaceAgent } from '../components/Face';
+import { t as tr } from '../i18n';
 
 interface Secret { id: string; name: string; handle: string; scope: string; revokedAt: string | null }
 interface Audit { id: number; action: string; actor: string; createdAt: string }
@@ -18,18 +20,19 @@ interface SettingsShape { codeApproval: string; geminiTier: string; sandbox: str
 interface Def { id: string; label: string; icon: LucideIcon; blurb: string; words: string; owner?: boolean; group: 'General' | 'Admin' }
 /** One page, in this order. Old deep links (#vault, #policy, #backups…) land on the matching section. */
 const SECTIONS: Def[] = [
-  { id: 'appearance', group: 'General', label: 'Appearance', icon: Palette, blurb: 'Theme, font, bubbles and wallpaper for your account.', words: 'theme dark light font wallpaper color bubbles density accent' },
-  { id: 'models', group: 'General', label: 'Models', icon: Cpu, blurb: 'What answers, and which model draws images.', words: 'models ollama gemini image pull refresh limits quota tier' },
-  { id: 'personas', group: 'General', label: 'Personas', icon: Bot, blurb: 'Who you talk to. Edit one from the chat with its name.', words: 'personas agents prompt instructions tools skills face' },
-  { id: 'workspaces', group: 'General', label: 'Workspaces', icon: FolderGit2, blurb: 'Folders and repos chats can attach.', words: 'workspaces folders repos git clone sets' },
-  { id: 'data', group: 'General', label: 'Data', icon: Archive, blurb: 'Your account, backups and exports.', words: 'backups snapshot restore export password account diagnostics' },
-  { id: 'people', group: 'Admin', owner: true, label: 'People', icon: Users, blurb: 'Member accounts and what they may use.', words: 'members accounts users invite quota' },
-  { id: 'health', group: 'Admin', owner: true, label: 'Health', icon: Activity, blurb: 'Ollama, Docker, SearXNG, RAM budget and the rest.', words: 'ollama docker searxng ram memory status doctor' },
-  { id: 'policy', group: 'Admin', owner: true, label: 'Safety & limits', icon: ShieldCheck, blurb: 'Approvals, read-only mode, the kill switch and token caps.', words: 'approvals read-only kill switch tokens caps limits safety emergency gemini tier' },
-  { id: 'vault', group: 'Admin', owner: true, label: 'Secrets', icon: KeyRound, blurb: 'API keys, encrypted with AES-256-GCM. Models only see handles.', words: 'keys api gemini openrouter secrets token github' },
-  { id: 'audit', group: 'Admin', owner: true, label: 'Audit log', icon: ScrollText, blurb: 'Who changed what, newest first.', words: 'history log changes' },
-  { id: 'debug', group: 'Admin', owner: true, label: 'Debug', icon: Bug, blurb: 'Logs, run inspector and diagnostics. Nothing leaves this machine.', words: 'logs inspector replay tool test diagnostics' },
-  { id: 'remote', group: 'Admin', owner: true, label: 'Remote access', icon: Globe, blurb: 'Reach this box from your phone or laptop.', words: 'tailscale phone lan network access cloudflare' },
+  { id: 'appearance', group: 'General', label: tr('Appearance'), icon: Palette, blurb: tr('Theme, font, bubbles and wallpaper for your account.'), words: 'theme dark light font wallpaper color bubbles density accent' },
+  { id: 'language', group: 'General', label: tr('Language'), icon: Languages, blurb: tr('Interface language and Hebrew polishing.'), words: 'language hebrew עברית english rtl locale translate' },
+  { id: 'models', group: 'General', label: tr('Models'), icon: Cpu, blurb: tr('What answers, and which model draws images.'), words: 'models ollama gemini image pull refresh limits quota tier' },
+  { id: 'personas', group: 'General', label: tr('Personas'), icon: Bot, blurb: tr('Who you talk to. Edit one from the chat with its name.'), words: 'personas agents prompt instructions tools skills face' },
+  { id: 'workspaces', group: 'General', label: tr('Workspaces'), icon: FolderGit2, blurb: tr('Folders and repos chats can attach.'), words: 'workspaces folders repos git clone sets' },
+  { id: 'data', group: 'General', label: tr('Data'), icon: Archive, blurb: tr('Your account, backups and exports.'), words: 'backups snapshot restore export password account diagnostics' },
+  { id: 'people', group: 'Admin', owner: true, label: tr('People'), icon: Users, blurb: tr('Member accounts and what they may use.'), words: 'members accounts users invite quota' },
+  { id: 'health', group: 'Admin', owner: true, label: tr('Health'), icon: Activity, blurb: tr('Ollama, Docker, SearXNG, RAM budget and the rest.'), words: 'ollama docker searxng ram memory status doctor' },
+  { id: 'policy', group: 'Admin', owner: true, label: tr('Safety & limits'), icon: ShieldCheck, blurb: tr('Approvals, read-only mode, the kill switch and token caps.'), words: 'approvals read-only kill switch tokens caps limits safety emergency gemini tier' },
+  { id: 'vault', group: 'Admin', owner: true, label: tr('Secrets'), icon: KeyRound, blurb: tr('API keys, encrypted with AES-256-GCM. Models only see handles.'), words: 'keys api gemini openrouter secrets token github' },
+  { id: 'audit', group: 'Admin', owner: true, label: tr('Audit log'), icon: ScrollText, blurb: tr('Who changed what, newest first.'), words: 'history log changes' },
+  { id: 'debug', group: 'Admin', owner: true, label: tr('Debug'), icon: Bug, blurb: tr('Logs, run inspector and diagnostics. Nothing leaves this machine.'), words: 'logs inspector replay tool test diagnostics' },
+  { id: 'remote', group: 'Admin', owner: true, label: tr('Remote access'), icon: Globe, blurb: tr('Reach this box from your phone or laptop.'), words: 'tailscale phone lan network access cloudflare' },
 ];
 const ALIASES: Record<string, string> = { backups: 'data', account: 'data', quota: 'models', images: 'models' };
 
@@ -52,7 +55,7 @@ function useSavedTick() {
   };
 }
 function SavedTick({ state }: { state: 'idle' | 'saving' | 'saved' }) {
-  return <span className="saved-tick page-tick" aria-live="polite">{state === 'saving' ? 'Saving…' : state === 'saved' ? <><Check size={14} aria-hidden /> Saved</> : ''}</span>;
+  return <span className="saved-tick page-tick" aria-live="polite">{state === 'saving' ? tr('Saving…') : state === 'saved' ? <><Check size={14} aria-hidden />{' '}{tr('Saved')}</> : ''}</span>;
 }
 
 function SettingsPage({ owner, children }: { owner: boolean; children: (show: (id: string) => boolean, track: ReturnType<typeof useSavedTick>['track']) => ReactNode }) {
@@ -88,24 +91,24 @@ function SettingsPage({ owner, children }: { owner: boolean; children: (show: (i
   }, [visible.map((def) => def.id).join()]);
   return (
     <div className="page settings-page">
-      <PageHeader title="Settings" description="Everything on one page. Changes save as you make them." actions={<SavedTick state={saved.state} />} />
+      <PageHeader title={tr('Settings')} description={tr('Everything on one page. Changes save as you make them.')} actions={<SavedTick state={saved.state} />} />
       <div className="settings-one">
-        <nav className="settings-nav" aria-label="Settings sections">
-          <input type="search" className="settings-find" placeholder="Search settings" aria-label="Search settings" value={find} onChange={(event) => setFind(event.target.value)}
+        <nav className="settings-nav" aria-label={tr('Settings sections')}>
+          <input type="search" className="settings-find" placeholder={tr('Search settings')} aria-label={tr('Search settings')} value={find} onChange={(event) => setFind(event.target.value)}
             onKeyDown={(event) => { if (event.key === 'Escape') setFind(''); if (event.key === 'Enter' && visible[0]) document.getElementById(`s-${visible[0].id}`)?.scrollIntoView({ block: 'start' }); }} />
           {(['General', 'Admin'] as const).map((group) => {
             const items = visible.filter((def) => def.group === group);
             if (!items.length) return null;
             return (
               <div key={group}>
-                {owner && <span className="nav-heading">{group === 'Admin' ? 'Admin (owner only)' : group}</span>}
+                {owner && <span className="nav-heading">{group === 'Admin' ? tr('Admin (owner only)') : tr('General')}</span>}
                 {items.map((def) => (
                   <a key={def.id} href={`#${def.id}`} onClick={(event) => { event.preventDefault(); document.getElementById(`s-${def.id}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' }); setActive(def.id); window.history.replaceState(window.history.state, '', `#${def.id}`); }} className={active === def.id ? 'on' : undefined} aria-current={active === def.id ? 'true' : undefined}><def.icon size={15} aria-hidden /> {def.label}</a>
                 ))}
               </div>
             );
           })}
-          {visible.length === 0 && <p className="faint settings-none">Nothing matches “{find}”.</p>}
+          {visible.length === 0 && <p className="faint settings-none">{tr('Nothing matches “')}{find}”.</p>}
         </nav>
         <div className="settings-flow">
           {children(show, saved.track)}
@@ -130,18 +133,18 @@ function PersonasBlock() {
   const [agents, setAgents] = useState<(FaceAgent & { id: string; name: string; title?: string; hidden?: boolean })[] | null>(null);
   useEffect(() => { api<{ agents: (FaceAgent & { id: string; name: string; title?: string })[] }>('/api/agents').then((data) => setAgents(data.agents)).catch(() => setAgents([])); }, []);
   if (!agents) return <div className="skeleton-lines"><span /><span /></div>;
-  if (!agents.length) return <EmptyState icon={Bot} title="No personas yet" action={<Link className="btn primary" to="/agents?new=1">New persona</Link>}>A persona is a name, a model and the tools it may use.</EmptyState>;
+  if (!agents.length) return <EmptyState icon={Bot} title={tr('No personas yet')} action={<Link className="btn primary" to="/agents?new=1">{tr('New persona')}</Link>}>{tr('A persona is a name, a model and the tools it may use.')}</EmptyState>;
   return (
     <div className="item-list">
       {agents.map((agent) => (
         <div key={agent.id} className="item-row">
           <Face agent={agent} size={28} />
-          <span className="grow"><strong>{agent.name}</strong><span className="faint">{agent.title || (agent.hidden ? 'hidden from the sidebar' : 'persona')}</span></span>
-          <Link className="btn small ghost" to={`/?persona=${agent.id}`}>Chat</Link>
-          <Link className="btn small" to={`/agents?edit=${agent.id}`}>Edit</Link>
+          <span className="grow"><strong>{agent.name}</strong><span className="faint">{agent.title || (agent.hidden ? tr('hidden from the sidebar') : 'persona')}</span></span>
+          <Link className="btn small ghost" to={`/?persona=${agent.id}`}>{tr('Chat')}</Link>
+          <Link className="btn small" to={`/agents?edit=${agent.id}`}>{tr('Edit')}</Link>
         </div>
       ))}
-      <div className="row" style={{ marginTop: 8 }}><Link className="btn small ghost" to="/agents?new=1">New persona</Link><Link className="btn small ghost" to="/agents">Manage personas</Link></div>
+      <div className="row" style={{ marginTop: 8 }}><Link className="btn small ghost" to="/agents?new=1">{tr('New persona')}</Link><Link className="btn small ghost" to="/agents">{tr('Manage personas')}</Link></div>
     </div>
   );
 }
@@ -150,15 +153,15 @@ function WorkspacesBlock() {
   const ws = useWorkspaces();
   return (
     <>
-      {ws.workspaces.length === 0 ? <EmptyState icon={FolderGit2} title="No workspaces yet" action={<Link className="btn" to="/">Add one from a chat</Link>}>Attach a folder or repo from the strip at the top of any chat.</EmptyState> : (
+      {ws.workspaces.length === 0 ? <EmptyState icon={FolderGit2} title={tr('No workspaces yet')} action={<Link className="btn" to="/">{tr('Add one from a chat')}</Link>}>{tr('Attach a folder or repo from the strip at the top of any chat.')}</EmptyState> : (
         <div className="item-list">
           {ws.workspaces.map((row) => (
-            <div key={row.id} className="item-row"><span className={row.dirty ? 'dot warn' : 'dot ok'} aria-hidden /><span className="grow"><strong>{row.label}</strong><span className="faint mono">{row.kind === 'repo' ? `${row.branch || 'detached'} · ` : 'folder · '}{row.path}</span></span>
-              <a className="btn small ghost" href={`/workspace?root=${encodeURIComponent(row.id)}`}>Open</a></div>
+            <div key={row.id} className="item-row"><span className={row.dirty ? 'dot warn' : 'dot ok'} aria-hidden /><span className="grow"><strong>{row.label}</strong><span className="faint mono">{row.kind === 'repo' ? `${row.branch || 'detached'} · ` : tr('folder · ')}{row.path}</span></span>
+              <a className="btn small ghost" href={`/workspace?root=${encodeURIComponent(row.id)}`}>{tr('Open')}</a></div>
           ))}
         </div>
       )}
-      <p className="faint" style={{ marginTop: 8 }}>Each chat keeps its own workspaces. A persona's default sets pre-fill its new chats (set them in the persona panel). {ws.sets.length ? `Sets: ${ws.sets.map((set) => set.name).join(', ')}.` : ''}</p>
+      <p className="faint" style={{ marginTop: 8 }}>{tr('Each chat keeps its own workspaces. A persona\'s default sets pre-fill its new chats (set them in the persona panel).')}{' '}{ws.sets.length ? tr('Sets: {0}.', [ws.sets.map((set) => set.name).join(', ')]) : ''}</p>
     </>
   );
 }
@@ -169,20 +172,20 @@ function ModelsBlock({ owner, settings, patchSettings }: { owner: boolean; setti
   return (
     <>
       <div className="item-row settings-line">
-        <span className="grow"><strong>{usable.loaded ? (count ? `${count} model${count === 1 ? '' : 's'} ready` : 'No model yet') : 'Checking…'}</strong>
-          <span className="faint">{usable.models.local.map((m) => m.name).slice(0, 4).join(', ') || 'Pull one with Ollama'}{usable.models.geminiConnected ? ' · Gemini connected' : ' · Gemini not connected'}</span></span>
-        {owner && <button className="btn small" disabled={usable.refreshing} onClick={() => void usable.refresh()}>{usable.refreshing ? 'Refreshing…' : 'Refresh models'}</button>}
-        <Link className="btn small ghost" to="/models">Open Models</Link>
+        <span className="grow"><strong>{usable.loaded ? (count ? tr('{0} model{1} ready', [count, count === 1 ? '' : 's']) : tr('No model yet')) : tr('Checking…')}</strong>
+          <span className="faint">{usable.models.local.map((m) => m.name).slice(0, 4).join(', ') || tr('Pull one with Ollama')}{usable.models.geminiConnected ? tr(' · Gemini connected') : tr(' · Gemini not connected')}</span></span>
+        {owner && <button className="btn small" disabled={usable.refreshing} onClick={() => void usable.refresh()}>{usable.refreshing ? tr('Refreshing…') : tr('Refresh models')}</button>}
+        <Link className="btn small ghost" to="/models">{tr('Open Models')}</Link>
       </div>
       {owner && settings && patchSettings && (
-        <label className="field settings-line"><span>Gemini tier</span>
+        <label className="field settings-line"><span>{tr('Gemini tier')}</span>
           <select value={settings.geminiTier} onChange={(event) => void patchSettings({ geminiTier: event.target.value })}>
-            <option value="free">Free tier (respect the documented limits)</option>
-            <option value="paid">Paid (Argon and Pro become eligible)</option>
+            <option value="free">{tr('Free tier (respect the documented limits)')}</option>
+            <option value="paid">{tr('Paid (Argon and Pro become eligible)')}</option>
           </select>
         </label>
       )}
-      {usable.models.empty && usable.loaded && <p className="faint">Without a model nothing can answer. <Link to="/setup">Set one up</Link>.</p>}
+      {usable.models.empty && usable.loaded && <p className="faint">{tr('Without a model nothing can answer.')}{' '}<Link to="/setup">{tr('Set one up')}</Link>.</p>}
       <ImageRole />
       {!owner && <QuotaCard />}
     </>
@@ -195,6 +198,7 @@ export function Settings({ role = 'owner' }: { role?: 'owner' | 'member' }) {
       <SettingsPage owner={false}>
         {(show) => <>
           {show('appearance') && <Block id="appearance"><Appearance /></Block>}
+          {show('language') && <Block id="language"><LanguageSettings /></Block>}
           {show('models') && <Block id="models"><ModelsBlock owner={false} settings={null} /></Block>}
           {show('personas') && <Block id="personas"><PersonasBlock /></Block>}
           {show('workspaces') && <Block id="workspaces"><WorkspacesBlock /></Block>}
@@ -257,29 +261,30 @@ function OwnerSettings() {
     <SettingsPage owner>
       {(show, track) => { trackRef.current = track; return <>
       {show('appearance') && <Block id="appearance"><Appearance /></Block>}
+          {show('language') && <Block id="language"><LanguageSettings /></Block>}
       {show('models') && <Block id="models"><ModelsBlock owner settings={settings} patchSettings={patchSettings} /></Block>}
       {show('personas') && <Block id="personas"><PersonasBlock /></Block>}
       {show('workspaces') && <Block id="workspaces"><WorkspacesBlock /></Block>}
       {show('data') && <Block id="data">
         <div className="card" id="backups">
-          <h3>Backups</h3>
-          <p className="muted">A snapshot includes the database, the encrypted vault, its master key, and persona workspaces. Treat the file as private. Restore restarts the process.</p>
-          <button className="btn" onClick={async () => { const result = await track(post<{ backup: { id: string }; shipped: { detail: string } }>('/api/backups')); toast(`Saved ${result.backup.id}. ${result.shipped.detail}`, 'ok'); }}>Take a snapshot</button>
-          <p className="faint">Schedule and target live in the setup site (Defaults → Backup cron, Backup target).</p>
+          <h3>{tr('Backups')}</h3>
+          <p className="muted">{tr('A snapshot includes the database, the encrypted vault, its master key, and persona workspaces. Treat the file as private. Restore restarts the process.')}</p>
+          <button className="btn" onClick={async () => { const result = await track(post<{ backup: { id: string }; shipped: { detail: string } }>('/api/backups')); toast(tr('Saved {0}. {1}', [result.backup.id, result.shipped.detail]), 'ok'); }}>{tr('Take a snapshot')}</button>
+          <p className="faint">{tr('Schedule and target live in the setup site (Defaults → Backup cron, Backup target).')}</p>
         </div>
         <AccountCard />
       </Block>}
       {show('people') && <Block id="people"><People /></Block>}
       {show('health') && <Block id="health">{null}</Block>}
       {show('health') && <div className="card" id="health">
-        <div className="card-head"><h3>System health</h3><button className="btn" type="button" disabled={checking === 'all'} onClick={() => void refreshHealth()}>{checking === 'all' ? 'Checking…' : 'Refresh health'}</button></div>
-        {health.length === 0 && <p className="faint">{checking ? 'Checking Ollama, Docker, SearXNG and the rest…' : 'No results yet.'}</p>}
+        <div className="card-head"><h3>{tr('System health')}</h3><button className="btn" type="button" disabled={checking === 'all'} onClick={() => void refreshHealth()}>{checking === 'all' ? tr('Checking…') : tr('Refresh health')}</button></div>
+        {health.length === 0 && <p className="faint">{checking ? tr('Checking Ollama, Docker, SearXNG and the rest…') : tr('No results yet.')}</p>}
         <ul className="health-list">
           {health.map((check) => (
             <li key={check.id}>
               <span className={check.ok ? 'badge ok' : 'badge warn'}>{check.ok ? 'ok' : 'check'}</span>
               <span className="health-detail"><strong>{check.id}</strong> <span className="muted">{check.detail}</span></span>
-              <button className="btn ghost small" type="button" disabled={checking === check.id} onClick={async () => { setChecking(check.id); try { const data = await post<{ check: typeof check }>(`/api/debug/health/${encodeURIComponent(check.id)}`); setHealth((items) => items.map((item) => item.id === data.check.id ? data.check : item)); } finally { setChecking(null); } }}>{checking === check.id ? 'Testing…' : 'Test'}</button>
+              <button className="btn ghost small" type="button" disabled={checking === check.id} onClick={async () => { setChecking(check.id); try { const data = await post<{ check: typeof check }>(`/api/debug/health/${encodeURIComponent(check.id)}`); setHealth((items) => items.map((item) => item.id === data.check.id ? data.check : item)); } finally { setChecking(null); } }}>{checking === check.id ? tr('Testing…') : tr('Test')}</button>
             </li>
           ))}
         </ul>
@@ -287,55 +292,55 @@ function OwnerSettings() {
       {show('policy') && <Block id="policy">{null}</Block>}
       {show('policy') && settings && (
         <div className="card" id="policy">
-          <h3>Approvals</h3>
-          <label className="field"><span>Code edits</span>
+          <h3>{tr('Approvals')}</h3>
+          <label className="field"><span>{tr('Code edits')}</span>
             <select value={settings.codeApproval} onChange={async (event) => { await patchSettings({ codeApproval: event.target.value }); await load(); }}>
-              <option value="sandbox-auto">Auto inside the workspace, ask for host paths and push</option>
-              <option value="always">Ask before every edit batch</option>
+              <option value="sandbox-auto">{tr('Auto inside the workspace, ask for host paths and push')}</option>
+              <option value="always">{tr('Ask before every edit batch')}</option>
             </select>
           </label>
-          <p className="faint">Sandbox: {settings.sandbox}. Destructive shell commands ask first: {settings.approvalForDestructive ? 'yes' : 'no'}. Interrupted runs resume on restart: {settings.autoResume ? 'yes' : 'no'}.</p>
-          <h3 style={{ marginTop: 18 }}>Limits</h3>
-          <label className="field"><span>Daily token cap</span>
-            <input type="number" min={1} placeholder="No cap" defaultValue={settings.dailyTokenLimit ?? ''} onChange={(event) => { const raw = event.target.value; debounce('cap', () => void patchSettings({ dailyTokenLimit: raw ? Number(raw) : null })); }} />
+          <p className="faint">{tr('Sandbox:')}{' '}{settings.sandbox}. Destructive shell commands ask first: {settings.approvalForDestructive ? 'yes' : 'no'}. Interrupted runs resume on restart: {settings.autoResume ? 'yes' : 'no'}.</p>
+          <h3 style={{ marginTop: 18 }}>{tr('Limits')}</h3>
+          <label className="field"><span>{tr('Daily token cap')}</span>
+            <input type="number" min={1} placeholder={tr('No cap')} defaultValue={settings.dailyTokenLimit ?? ''} onChange={(event) => { const raw = event.target.value; debounce('cap', () => void patchSettings({ dailyTokenLimit: raw ? Number(raw) : null })); }} />
           </label>
-          <h3 style={{ marginTop: 18 }}>Emergency</h3>
-          <p className="faint">Read-only blocks every write and tool that changes something. The kill switch stops all running turns and refuses new ones until you clear it.</p>
+          <h3 style={{ marginTop: 18 }}>{tr('Emergency')}</h3>
+          <p className="faint">{tr('Read-only blocks every write and tool that changes something. The kill switch stops all running turns and refuses new ones until you clear it.')}</p>
           <div className="row">
-            <button className="btn" onClick={async () => { await patchSettings({ readOnly: !settings.readOnly }); await load(); toast(settings.readOnly ? 'Read-only is off.' : 'Read-only is on.', 'ok'); }}>{settings.readOnly ? 'Turn off read-only' : 'Turn on read-only'}</button>
-            <button className="btn danger" onClick={async () => { if (!window.confirm('Stop every running turn now?')) return; await post('/api/control/kill'); await load(); toast('Kill switch on. Nothing runs until you clear it.', 'ok'); }}>Kill switch</button>
-            <button className="btn ghost" onClick={async () => { await post('/api/control/resume'); await load(); toast('Kill switch cleared.', 'ok'); }}>Clear kill switch</button>
+            <button className="btn" onClick={async () => { await patchSettings({ readOnly: !settings.readOnly }); await load(); toast(settings.readOnly ? tr('Read-only is off.') : tr('Read-only is on.'), 'ok'); }}>{settings.readOnly ? tr('Turn off read-only') : tr('Turn on read-only')}</button>
+            <button className="btn danger" onClick={async () => { if (!window.confirm(tr('Stop every running turn now?'))) return; await post('/api/control/kill'); await load(); toast(tr('Kill switch on. Nothing runs until you clear it.'), 'ok'); }}>{tr('Kill switch')}</button>
+            <button className="btn ghost" onClick={async () => { await post('/api/control/resume'); await load(); toast(tr('Kill switch cleared.'), 'ok'); }}>{tr('Clear kill switch')}</button>
           </div>
         </div>
       )}
       {show('vault') && <Block id="vault">{null}</Block>}
       {show('vault') && <>
-      <form className="card" id="vault" onSubmit={async (event) => { event.preventDefault(); await post('/api/vault', { name, value, scope: 'global' }); setValue(''); await load(); toast(`Saved ${name}.`, 'ok'); }}>
-        <h3>Add a secret</h3>
+      <form className="card" id="vault" onSubmit={async (event) => { event.preventDefault(); await post('/api/vault', { name, value, scope: 'global' }); setValue(''); await load(); toast(tr('Saved {0}.', [name]), 'ok'); }}>
+        <h3>{tr('Add a secret')}</h3>
         <div className="row">
-          <label className="field" style={{ flex: '1 1 220px' }}><span>Name</span><input value={name} onChange={(event) => setName(event.target.value.toUpperCase())} placeholder="GEMINI_API_KEY" /></label>
-          <label className="field" style={{ flex: '2 1 280px' }}><span>Value</span><input type="password" autoComplete="off" value={value} onChange={(event) => setValue(event.target.value)} /></label>
+          <label className="field" style={{ flex: '1 1 220px' }}><span>{tr('Name')}</span><input value={name} onChange={(event) => setName(event.target.value.toUpperCase())} placeholder={tr('GEMINI_API_KEY')} /></label>
+          <label className="field" style={{ flex: '2 1 280px' }}><span>{tr('Value')}</span><input type="password" autoComplete="off" value={value} onChange={(event) => setValue(event.target.value)} /></label>
         </div>
-        <button className="btn primary" disabled={!name || !value}>Save secret</button>
+        <button className="btn primary" disabled={!name || !value}>{tr('Save secret')}</button>
       </form>
       <div className="card">
-        <h3>Stored secrets</h3>
-        {secrets.length === 0 && <EmptyState icon={KeyRound} title="No secrets yet">Add GEMINI_API_KEY to use Gemini, or GITHUB_TOKEN to push to GitHub.</EmptyState>}
+        <h3>{tr('Stored secrets')}</h3>
+        {secrets.length === 0 && <EmptyState icon={KeyRound} title={tr('No secrets yet')}>{tr('Add GEMINI_API_KEY to use Gemini, or GITHUB_TOKEN to push to GitHub.')}</EmptyState>}
         <div className="item-list">
           {secrets.map((secret) => (
             <div key={secret.id} className="item-row">
               <span className={secret.revokedAt ? 'dot off' : 'dot on'} aria-hidden />
-              <span className="grow"><strong className="mono">{secret.handle}</strong><span className="faint">{secret.scope}{secret.revokedAt ? ' · revoked' : ''}</span>
+              <span className="grow"><strong className="mono">{secret.handle}</strong><span className="faint">{secret.scope}{secret.revokedAt ? tr(' · revoked') : ''}</span>
                 {revealed?.id === secret.id && <span className="mono wrap">{revealed.value}</span>}
               </span>
               {revealing === secret.id ? (
                 <form className="row" onSubmit={async (event) => { event.preventDefault(); const data = await post<{ value: string }>(`/api/vault/${secret.id}/reveal`, { password }); setRevealed({ id: secret.id, value: data.value }); setPassword(''); setRevealing(null); }}>
-                  <input type="password" autoFocus aria-label="Your password" placeholder="Your password" value={password} onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRevealing(null); }} />
-                  <button className="btn small">Reveal</button>
+                  <input type="password" autoFocus aria-label={tr('Your password')} placeholder={tr('Your password')} value={password} onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRevealing(null); }} />
+                  <button className="btn small">{tr('Reveal')}</button>
                 </form>
-              ) : revealed?.id === secret.id ? <button className="btn ghost small" onClick={() => setRevealed(null)}>Hide</button>
-                : <button className="btn ghost small" disabled={Boolean(secret.revokedAt)} onClick={() => { setRevealing(secret.id); setPassword(''); }}>Reveal…</button>}
-              <button className="btn danger small" disabled={Boolean(secret.revokedAt)} onClick={async () => { if (!window.confirm(`Revoke ${secret.handle}? Tools using it stop working.`)) return; await post(`/api/vault/${secret.id}/revoke`); await load(); }}>Revoke</button>
+              ) : revealed?.id === secret.id ? <button className="btn ghost small" onClick={() => setRevealed(null)}>{tr('Hide')}</button>
+                : <button className="btn ghost small" disabled={Boolean(secret.revokedAt)} onClick={() => { setRevealing(secret.id); setPassword(''); }}>{tr('Reveal…')}</button>}
+              <button className="btn danger small" disabled={Boolean(secret.revokedAt)} onClick={async () => { if (!window.confirm(tr('Revoke {0}? Tools using it stop working.', [secret.handle]))) return; await post(`/api/vault/${secret.id}/revoke`); await load(); }}>{tr('Revoke')}</button>
             </div>
           ))}
         </div>
@@ -343,53 +348,53 @@ function OwnerSettings() {
       </>}
       {show('audit') && <Block id="audit">{null}</Block>}
       {show('audit') && <div className="card" id="audit">
-        <h3>Audit</h3>
-        {audit.length === 0 && <p className="faint">Nothing logged yet.</p>}
+        <h3>{tr('Audit')}</h3>
+        {audit.length === 0 && <p className="faint">{tr('Nothing logged yet.')}</p>}
         {(allAudit ? audit : audit.slice(0, 12)).map((row) => <p key={row.id} className="mono faint wrap">{row.createdAt} · {row.action} · {row.actor}</p>)}
-        {audit.length > 12 && <button className="btn ghost" onClick={() => setAllAudit((value) => !value)}>{allAudit ? 'Show fewer' : `Show all ${audit.length}`}</button>}
+        {audit.length > 12 && <button className="btn ghost" onClick={() => setAllAudit((value) => !value)}>{allAudit ? tr('Show fewer') : tr('Show all {0}', [audit.length])}</button>}
       </div>}
       {show('debug') && <Block id="debug">{null}</Block>}
       {show('debug') && <div className="card" id="debug">
-        <h3>Logs</h3>
-        <p className="muted">Owner only. Logs stay on this machine, rotate when they grow past 2 MB, and exports are redacted. Nothing here is sent anywhere.</p>
-        <label className="field"><span>Log level</span>
+        <h3>{tr('Logs')}</h3>
+        <p className="muted">{tr('Owner only. Logs stay on this machine, rotate when they grow past 2 MB, and exports are redacted. Nothing here is sent anywhere.')}</p>
+        <label className="field"><span>{tr('Log level')}</span>
           <select value={debugLevel} onChange={async (event) => { await patchSettings({ debugLevel: event.target.value }); setDebugLevel(event.target.value); }}>
-            <option value="info">Info</option>
-            <option value="debug">Debug</option>
+            <option value="info">{tr('Info')}</option>
+            <option value="debug">{tr('Debug')}</option>
           </select>
         </label>
         <div className="row">
-          <select aria-label="Component" value={component} onChange={(event) => setComponent(event.target.value)}>
-            <option value="">All components</option>
+          <select aria-label={tr('Component')} value={component} onChange={(event) => setComponent(event.target.value)}>
+            <option value="">{tr('All components')}</option>
             {['engine', 'router', 'context', 'providers', 'mcp', 'docker', 'triggers', 'repos', 'kb', 'setup', 'notify'].map((item) => <option key={item}>{item}</option>)}
           </select>
-          <input aria-label="Search logs" value={query} placeholder="Search" onChange={(event) => setQuery(event.target.value)} />
-          <button className="btn" type="button" onClick={async () => { const data = await api<{ logs: typeof logs; debugLevel: string }>(`/api/logs?component=${component}&q=${encodeURIComponent(query)}`); setLogs(data.logs); setDebugLevel(data.debugLevel); }}>Tail</button>
+          <input aria-label={tr('Search logs')} value={query} placeholder={tr('Search')} onChange={(event) => setQuery(event.target.value)} />
+          <button className="btn" type="button" onClick={async () => { const data = await api<{ logs: typeof logs; debugLevel: string }>(`/api/logs?component=${component}&q=${encodeURIComponent(query)}`); setLogs(data.logs); setDebugLevel(data.debugLevel); }}>{tr('Tail')}</button>
         </div>
         {logs.slice(0, 40).map((row) => <p key={row.id} className="mono faint wrap">{row.createdAt} · {row.level} · {row.component} · {row.message}</p>)}
-        <h3>Run inspector</h3>
+        <h3>{tr('Run inspector')}</h3>
         <div className="row">
-          <input aria-label="Run id" value={runId} placeholder="run id" onChange={(event) => setRunId(event.target.value)} />
-          <button className="btn" type="button" onClick={async () => setInspection(JSON.stringify(await api(`/api/debug/runs/${runId}`), null, 2))}>Inspect</button>
-          {devModels && <button className="btn" type="button" onClick={async () => { try { const data = await post<{ run: { id: string } }>(`/api/debug/runs/${runId}/replay`); setInspection(`Replayed as ${data.run.id}`); } catch (error) { toast((error as Error).message, 'error'); } }}>Replay (dev)</button>}
+          <input aria-label={tr('Run id')} value={runId} placeholder={tr('run id')} onChange={(event) => setRunId(event.target.value)} />
+          <button className="btn" type="button" onClick={async () => setInspection(JSON.stringify(await api(`/api/debug/runs/${runId}`), null, 2))}>{tr('Inspect')}</button>
+          {devModels && <button className="btn" type="button" onClick={async () => { try { const data = await post<{ run: { id: string } }>(`/api/debug/runs/${runId}/replay`); setInspection(`Replayed as ${data.run.id}`); } catch (error) { toast((error as Error).message, 'error'); } }}>{tr('Replay (dev)')}</button>}
         </div>
         {inspection && <pre className="command">{inspection.slice(0, 8000)}</pre>}
-        <h3>Tool test</h3>
-        <button className="btn" type="button" onClick={async () => setToolTests((await post<{ results: typeof toolTests }>('/api/debug/tool-test', {})).results)}>Test web_search and kb_search</button>
+        <h3>{tr('Tool test')}</h3>
+        <button className="btn" type="button" onClick={async () => setToolTests((await post<{ results: typeof toolTests }>('/api/debug/tool-test', {})).results)}>{tr('Test web_search and kb_search')}</button>
         {toolTests.map((test) => (
           <div key={test.tool}>
-            <p className="row"><span className={test.ok ? 'badge' : 'badge warn'}>{test.ok ? 'ok' : 'check'}</span> {test.tool} “{test.query}” in {test.ms} ms{test.error ? `: ${test.error}` : ''}</p>
+            <p className="row"><span className={test.ok ? 'badge' : 'badge warn'}>{test.ok ? 'ok' : 'check'}</span> {test.tool} “{test.query}{tr('” in')}{' '}{test.ms} ms{test.error ? `: ${test.error}` : ''}</p>
             {test.output && <pre className="command">{test.output.slice(0, 1200)}</pre>}
           </div>
         ))}
-        <p><a className="btn" href="/api/debug/bundle">Download redacted diagnostics</a></p>
-        <p className="faint">Over SSH: <span className="mono">npm run doctor</span>. To recover a forgotten password: <span className="mono">npm run reset-owner</span>.</p>
+        <p><a className="btn" href="/api/debug/bundle">{tr('Download redacted diagnostics')}</a></p>
+        <p className="faint">{tr('Over SSH:')}{' '}<span className="mono">{tr('npm run doctor')}</span>. To recover a forgotten password: <span className="mono">{tr('npm run reset-owner')}</span>.</p>
       </div>}
       {show('remote') && <Block id="remote">{null}</Block>}
       {show('remote') && <div className="card" id="remote">
-        <h3>Tailscale (recommended)</h3>
-        <p>Tailscale is the path to use from university. Install it on this box and on the phone, then open <span className="mono">http://&lt;tailscale-ip&gt;:8787</span>. The login still applies. Cloudflare Tunnel works too: <span className="mono">cloudflared tunnel --url http://127.0.0.1:8787</span>. Do not publish the port on the public internet without one of those and this login.</p>
-        <p className="faint">Coding CLIs on PATH: {clis.length ? clis.join(', ') : 'none detected. Built-in edit tools still run.'}</p>
+        <h3>{tr('Tailscale (recommended)')}</h3>
+        <p>{tr('Tailscale is the path to use from university. Install it on this box and on the phone, then open')}{' '}<span className="mono">http://&lt;tailscale-ip&gt;:8787</span>. The login still applies. Cloudflare Tunnel works too: <span className="mono">{tr('cloudflared tunnel --url http://127.0.0.1:8787')}</span>. Do not publish the port on the public internet without one of those and this login.</p>
+        <p className="faint">{tr('Coding CLIs on PATH:')}{' '}{clis.length ? clis.join(', ') : tr('none detected. Built-in edit tools still run.')}</p>
       </div>}
       </>; }}
     </SettingsPage>

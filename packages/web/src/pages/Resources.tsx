@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api, post } from '../lib/api';
 import { EmptyState, PageHeader } from '../components/ui';
 import { Cpu, RefreshCw } from 'lucide-react';
+import { t } from '../i18n';
 
 interface Snapshot {
   memory: { totalGiB: number; availableGiB: number };
@@ -26,53 +27,53 @@ export function Resources() {
     setSamples((await api<{ samples: { availableGiB?: number }[] }>('/api/resources/trends?hours=24')).samples);
   }
   useEffect(() => { void load(); }, []);
-  if (!snap) return <div className="page"><PageHeader title="Resources" description="Measuring memory and disk…" /><div className="skeleton-lines"><span /><span /><span /></div></div>;
+  if (!snap) return <div className="page"><PageHeader title={t('Resources')} description={t('Measuring memory and disk…')} /><div className="skeleton-lines"><span /><span /><span /></div></div>;
   const max = Math.max(...samples.map((sample) => sample.availableGiB || 0), 1);
 
   return (
     <div className="page">
-      <PageHeader title="Resources" description="Memory, disk and what each persona weighs. Prune actions show what they free before anything is removed. Archiving history is reversible; deleting an image is not." actions={<button className="btn" onClick={() => void load()}><RefreshCw size={15} aria-hidden /> Refresh</button>} />
+      <PageHeader title={t('Resources')} description={t('Memory, disk and what each persona weighs. Prune actions show what they free before anything is removed. Archiving history is reversible; deleting an image is not.')} actions={<button className="btn" onClick={() => void load()}><RefreshCw size={15} aria-hidden />{' '}{t('Refresh')}</button>} />
       <div className="grid cards">
-        <article className="card"><h3>Memory</h3><p>{snap.memory.availableGiB.toFixed(1)} GiB free of {snap.memory.totalGiB.toFixed(1)}</p><div className="meter"><span style={{ width: `${100 - (snap.memory.availableGiB / Math.max(snap.memory.totalGiB, 1)) * 100}%` }} /></div></article>
-        <article className="card"><h3>Disk</h3><p>{gb(snap.disk.freeBytes)} free of {gb(snap.disk.totalBytes)}</p><p className="faint">Data directory {gb(snap.dataBytes)}</p></article>
-        <article className="card"><h3>GPU / GTT</h3><p>{snap.gpu ? snap.gpu.name : 'Not visible'}</p><p className="muted">{snap.gpu?.note}</p></article>
-        <article className="card"><h3>Loaded models</h3>
-          {(snap.loadedModels ?? []).length === 0 && <EmptyState icon={Cpu} title="No model loaded">Ollama loads a model on the first message and frees it when idle.</EmptyState>}
+        <article className="card"><h3>{t('Memory')}</h3><p>{snap.memory.availableGiB.toFixed(1)}{' '}{t('GiB free of')}{' '}{snap.memory.totalGiB.toFixed(1)}</p><div className="meter"><span style={{ width: `${100 - (snap.memory.availableGiB / Math.max(snap.memory.totalGiB, 1)) * 100}%` }} /></div></article>
+        <article className="card"><h3>{t('Disk')}</h3><p>{gb(snap.disk.freeBytes)}{' '}{t('free of')}{' '}{gb(snap.disk.totalBytes)}</p><p className="faint">{t('Data directory')}{' '}{gb(snap.dataBytes)}</p></article>
+        <article className="card"><h3>{t('GPU / GTT')}</h3><p>{snap.gpu ? snap.gpu.name : t('Not visible')}</p><p className="muted">{snap.gpu?.note}</p></article>
+        <article className="card"><h3>{t('Loaded models')}</h3>
+          {(snap.loadedModels ?? []).length === 0 && <EmptyState icon={Cpu} title={t('No model loaded')}>{t('Ollama loads a model on the first message and frees it when idle.')}</EmptyState>}
           {(snap.loadedModels ?? []).map((model) => (
-            <p key={model.name} className="mono">{model.name} · context {model.contextLength ?? 'not reported'}{model.sizeBytes ? ` · ${(model.sizeBytes / 1024 ** 3).toFixed(1)} GB` : ''}</p>
+            <p key={model.name} className="mono">{model.name}{' '}{t('· context')}{' '}{model.contextLength ?? t('not reported')}{model.sizeBytes ? t(' · {0} GB', [(model.sizeBytes / 1024 ** 3).toFixed(1)]) : ''}</p>
           ))}
         </article>
       </div>
       {snap.knowledge && (
         <article className="card">
-          <h3>Knowledge base</h3>
-          <p>{snap.knowledge.documents} files · {snap.knowledge.chunks} chunks · {gb(snap.knowledge.bytes)} source · {gb(snap.knowledge.embeddingBytes)} embeddings</p>
+          <h3>{t('Knowledge base')}</h3>
+          <p>{snap.knowledge.documents}{' '}{t('files ·')}{' '}{snap.knowledge.chunks}{' '}{t('chunks ·')}{' '}{gb(snap.knowledge.bytes)}{' '}{t('source ·')}{' '}{gb(snap.knowledge.embeddingBytes)} embeddings</p>
           {snap.knowledge.collections.map((collection) => (
-            <p key={collection.id} className="mono faint">{collection.name} · {collection.chunks} chunks · {collection.bytes} B</p>
+            <p key={collection.id} className="mono faint">{collection.name} · {collection.chunks}{' '}{t('chunks ·')}{' '}{collection.bytes} B</p>
           ))}
         </article>
       )}
       {snap.flags.map((flag) => <p key={flag.text} className="badge warn">{flag.text}</p>)}
-      <svg viewBox="0 0 240 48" width="100%" height="48" role="img" aria-label="Available memory trend">
+      <svg viewBox="0 0 240 48" width="100%" height="48" role="img" aria-label={t('Available memory trend')}>
         <polyline fill="none" stroke="var(--brass)" strokeWidth="2" points={samples.map((sample, index) => `${(index / Math.max(samples.length - 1, 1)) * 240},${46 - ((sample.availableGiB || 0) / max) * 40}`).join(' ')} />
       </svg>
       <div className="grid cards">
         {snap.agents.map((agent) => (
           <article key={agent.id} className="card">
             <h3>{agent.name}</h3>
-            <p className="mono faint">history {agent.messageBytes} B · summaries {agent.summaryBytes} B · embeddings {agent.embeddingBytes} B · workspace {agent.workspaceBytes} B · {agent.notes} notes</p>
+            <p className="mono faint">history {agent.messageBytes}{' '}{t('B · summaries')}{' '}{agent.summaryBytes}{' '}{t('B · embeddings')}{' '}{agent.embeddingBytes}{' '}{t('B · workspace')}{' '}{agent.workspaceBytes}{' '}{t('B ·')}{' '}{agent.notes} notes</p>
           </article>
         ))}
       </div>
       <div className="row" style={{ marginTop: 12 }}>
-        <button className="btn" onClick={async () => setPreview((await post<{ preview: { id: string; items: string[]; warning: string } }>('/api/resources/prune/preview', { action: 'clear_logs' })).preview)}>Preview clear logs</button>
-        <button className="btn" onClick={async () => setPreview((await post<{ preview: { id: string; items: string[]; warning: string } }>('/api/resources/prune/preview', { action: 'vacuum' })).preview)}>Preview compact database</button>
+        <button className="btn" onClick={async () => setPreview((await post<{ preview: { id: string; items: string[]; warning: string } }>('/api/resources/prune/preview', { action: 'clear_logs' })).preview)}>{t('Preview clear logs')}</button>
+        <button className="btn" onClick={async () => setPreview((await post<{ preview: { id: string; items: string[]; warning: string } }>('/api/resources/prune/preview', { action: 'vacuum' })).preview)}>{t('Preview compact database')}</button>
       </div>
       {preview && (
         <div className="card">
           {preview.items.map((item) => <p key={item}>{item}</p>)}
           <p className="muted">{preview.warning}</p>
-          <button className="btn primary" onClick={async () => { await post('/api/resources/prune', { previewId: preview.id, confirm: true }); setPreview(null); await load(); }}>Confirm</button>
+          <button className="btn primary" onClick={async () => { await post('/api/resources/prune', { previewId: preview.id, confirm: true }); setPreview(null); await load(); }}>{t('Confirm')}</button>
         </div>
       )}
     </div>

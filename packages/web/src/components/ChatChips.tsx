@@ -3,6 +3,7 @@ import { ChevronDown, FolderGit2, FolderPlus, Pencil, Settings2, UserPlus, X } f
 import { Menu, type MenuItem } from './ui';
 import { Face } from './Face';
 import type { PanelAgent, WorkspaceRow, WorkspaceSet } from './PersonaPanel';
+import { t } from '../i18n';
 
 /** Composer chip: shows the persona answering this chat; switch, edit, create or manage personas from here. */
 export function PersonaChip({ agents, active, onSwitch, onEdit, onNew }: {
@@ -11,13 +12,13 @@ export function PersonaChip({ agents, active, onSwitch, onEdit, onNew }: {
   const navigate = useNavigate();
   const items: MenuItem[] = [
     ...agents.map((agent, index) => ({ label: agent.name, heading: index === 0 ? 'Switch persona' : undefined, hint: agent.title || undefined, checked: agent.id === active?.id, onSelect: () => { if (agent.id !== active?.id) onSwitch(agent.id); } })),
-    { label: active ? `Edit ${active.name}…` : 'Edit persona…', icon: Pencil, separator: true, disabled: !active, onSelect: onEdit },
-    { label: 'New persona…', icon: UserPlus, onSelect: onNew },
-    { label: 'Manage personas…', icon: Settings2, onSelect: () => navigate('/agents') },
+    { label: active ? t('Edit {0}…', [active.name]) : t('Edit persona…'), icon: Pencil, separator: true, disabled: !active, onSelect: onEdit },
+    { label: t('New persona…'), icon: UserPlus, onSelect: onNew },
+    { label: t('Manage personas…'), icon: Settings2, onSelect: () => navigate('/agents') },
   ];
   return (
-    <Menu className="pill persona-chip" align="start" label="Switch persona (Ctrl+/)" hint="Persona for this chat · Ctrl+/ to switch" icon={null}
-      lead={active ? <Face agent={active} size={20} /> : undefined} text={active?.name || 'Pick a persona'} trailing={<ChevronDown size={14} aria-hidden className="faint" />} items={items} />
+    <Menu className="pill persona-chip" align="start" label={t('Switch persona (Ctrl+/)')} hint={t('Persona for this chat · Ctrl+/ to switch')} icon={null}
+      lead={active ? <Face agent={active} size={20} /> : undefined} text={active?.name || t('Pick a persona')} trailing={<ChevronDown size={14} aria-hidden className="faint" />} items={items} />
   );
 }
 
@@ -32,21 +33,24 @@ export function WorkspaceChip({ sets, workspaces, activeId, onAttach, onAdd, can
   const branch = rows.find((row) => row.branch)?.branch;
   const items: MenuItem[] = [
     ...sets.map((set, index) => ({ label: set.name, heading: index === 0 ? 'Work in' : undefined, hint: set.projects.join(' + '), checked: set.id === activeId, onSelect: () => onAttach(set.id) })),
-    ...(canManage ? [{ label: 'Add folder, repo or clone…', icon: FolderPlus, separator: sets.length > 0, onSelect: onAdd }] : []),
-    { label: 'Manage workspaces…', icon: Settings2, onSelect: () => navigate('/workspace') },
+    ...(canManage ? [{ label: t('Add folder, repo or clone…'), icon: FolderPlus, separator: sets.length > 0, onSelect: onAdd }] : []),
+    { label: t('Manage workspaces…'), icon: Settings2, onSelect: () => navigate('/workspace') },
   ];
   if (sets.length === 0 && !canManage) return null;
   return (
     <span className={active ? 'ws-chip on' : 'ws-chip'}>
-      <Menu className="pill" align="start" label="Workspace for this chat" hint={active ? `${active.projects.join(' + ')}${dirty ? ` · ${dirty} uncommitted` : ''}` : 'Attach a folder or repo'} icon={FolderGit2}
-        text={active ? `${active.name}${branch ? ` · ${branch}` : ''}` : 'Workspace'} trailing={dirty ? <span className="dirty-dot" aria-label={`${dirty} uncommitted changes`} /> : undefined} items={items} />
-      {active && <button type="button" className="chip-x" aria-label={`Detach ${active.name}`} title="Detach from this chat" onClick={() => onAttach(null)}><X size={12} /></button>}
+      <Menu className="pill" align="start" label={t('Workspace for this chat')} hint={active ? `${active.projects.join(' + ')}${dirty ? ` · ${dirty} uncommitted` : ''}` : t('Attach a folder or repo')} icon={FolderGit2}
+        text={active ? `${active.name}${branch ? ` · ${branch}` : ''}` : t('Workspace')} trailing={dirty ? <span className="dirty-dot" aria-label={t('{0} uncommitted changes', [dirty])} /> : undefined} items={items} />
+      {active && <button type="button" className="chip-x" aria-label={t('Detach {0}', [active.name])} title={t('Detach from this chat')} onClick={() => onAttach(null)}><X size={12} /></button>}
     </span>
   );
 }
 
 /** Three starter prompts in the persona's own area, picked from its tools. */
 export function startersFor(agent: PanelAgent | undefined, code: boolean): string[] {
+  return startersRaw(agent, code).map((text) => t(text));
+}
+function startersRaw(agent: PanelAgent | undefined, code: boolean): string[] {
   const tools = agent?.toolAllowlist || [];
   if (code || tools.includes('apply_patch') || tools.includes('git')) return ['Explain how this repo is laid out', 'Find and fix a failing test', 'Plan a small refactor, then wait for my OK'];
   if (tools.includes('web_search')) return ['What changed in the news on this topic this week?', 'Compare three options and cite sources', 'Summarise this page for me'];
@@ -55,6 +59,6 @@ export function startersFor(agent: PanelAgent | undefined, code: boolean): strin
 }
 
 export function greetingFor(agent: PanelAgent | undefined): string {
-  if (!agent) return 'Set up a persona to start.';
-  return agent.description?.trim() ? `I'm ${agent.name}. ${agent.description.trim()}` : `Hi, I'm ${agent.name}. What are we working on?`;
+  if (!agent) return t('Set up a persona to start.');
+  return agent.description?.trim() ? t("I'm {0}. {1}", [agent.name, agent.description.trim()]) : t("Hi, I'm {0}. What are we working on?", [agent.name]);
 }
