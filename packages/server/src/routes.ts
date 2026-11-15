@@ -5,7 +5,7 @@ import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { MACHINE_PROFILES, autoMapFor, profileFor, residentGiB, FREE_TIER_OBSERVED_AT, FREE_TIER_SNAPSHOT, VERSION, geminiQuotaDay, nextCron, quotaAvailability } from '@local-agent/shared';
+import { MACHINE_PROFILES, autoMapFor, autoMapForPlan, planInstall, type InstallPlan, profileFor, residentGiB, FREE_TIER_OBSERVED_AT, FREE_TIER_SNAPSHOT, VERSION, geminiQuotaDay, nextCron, quotaAvailability } from '@local-agent/shared';
 import { authenticate, hashPassword, noteFailure, rateLimit, setSession, verifyPassword } from './auth.js';
 import { TEMPLATES } from './catalog.js';
 import { detectCodingClis, listEdits, readPlan, replacePlan, revertBatch, RollbackConflict, updatePlanItem } from './coding.js';
@@ -1223,23 +1223,65 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     }
     return { scan: lastScan, checklist: checklist(lastScan, store) };
   });
-  // Machine profile: role defaults, runtime advice and the last bench, for the setup wizard.
-  app.get('/api/setup/profile', async () => {
+  // Machine profile: role defaults, runtime advice, the install plan and the last bench, for the setup wizard.
+  const ollamaBase = () => (process.env.OLLAMA_HOST || lastScan?.ollama?.url || 'http://127.0.0.1:11434').replace(/\/$/, '').replace(/^(?!https?:)/, 'http://');
+  const installedModels = async () => fetchImpl(`${ollamaBase()}/api/tags`, { signal: AbortSignal.timeout(5000) }).then((res) => res.json() as Promise<{ models?: { name: string }[] }>).then((data) => (data.models ?? []).map((row) => row.name)).catch(() => [] as string[]);
+  const catalogSizes = () => Object.fromEntries(store.listModels().filter((row) => row.typicalQ4GiB).map((row) => [row.apiName, row.typicalQ4GiB as number]));
+  const pickProfile = async (id?: string) => {
     const machine = await machineInfo();
     const gtt = readGpu()?.gttBytes;
-    const profile = profileFor({ ...machine, gpu: machine.gpu ?? undefined, gttGiB: gtt ? gtt / 2 ** 30 : undefined });
+    const detected = profileFor({ ...machine, gpu: machine.gpu ?? undefined, gttGiB: gtt ? gtt / 2 ** 30 : undefined });
+    return { machine, detected, profile: (id ? MACHINE_PROFILES.find((row) => row.id === id) : null) ?? detected };
+  };
+  const roleChoices = z.record(z.enum(['fast', 'main', 'hebrew', 'coder', 'vision', 'embed', 'image']), z.string().max(120).regex(/^[\w.:/-]*$/)).optional();
+  app.get('/api/setup/profile', async (req) => {
+    const { machine, detected, profile } = await pickProfile((req.query as { id?: string }).id);
     const { match: _match, ...plain } = profile;
-    return { machine, profile: plain, residentGiB: residentGiB(profile), autoMap: autoMapFor(profile), bench: loadBench(config.dataDir), profiles: MACHINE_PROFILES.map((row) => ({ id: row.id, title: row.title })) };
-  });
-  app.post('/api/setup/profile/apply', async (req) => {
-    const body = parse(z.object({ confirm: z.literal(true), id: z.string().optional() }), req.body);
-    const machine = await machineInfo();
-    const profile = (body.id ? MACHINE_PROFILES.find((row) => row.id === body.id) : null) ?? profileFor({ ...machine, gpu: machine.gpu ?? undefined });
     const settings = store.getSettings();
-    const image = profile.roles.find((row) => row.role === 'image')?.model;
-    const next = { ...settings, autoModels: { ...settings.autoModels, ...autoMapFor(profile) }, ramBudgetGiB: profile.ramCapGiB, imageGen: { ...settings.imageGen, localModel: image || settings.imageGen.localModel } };
-    store.saveSettings(next, `Applied machine profile ${profile.id}`, { settings: next });
+    return { machine, detected: detected.id, profile: plain, residentGiB: residentGiB(profile), autoMap: autoMapFor(profile), plan: planInstall(profile, {}, await installedModels(), catalogSizes()), applied: settings.modelProfile ?? null, bench: loadBench(config.dataDir), profiles: MACHINE_PROFILES.map((row) => ({ id: row.id, title: row.title })) };
+  });
+  app.post('/api/setup/profile/plan', async (req) => {
+    const body = parse(z.object({ id: z.string().optional(), choices: roleChoices }), req.body);
+    const { profile } = await pickProfile(body.id);
+    return { plan: planInstall(profile, body.choices, await installedModels(), catalogSizes()) };
+  });
+  const applyPlan = (plan: InstallPlan) => {
+    const settings = store.getSettings();
+    const image = plan.rows.find((row) => row.role === 'image')?.model;
+    const hebrew = plan.rows.find((row) => row.role === 'hebrew')?.model;
+    const next = { ...settings, autoModels: { ...settings.autoModels, ...autoMapForPlan(plan) }, ramBudgetGiB: plan.ramCapGiB, imageGen: { ...settings.imageGen, localModel: image || settings.imageGen.localModel }, modelProfile: { id: plan.profileId, hebrew: hebrew ?? null, at: new Date().toISOString() } };
+    store.saveSettings(next, `Applied machine profile ${plan.profileId}`, { settings: next });
+    return next;
+  };
+  app.post('/api/setup/profile/apply', async (req) => {
+    const body = parse(z.object({ confirm: z.literal(true), id: z.string().optional(), choices: roleChoices }), req.body);
+    const { profile } = await pickProfile(body.id);
+    const next = applyPlan(planInstall(profile, body.choices, await installedModels(), catalogSizes()));
     return { applied: profile.id, autoModels: next.autoModels, ramBudgetGiB: next.ramBudgetGiB, imageModel: next.imageGen.localModel };
+  });
+  // Pull every model the plan needs (one at a time, compact progress), then write the role map. Refuses plans over the RAM cap.
+  app.post('/api/setup/profile/install', async (req) => {
+    const body = parse(z.object({ confirm: z.literal(true), id: z.string().optional(), choices: roleChoices }), req.body);
+    const { profile } = await pickProfile(body.id);
+    const plan = planInstall(profile, body.choices, await installedModels(), catalogSizes());
+    if (!plan.fits) throw http(400, plan.warnings[0] ?? 'These models do not fit the RAM cap.');
+    const job = store.createJob('install-models', plan.pulls.length ? `ollama pull ${plan.pulls.join(' && ollama pull ')}` : 'nothing to pull');
+    void (async () => {
+      try {
+        store.appendJob(job.id, `Profile ${plan.profileId}: ${plan.pulls.length} model(s), ~${plan.downloadGiB} GB to download; ~${plan.peakGiB} GB peak RAM of ${plan.ramCapGiB} GB.\n`);
+        for (const [index, name] of plan.pulls.entries()) {
+          store.appendJob(job.id, `[${index + 1}/${plan.pulls.length}] ${name}\n`);
+          await ollamaPull(fetchImpl, ollamaBase(), name, pullProgress(name, (line) => store.appendJob(job.id, line)));
+        }
+        applyPlan(plan);
+        store.appendJob(job.id, `Role map saved: ${plan.rows.map((row) => `${row.role}=${row.model}`).join(', ')}\n`);
+        store.finishJob(job.id, 'done');
+      } catch (error) {
+        store.appendJob(job.id, `Failed: ${error instanceof Error ? error.message : String(error)}\n`);
+        store.finishJob(job.id, 'failed');
+      }
+    })();
+    return { job, plan };
   });
   app.post('/api/setup/actions/:id/preview', async (req) => {
     const model = (req.body as { model?: string } | undefined)?.model;
@@ -1761,31 +1803,56 @@ function hookUrl(id: string, kind: TriggerKind) {
   return kind === 'github' ? `/api/hooks/github/${id}` : kind === 'webhook' ? `/api/hooks/${id}` : null;
 }
 
+/** Pull one Ollama model, streaming progress text to `onText`. Ollama reports failures (unknown model, disk full) as an {"error"} line inside a 200 stream. */
+export async function ollamaPull(fetchImpl: typeof fetch, base: string, name: string, onText: (text: string) => void) {
+  const response = await fetchImpl(`${base}/api/pull`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, stream: true }) });
+  if (!response.ok || !response.body) throw new Error(`Ollama pull failed (${response.status}).`);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let pending = '';
+  let failure = '';
+  const handle = (line: string) => { try { const row = JSON.parse(line) as { error?: string }; if (row.error) failure = row.error; } catch { /* progress text */ } };
+  while (true) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    const text = decoder.decode(chunk.value, { stream: true });
+    onText(text);
+    pending += text;
+    const lines = pending.split('\n');
+    pending = lines.pop() ?? '';
+    lines.forEach(handle);
+  }
+  handle(pending);
+  if (failure) throw new Error(`Ollama could not pull ${name}: ${failure}`);
+}
+
+/** Compact pull progress: one line per model per 10% instead of Ollama's raw stream. */
+export function pullProgress(name: string, emit: (line: string) => void) {
+  let last = -1;
+  let pending = '';
+  return (text: string) => {
+    pending += text;
+    const lines = pending.split('\n');
+    pending = lines.pop() ?? '';
+    for (const line of lines) {
+      try {
+        const row = JSON.parse(line) as { status?: string; total?: number; completed?: number };
+        if (row.total && row.completed !== undefined) {
+          const pct = Math.floor((row.completed / row.total) * 10) * 10;
+          if (pct > last) { last = pct; emit(`${name}: ${pct}% of ${(row.total / 2 ** 30).toFixed(1)} GB\n`); }
+        } else if (row.status && !/^pulling [0-9a-f]{6,}/.test(row.status)) emit(`${name}: ${row.status}\n`);
+      } catch { /* partial */ }
+    }
+  };
+}
+
 async function runSetup(action: string, model: string | undefined, jobId: string, ctx: Ctx) {
   const { store, docker, fetchImpl } = ctx;
   try {
     if (action === 'pull-model' || action === 'pull-embed') {
       const name = action === 'pull-embed' ? 'nomic-embed-text' : (model || 'gemma4:e4b');
       const base = (process.env.OLLAMA_HOST || lastScan?.ollama?.url || 'http://127.0.0.1:11434').replace(/\/$/, '');
-      const response = await fetchImpl(`${base}/api/pull`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, stream: true }) });
-      if (!response.ok || !response.body) throw new Error(`Ollama pull failed (${response.status}).`);
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      // Ollama reports a failed pull (unknown model, disk full) as an {"error"} line inside a 200 stream.
-      let pending = '';
-      let failure = '';
-      while (true) {
-        const chunk = await reader.read();
-        if (chunk.done) break;
-        const text = decoder.decode(chunk.value, { stream: true });
-        store.appendJob(jobId, text);
-        pending += text;
-        const lines = pending.split('\n');
-        pending = lines.pop() ?? '';
-        for (const line of lines) { try { const row = JSON.parse(line) as { error?: string }; if (row.error) failure = row.error; } catch { /* progress text */ } }
-      }
-      try { const row = JSON.parse(pending) as { error?: string }; if (row.error) failure = row.error; } catch { /* no trailing line */ }
-      if (failure) throw new Error(`Ollama could not pull ${name}: ${failure}`);
+      await ollamaPull(fetchImpl, base, name, (text) => store.appendJob(jobId, text));
     } else if (action === 'bench-runtime') {
       const base = (process.env.OLLAMA_HOST || lastScan?.ollama?.url || 'http://127.0.0.1:11434').replace(/\/$/, '');
       const report = await benchRuntime(fetchImpl, base, { model: model || undefined, log: (line) => store.appendJob(jobId, line) });

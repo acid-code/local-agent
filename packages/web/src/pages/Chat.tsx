@@ -1,3 +1,4 @@
+import { ModelInstaller } from '../components/ModelInstaller';
 import { CuteArt } from '../components/CuteArt';
 import { isOwner } from '../lib/role';
 import { useEffect, useRef, useState } from 'react';
@@ -800,7 +801,7 @@ export function Chat() {
               {persona ? <Face agent={persona} size={64} /> : <CuteArt />}
               <h2>{persona ? greetingFor(persona) : t('Create a persona to start.')}</h2>
               {modelsLoaded && usable.empty
-                ? <div className="no-model"><p className="muted">{t('No model yet. Pull a local one here, or')}{' '}<Link to="/setup">{t('set one up')}</Link>{' '}{t('(Ollama or a Gemini key).')}</p>{canManage && <PullModel onDone={() => void modelState.refresh()} />}</div>
+                ? <div className="no-model"><p className="muted">{t('No model yet. Pull a local one here, or')}{' '}<Link to="/setup">{t('set one up')}</Link>{' '}{t('(Ollama or a Gemini key).')}</p>{canManage && <><ModelInstaller compact onDone={() => void modelState.refresh()} /><details><summary className="faint">{t('Or pull one model')}</summary><PullModel onDone={() => void modelState.refresh()} /></details></>}</div>
                 : <div className="starters">
                     {startersFor(persona, mode === 'code').map((prompt) => (
                       <button key={prompt} className="starter" onClick={() => { setDraft(prompt); input.current?.focus(); }}>{prompt}</button>

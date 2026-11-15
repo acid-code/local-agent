@@ -3,6 +3,7 @@ import { api, post } from '../lib/api';
 import { PageHeader } from '../components/ui';
 import { RefreshCw } from 'lucide-react';
 import { t } from '../i18n';
+import { ModelInstaller } from '../components/ModelInstaller';
 
 interface Item { id: string; title: string; ok: boolean; detail: string; optional: boolean }
 interface Preview { command: string; detail: string }
@@ -42,11 +43,15 @@ export function Setup() {
           </article>
         ))}
       </div>
+      <div className="card" id="models" style={{ marginTop: 16 }}>
+        <h3>{t('Recommended models for this machine')}</h3>
+        <ModelInstaller onDone={() => void scan()} />
+      </div>
       <div className="card" style={{ marginTop: 16 }}>
         <h3>{t('One-click actions')}</h3>
         <label className="field"><span>{t('Ollama model')}</span><input value={model} onChange={(event) => setModel(event.target.value)} /></label>
         <div className="row">
-          {[['pull-model', 'Pull model'], ['pull-embed', 'Pull nomic-embed-text'], ['start-searxng', 'Start SearXNG'], ['pull-sandbox', 'Pull sandbox image'], ['pull-mcp-runtime', 'Pull MCP runtime'], ['start-whisper', 'Start faster-whisper'], ['start-kokoro', 'Start Kokoro']].map(([id, label]) => (
+          {[['pull-model', 'Pull model'], ['pull-embed', 'Pull nomic-embed-text'], ['start-searxng', 'Start SearXNG'], ['bench-runtime', 'Benchmark runtimes'], ['pull-sandbox', 'Pull sandbox image'], ['pull-mcp-runtime', 'Pull MCP runtime'], ['start-whisper', 'Start faster-whisper'], ['start-kokoro', 'Start Kokoro']].map(([id, label]) => (
             <button key={id} className="btn" onClick={async () => { setAction(id); setPreview(await post<Preview>(`/api/setup/actions/${id}/preview`, { model })); }}>{t(label)}</button>
           ))}
         </div>

@@ -44,6 +44,8 @@ export interface Settings {
   ramBudgetGiB: number;
   /** Second guard: never start a job that would leave less than this much free system RAM. */
   ramSystemReserveGiB: number;
+  /** Machine profile the installer applied, and the model it picked for Hebrew replies. */
+  modelProfile?: { id: string; hebrew: string | null; at: string } | null;
 }
 
 export interface ImageGenSettings {

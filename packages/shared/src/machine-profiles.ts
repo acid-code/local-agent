@@ -1,7 +1,7 @@
 /**
  * Setup-wizard defaults per machine: which model fills each role, which runtime to use and how to set up the iGPU.
  * Sizes are Ollama download sizes (Q4_K_M unless noted). "measured" marks what was run on a real box; everything
- * else comes from model cards and public reports and is labelled untested in docs/models-and-runtimes.md.
+ * else comes from model cards and public reports and is labelled untested in docs/models.md.
  */
 export type ProfileRole = 'fast' | 'main' | 'hebrew' | 'coder' | 'vision' | 'embed' | 'image';
 export interface RoleModel { role: ProfileRole; model: string; sizeGiB: number; why: string; alt?: string; resident?: boolean; measured?: boolean }
@@ -95,5 +95,48 @@ export function residentGiB(profile: MachineProfile) {
 /** The auto-model map the wizard writes (roles the app routes by). */
 export function autoMapFor(profile: MachineProfile) {
   const get = (role: ProfileRole) => profile.roles.find((row) => row.role === role)?.model ?? '';
+  return { fast: get('fast'), main: get('main'), coder: get('coder'), thinking: get('coder'), embed: get('embed') };
+}
+
+export interface InstallRow { role: ProfileRole; model: string; sizeGiB: number; resident: boolean; installed: boolean; viaOllama: boolean; changed: boolean }
+export interface InstallPlan { profileId: string; ramCapGiB: number; rows: InstallRow[]; pulls: string[]; downloadGiB: number; residentGiB: number; peakGiB: number; fits: boolean; warnings: string[] }
+
+const sameModel = (a: string, b: string) => a === b || a === `${b}:latest` || b === `${a}:latest`;
+
+/**
+ * What the installer will pull for a profile with the user's per-role changes, and whether it fits the RAM cap.
+ * Resident models (loaded together) plus the largest on-demand model must stay under the cap with ~15% for KV cache.
+ * `sizes` gives GiB for models the user typed in (from the catalog); otherwise the size is estimated from the name ("32b" -> ~20 GB at Q4).
+ */
+export function planInstall(profile: Pick<MachineProfile, 'id' | 'ramCapGiB' | 'roles'>, choices: Partial<Record<ProfileRole, string>> = {}, installed: string[] = [], sizes: Record<string, number> = {}): InstallPlan {
+  const rows: InstallRow[] = profile.roles.map((row) => {
+    const picked = choices[row.role]?.trim();
+    const model = picked || row.model;
+    const changed = Boolean(picked && picked !== row.model);
+    const params = Number(model.toLowerCase().match(/(\d+(?:\.\d+)?)b\b/)?.[1] ?? NaN);
+    const sizeGiB = changed ? (sizes[model] ?? (Number.isFinite(params) ? Math.round((params * 0.6 + 1) * 10) / 10 : (row.sizeGiB || 4))) : row.sizeGiB;
+    return { role: row.role, model, sizeGiB, resident: Boolean(row.resident), installed: installed.some((name) => sameModel(name, model)), viaOllama: row.role !== 'image', changed };
+  });
+  const sizeOf = (model: string) => Math.max(...rows.filter((row) => row.model === model).map((row) => row.sizeGiB), 0);
+  const residentModels = [...new Set(rows.filter((row) => row.resident && row.viaOllama).map((row) => row.model))];
+  const residentGiB = residentModels.reduce((sum, model) => sum + sizeOf(model), 0);
+  const onDemand = [...new Set(rows.filter((row) => !row.resident && row.viaOllama && !residentModels.includes(row.model)).map((row) => row.model))];
+  const largest = Math.max(0, ...onDemand.map(sizeOf));
+  // The RAM queue unloads the main model for a big on-demand one, so the peak is the larger of the two sets.
+  const mainGiB = sizeOf(rows.find((row) => row.role === 'main')?.model ?? '');
+  const peakGiB = Math.max(residentGiB, residentGiB - mainGiB + largest) * 1.15;
+  const pulls = [...new Set(rows.filter((row) => row.viaOllama && !row.installed).map((row) => row.model))];
+  const downloadGiB = Math.round(pulls.reduce((sum, model) => sum + sizeOf(model), 0) * 10) / 10;
+  const warnings: string[] = [];
+  if (residentGiB * 1.15 > profile.ramCapGiB) warnings.push(`Models kept loaded need ~${Math.round(residentGiB * 1.15)} GB with KV cache, over the ${profile.ramCapGiB} GB cap. Pick a smaller main or fast model.`);
+  else if (peakGiB > profile.ramCapGiB) warnings.push(`Swapping in the largest on-demand model peaks at ~${Math.round(peakGiB)} GB, over the ${profile.ramCapGiB} GB cap. Pick a smaller coder.`);
+  for (const row of rows) if (row.changed && sizes[row.model] === undefined) warnings.push(`Size of ${row.model} is estimated from its name: ~${row.sizeGiB} GB at 4-bit.`);
+  if (rows.some((row) => !row.viaOllama)) warnings.push('The image model is not an Ollama model; it downloads the first time you generate an image.');
+  return { profileId: profile.id, ramCapGiB: profile.ramCapGiB, rows, pulls, downloadGiB, residentGiB: Math.round(residentGiB * 10) / 10, peakGiB: Math.round(peakGiB * 10) / 10, fits: peakGiB <= profile.ramCapGiB, warnings };
+}
+
+/** The auto-model map for a plan (same shape as autoMapFor). */
+export function autoMapForPlan(plan: InstallPlan) {
+  const get = (role: ProfileRole) => plan.rows.find((row) => row.role === role)?.model ?? '';
   return { fast: get('fast'), main: get('main'), coder: get('coder'), thinking: get('coder'), embed: get('embed') };
 }
