@@ -1467,3 +1467,4 @@ button.state-card:hover, a.state-card:hover { background: var(--bg-3); }
   .chat.v2 .msg:hover .msg-actions, .chat.v2 .msg:focus-within .msg-actions { opacity: 1; pointer-events: auto; }
   .chat.v2 .msg .msg-actions .icon-btn { width: 30px; height: 30px; min-width: 30px; min-height: 30px; }
 }
+.load-older { display: flex; justify-content: center; margin: 4px 0 16px; }

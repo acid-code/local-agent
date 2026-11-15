@@ -18,9 +18,12 @@
     "icons": "python3 scripts/make-icons.py",
     "eval:local": "node scripts/eval-local.mjs",
     "doctor": "tsx packages/server/src/doctor-cli.ts",
-    "reset-owner": "tsx packages/server/src/doctor-cli.ts --reset-owner"
+    "reset-owner": "tsx packages/server/src/doctor-cli.ts --reset-owner",
+    "e2e": "playwright test -c e2e/playwright.config.ts"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.1",
+    "axe-core": "^4.14.0",
     "concurrently": "^9.2.1"
   },
   "overrides": {

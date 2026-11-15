@@ -142,3 +142,19 @@ function directorySize(root: string, cap: number) {
 function logBytes(store: Store) {
   return store.listLogs(1000).reduce((sum, row) => sum + row.message.length, 0);
 }
+
+/** Space to leave free on the data disk (LA_DISK_RESERVE_BYTES, default 256 MB), so SQLite can still write when uploads fill it. */
+export class DiskFullError extends Error { statusCode = 507; }
+export function ensureDiskRoom(dir: string, bytes = 0) {
+  const reserve = Number(process.env.LA_DISK_RESERVE_BYTES ?? 256 * 1024 ** 2);
+  let free: number;
+  try { free = diskOf(dir).freeBytes; } catch { return; }
+  if (free - bytes < reserve) {
+    const gb = (value: number) => `${(value / 1024 ** 3).toFixed(value < 1024 ** 3 ? 2 : 1)} GB`;
+    throw new DiskFullError(`The disk is full (${gb(Math.max(0, free))} free, ${gb(reserve)} is kept in reserve). Free some space, for example Resources → Clean up, then try again.`);
+  }
+}
+export function isDiskFullError(error: unknown) {
+  const code = (error as { code?: string } | null)?.code;
+  return error instanceof DiskFullError || code === 'ENOSPC' || code === 'EDQUOT';
+}

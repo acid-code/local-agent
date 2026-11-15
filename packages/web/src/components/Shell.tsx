@@ -104,10 +104,10 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
   }, []);
 
   useEffect(() => {
-    if (role !== 'owner') return;
-    const tick = () => api<{ approvals: unknown[]; requests?: unknown[] }>('/api/vault').then((data) => setPending((data.requests?.length || 0))).catch(() => undefined);
+    const owner = role === 'owner';
+    const tick = () => { if (owner) void api<{ approvals: unknown[]; requests?: unknown[] }>('/api/vault').then((data) => setPending((data.requests?.length || 0))).catch(() => undefined); };
     tick();
-    const id = setInterval(tick, 8000);
+    const id = owner ? setInterval(tick, 8000) : undefined;
     let socket: WebSocket | null = null;
     try {
       const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
@@ -115,10 +115,12 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
       socket.onmessage = (event) => {
         const data = JSON.parse(event.data);
         if (data.type === 'secret' || data.type === 'approval') tick();
+        // Pages listen for runs starting in the chat they show (the server only sends this account's runs).
+        window.dispatchEvent(new CustomEvent('la:live', { detail: data }));
       };
     } catch { /* live channel is optional */ }
-    return () => { clearInterval(id); socket?.close(); };
-  }, []);
+    return () => { if (id) clearInterval(id); socket?.close(); };
+  }, [role]);
 
   async function move(index: number, delta: number) {
     const next = personas.slice();
@@ -167,7 +169,7 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
             {pinned.map((persona) => (
               <button key={persona.id} role="listitem" className={activePersona === persona.id ? 'pin-face on' : 'pin-face'} title={persona.title ? `${persona.name} · ${persona.title}` : persona.name}
                 onClick={() => { navigate(`/?persona=${persona.id}`); setOpen(false); }}>
-                <span className="pin-face-art"><Face agent={persona} size={58} />{persona.id === primaryId && <span className="star-badge" aria-label="Primary"><Star size={10} /></span>}{persona.unread && persona.notify !== 'mute' ? <span className="unread-dot" aria-label="unread" /> : null}</span>
+                <span className="pin-face-art"><Face agent={persona} size={58} />{persona.id === primaryId && <span className="star-badge" role="img" aria-label="Primary"><Star size={10} /></span>}{persona.unread && persona.notify !== 'mute' ? <span className="unread-dot" role="img" aria-label="unread" /> : null}</span>
                 <span className="pin-face-name ellipsis" dir="auto">{persona.name}</span>
               </button>
             ))}

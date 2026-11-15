@@ -654,6 +654,16 @@ export class Store {
     return row ? mapMessage(row) : null;
   }
 
+  /** The newest `limit` messages before `beforeId` (oldest first), and whether older ones exist. */
+  pageMessages(sessionId: string, limit: number, beforeId?: string | null): { messages: Message[]; hasMore: boolean } {
+    const before = beforeId ? this.one<Raw>('SELECT seq FROM messages WHERE id = ? AND session_id = ?', beforeId, sessionId) : undefined;
+    if (beforeId && !before) return { messages: [], hasMore: false };
+    const rows = before
+      ? this.many<Raw>('SELECT * FROM messages WHERE session_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?', sessionId, Number(before.seq), limit + 1)
+      : this.many<Raw>('SELECT * FROM messages WHERE session_id = ? ORDER BY seq DESC LIMIT ?', sessionId, limit + 1);
+    return { messages: rows.slice(0, limit).reverse().map(mapMessage), hasMore: rows.length > limit };
+  }
+
   listMessages(sessionId: string): Message[] {
     return this.many<Raw>('SELECT * FROM messages WHERE session_id = ? ORDER BY seq ASC', sessionId).map(mapMessage);
   }

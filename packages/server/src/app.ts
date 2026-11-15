@@ -1,3 +1,4 @@
+import { isDiskFullError } from './resources.js';
 import { MemoryBudget, budgetConfig, systemProbe, type MemoryProbe } from './memory.js';
 import path from 'node:path';
 import { ensureFilesTable } from './files.js';
@@ -129,10 +130,12 @@ export async function buildApp(options: {
   });
 
   app.setErrorHandler((error: unknown, _req, reply) => {
-    const status = typeof error === 'object' && error && 'statusCode' in error ? Number((error as { statusCode?: number }).statusCode) : 500;
-    const message = error instanceof Error ? error.message : 'Internal error';
+    // A full disk is the user's to fix, so say so plainly (507) instead of "Internal error".
+    const full = isDiskFullError(error);
+    const status = full ? 507 : typeof error === 'object' && error && 'statusCode' in error ? Number((error as { statusCode?: number }).statusCode) : 500;
+    const message = full && !(error instanceof Error && /disk is full/i.test(error.message)) ? 'The disk is full. Free some space, then try again.' : error instanceof Error ? error.message : 'Internal error';
     if (status >= 500) store.addLog('error', message);
-    reply.code(status || 500).send({ error: status >= 500 ? 'Internal error' : message });
+    reply.code(status || 500).send({ error: status >= 500 && status !== 507 ? 'Internal error' : message });
   });
 
   registerRoutes(app, { store, engine, bus, docker, mcp, vault, notifier, config, fetchImpl: options.fetchImpl ?? fetch, autoConnectors: options.startScheduler !== false && !process.env.VITEST });

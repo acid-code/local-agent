@@ -1,4 +1,5 @@
 import { CuteArt } from '../components/CuteArt';
+import { isOwner } from '../lib/role';
 import { useEffect, useRef, useState } from 'react';
 import { Menu as DropMenu } from '../components/ui';
 import { ModelPicker, useUsableModels } from '../lib/models';
@@ -34,6 +35,9 @@ interface CheckItem { id: string; title: string; ok: boolean; detail: string; op
 
 const draftKey = (id: string) => `la-draft:${id}`;
 
+/** Messages per page when opening a chat; older ones load on scroll. */
+const PAGE = 150;
+
 export function Chat() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -46,6 +50,7 @@ export function Chat() {
   const [draft, setDraft] = useState('');
   const [streaming, setStreaming] = useState('');
   const [runId, setRunId] = useState<string | null>(null);
+  const runSession = useRef<string | null>(null);
   const [status, setStatus] = useState('');
   const [offers, setOffers] = useState<Offer[]>([]);
   const [secret, setSecret] = useState<{ id: string; name: string; reason: string } | null>(null);
@@ -67,6 +72,10 @@ export function Chat() {
   const box = useRef<HTMLDivElement>(null);
   const [thinking, setThinking] = useState('');
   const [runError, setRunError] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  // Distance from the bottom to keep while older messages are added above.
+  const prependAnchor = useRef<number | null>(null);
   const [lastModel, setLastModel] = useState('');
   const [copied, setCopied] = useState<string | null>(null);
   const [checklist, setChecklist] = useState<CheckItem[]>([]);
@@ -134,25 +143,34 @@ export function Chat() {
   const currentRef = useRef<string | null>(null);
   async function openSession(id: string, gate = openGate.current.begin()) {
     // Restore this chat's unsent draft in the same render as the switch, so the save effect never wipes it.
-    if (!new URLSearchParams(window.location.search).get('share')) setDraft(localStorage.getItem(draftKey(id)) || '');
+    // Text typed while the first chat was still opening is kept, not wiped.
+    const fromNothing = !currentRef.current;
+    if (!new URLSearchParams(window.location.search).get('share')) setDraft((value) => localStorage.getItem(draftKey(id)) || (fromNothing ? value : ''));
+    const switching = currentRef.current !== id;
     setCurrent(id);
     currentRef.current = id;
     try {
       const [data, wsData] = await Promise.all([
-        api<{ session: Session; messages: Message[]; plan: Plan | null; edits: Edit[] }>(`/api/sessions/${id}`, { signal: gate.signal }),
+        // Newest page only; a jump to an older message loads everything so it can be found.
+        api<{ session: Session; activeRun?: { id: string; status: string } | null; messages: Message[]; hasMore?: boolean; plan: Plan | null; edits: Edit[] }>(pendingJump.current ? `/api/sessions/${id}` : `/api/sessions/${id}?limit=${PAGE}`, { signal: gate.signal }),
         api<typeof chatWs>(`/api/sessions/${id}/workspaces`, { signal: gate.signal }).catch((error) => { if (isAbort(error)) throw error; return { items: [], roots: [], sets: [] }; }),
       ]);
       if (!gate.current()) return;
       setOpenedMeta(data.session);
       setChatWs(wsData);
       setMessages(data.messages);
+      setHasMore(Boolean(data.hasMore));
       setPlan(data.plan);
       setEdits(data.edits);
       setMode(data.session.mode);
       setModelPin(data.session.modelPin || null);
       setStreaming('');
       setThinking('');
-      setRunError(null);
+      // Reloading the same chat after a failed reply keeps the reason on screen.
+      if (switching) setRunError(null);
+      // Attach to a reply already running in this chat; drop the stream of a chat we left.
+      if (data.activeRun) { runSession.current = id; setRunId(data.activeRun.id); setStatus(data.activeRun.status); }
+      else if (runSession.current !== id) { runSession.current = null; setRunId(null); setStatus(''); }
       if (data.session.agentId) void post(`/api/agents/${data.session.agentId}/read`, {}).catch(() => undefined);
     } catch (error) {
       if (!isAbort(error) && gate.current()) toast((error as Error).message, 'error');
@@ -238,15 +256,33 @@ export function Chat() {
       setTimeout(() => flash(id), 50);
       return;
     }
+    if (prependAnchor.current !== null && box.current) {
+      box.current.scrollTop = box.current.scrollHeight - prependAnchor.current;
+      prependAnchor.current = null;
+      return;
+    }
     box.current?.scrollTo({ top: box.current.scrollHeight });
   }, [messages, streaming, thinking, runError]);
+  async function loadOlder() {
+    const first = messages.find((message) => !message.id.startsWith('local') && !message.id.startsWith('div-'));
+    if (!current || !first || loadingOlder) return;
+    setLoadingOlder(true);
+    const sessionId = current;
+    try {
+      const page = await api<{ messages: Message[]; hasMore: boolean }>(`/api/sessions/${sessionId}/messages?before=${encodeURIComponent(first.id)}&limit=${PAGE}`);
+      if (currentRef.current !== sessionId) return;
+      if (box.current) prependAnchor.current = box.current.scrollHeight - box.current.scrollTop;
+      setMessages((rows) => [...page.messages.filter((row) => !rows.some((have) => have.id === row.id)), ...rows]);
+      setHasMore(page.hasMore);
+    } catch (error) { toast(errorText(error), 'error'); } finally { setLoadingOlder(false); }
+  }
   // Keep an unsent draft per chat, so a reload or a failed send never loses it.
   useEffect(() => {
     if (!current) return;
     if (draft) localStorage.setItem(draftKey(current), draft); else localStorage.removeItem(draftKey(current));
   }, [draft, current]);
   useEffect(() => {
-    api<{ scan: unknown; checklist: CheckItem[] }>('/api/discovery').then((data) => setChecklist(data.scan ? data.checklist || [] : [])).catch(() => undefined);
+    if (isOwner()) api<{ scan: unknown; checklist: CheckItem[] }>('/api/discovery').then((data) => setChecklist(data.scan ? data.checklist || [] : [])).catch(() => undefined);
   }, []);
   // Esc stops a running reply (when no dialog or menu has focus).
   useEffect(() => {
@@ -269,6 +305,19 @@ export function Chat() {
     el.style.height = `${el.scrollHeight}px`;
   }, [draft]);
 
+  // A reply that starts in this chat from elsewhere (a timer, another tab, a trigger) shows up live here too.
+  useEffect(() => {
+    const onLive = (event: Event) => {
+      const data = (event as CustomEvent).detail as { type?: string; status?: string; runId?: string; sessionId?: string; parentRunId?: string | null };
+      if (data.type !== 'status' || data.status !== 'running' || !data.runId || data.parentRunId || data.sessionId !== currentRef.current) return;
+      runSession.current = data.sessionId;
+      setRunId((value) => value === data.runId ? value : data.runId!);
+      setStatus('running');
+    };
+    window.addEventListener('la:live', onLive);
+    return () => window.removeEventListener('la:live', onLive);
+  }, []);
+
   useEffect(() => {
     if (!runId) return;
     const source = new EventSource(`/api/runs/${runId}/events`);
@@ -277,6 +326,16 @@ export function Chat() {
       if (data.type === 'snapshot') {
         setSteps(data.steps || []);
         setStatus(data.run?.status || '');
+        // The run may have ended before this stream connected (e.g. it failed at once): show why.
+        if (data.run?.status === 'failed' && data.run?.error) setRunError(String(data.run.error));
+        // Ended before this stream connected: the 'done' event is gone, so load the reply now.
+        if (['completed', 'failed', 'stopped', 'interrupted'].includes(String(data.run?.status))) {
+          setLoadingNote('');
+          if (current && currentRef.current === current) void openSession(current);
+          void refreshLists().catch(() => undefined);
+          source.close();
+          return;
+        }
       }
       if (data.type === 'token') setStreaming((value) => value + data.text);
       if (data.type === 'thinking') setThinking((value) => value + data.text);
@@ -286,6 +345,7 @@ export function Chat() {
         if (data.step.kind === 'model' && data.step.name) setLastModel(String(data.step.name));
       }
       if (data.type === 'message') {
+        if (data.message?.sessionId && data.message.sessionId !== currentRef.current) return;
         setMessages((value) => [...value, data.message]);
         setStreaming('');
         setThinking('');
@@ -350,6 +410,7 @@ export function Chat() {
     }
     setVoiceNote('');
     setOffers(result.offers || []);
+    runSession.current = target;
     setRunId(result.run.id);
     setStatus('running');
   }
@@ -664,7 +725,7 @@ export function Chat() {
         <div className="thread-head">
           <button className="icon-btn round chats-btn" aria-label="Show chats" title="Chats" onClick={() => { if (window.matchMedia('(max-width: 980px)').matches) window.dispatchEvent(new Event('la:open-sidebar')); else setRail(true); }}><Menu size={17} /></button>
           <span className="head-spacer" />
-          {persona && <button className="persona-name head-pill" title={`${currentSession?.title || 'New chat'} · persona info (Ctrl+Shift+I)`} aria-label={`${persona.name}, open persona info`} aria-expanded={panel === 'persona' || panel === 'settings'} onClick={() => setPanel(panel === 'persona' || panel === 'settings' ? null : 'persona')}>
+          {persona && <button className="persona-name head-pill" title={`${currentSession?.title || 'New chat'} · persona info (Ctrl+Shift+I)`} aria-expanded={panel === 'persona' || panel === 'settings'} onClick={() => setPanel(panel === 'persona' || panel === 'settings' ? null : 'persona')}>
             <Face agent={persona} size={22} /><span className="persona-label ellipsis" dir="auto">{persona.name}{(persona as { title?: string }).title ? ` · ${(persona as { title?: string }).title}` : ''}</span>
             {active && <span className="head-live" aria-label="working" />}
           </button>}
@@ -710,9 +771,10 @@ export function Chat() {
             {chatWs.roots.length === 0 && <span className="faint ws-hint">Attach folders or repos; the agent works in exactly these.</span>}
           </div>
         )}
-        <div className={dragging ? 'messages dragging' : 'messages'} ref={box} onMouseUp={onSelectText} onTouchEnd={() => setTimeout(onSelectText, 50)} onScroll={() => selQuote && setSelQuote(null)}
+        <div className={dragging ? 'messages dragging' : 'messages'} ref={box} onMouseUp={onSelectText} onTouchEnd={() => setTimeout(onSelectText, 50)} onScroll={(event) => { if (selQuote) setSelQuote(null); if (hasMore && !loadingOlder && event.currentTarget.scrollTop < 200) void loadOlder(); }}
           onDragOver={(event) => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); setDragging(true); } }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); void dropFiles(event.dataTransfer.files); }}>
           <div className="messages-inner">
+          {hasMore && <div className="load-older"><button className="btn ghost small" disabled={loadingOlder} onClick={() => void loadOlder()}>{loadingOlder ? 'Loading…' : 'Load earlier messages'}</button></div>}
           {setupLeft.length > 0 && (
             <div className="card first-run">
               <h3>Finish setup</h3>

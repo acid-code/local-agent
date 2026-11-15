@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { isOwner } from '../lib/role';
 import { Link } from 'react-router-dom';
 import { AlertCircle, CalendarClock, CheckCircle2, ChevronRight, CircleDashed, FileText, X, Zap } from 'lucide-react';
 import { api } from '../lib/api';
@@ -41,14 +42,14 @@ export function PersonaStatePanel({ agent, sessions, tick, onClose, onOpenSessio
     const load = () => {
       void api<{ runs: Run[] }>('/api/runs').then((data) => live && setRuns(data.runs.filter((run) => run.agentId === agent.id))).catch(() => undefined);
       void api<{ schedules: Schedule[] }>('/api/schedules').then((data) => live && setSchedules(data.schedules.filter((row) => row.agentId === agent.id))).catch(() => undefined);
-      void api<{ triggers: Trigger[] }>('/api/triggers').then((data) => live && setTriggers(data.triggers.filter((row) => row.agentId === agent.id))).catch(() => undefined);
+      if (isOwner()) void api<{ triggers: Trigger[] }>('/api/triggers').then((data) => live && setTriggers(data.triggers.filter((row) => row.agentId === agent.id))).catch(() => undefined);
     };
     load();
     const timer = window.setInterval(load, 10_000);
     return () => { live = false; window.clearInterval(timer); };
   }, [agent.id, tick]);
   useEffect(() => {
-    void api<Resources>('/api/resources').then(setResources).catch(() => setResources(null));
+    if (isOwner()) void api<Resources>('/api/resources').then(setResources).catch(() => setResources(null));
     void api<Voice>('/api/voice').then(setVoice).catch(() => setVoice(null));
   }, []);
   useEffect(() => {

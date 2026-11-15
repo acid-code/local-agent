@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { isOwner } from '../lib/role';
 import { ArrowDown, ArrowUp, ChevronLeft, Download, File, Folder, GitBranch, GitPullRequest, RefreshCw, Upload } from 'lucide-react';
 import { api, post } from '../lib/api';
 import { humanSize } from '../lib/files';
@@ -47,7 +48,7 @@ export function Workspace() {
     setStatus(data.status);
     if (selected && !data.status.files.some((f) => f.path === selected)) { setSelected(null); setDiff(''); }
   }
-  useEffect(() => { void loadRoots(); api<{ workshops: Workshop[] }>('/api/workshops').then((d) => setWorkshops(d.workshops)).catch(() => undefined); }, []);
+  useEffect(() => { void loadRoots(); if (isOwner()) api<{ workshops: Workshop[] }>('/api/workshops').then((d) => setWorkshops(d.workshops)).catch(() => undefined); }, []);
   useEffect(() => {
     if (!rootId) return;
     localStorage.setItem('la-ws-root', rootId);

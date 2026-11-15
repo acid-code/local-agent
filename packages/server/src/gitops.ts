@@ -1,9 +1,9 @@
 import fs from 'node:fs';
+import { safeInside } from './pathsafe.js';
 import path from 'node:path';
 import type { Store } from './db.js';
 import { git, listSharedRepos, registerSharedRepo, reposDir, type GitIdentity } from './repos.js';
 import { getWorkshop } from './workshops.js';
-import { isInside } from '@local-agent/shared';
 import { nid, now } from './util.js';
 
 /** Somewhere git can run: an agent's workspace folder, or a shared repo / workshop project. */
@@ -145,7 +145,7 @@ export async function openPullRequest(cwd: string, token: string | null, fetchIm
 /** A tree listing for a folder, bounded so it fits in a prompt. */
 export function treeListing(root: string, rel = '.', opts: { depth?: number; max?: number } = {}): { text: string; truncated: boolean; count: number } {
   const start = path.resolve(root, rel);
-  if (!isInside(root, start)) throw new Error('That folder is outside the workspace.');
+  if (!safeInside(root, start)) throw new Error('That folder is outside the workspace.');
   const max = opts.max ?? 300;
   const lines: string[] = [];
   let truncated = false;
@@ -169,7 +169,7 @@ export function treeListing(root: string, rel = '.', opts: { depth?: number; max
 
 export function listDir(root: string, rel = '.') {
   const dir = path.resolve(root, rel || '.');
-  if (!isInside(root, dir)) throw new Error('That folder is outside the workspace.');
+  if (!safeInside(root, dir)) throw new Error('That folder is outside the workspace.');
   if (!fs.existsSync(dir)) return [];
   return fs.readdirSync(dir, { withFileTypes: true })
     .filter((e) => e.name !== '.git' && e.name !== 'node_modules')
@@ -187,7 +187,7 @@ export const EXCERPT_BYTES = 40_000;
 /** File contents for a mention: whole file or a line range, capped, with a note when cut. */
 export function readExcerpt(root: string, rel: string, range?: { start?: number; end?: number }) {
   const full = path.resolve(root, rel);
-  if (!isInside(root, full)) throw new Error('That file is outside the workspace.');
+  if (!safeInside(root, full)) throw new Error('That file is outside the workspace.');
   const stat = fs.statSync(full);
   if (!stat.isFile()) throw new Error('That is a folder, not a file.');
   const fd = fs.openSync(full, 'r');

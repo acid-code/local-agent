@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { isOwner } from '../lib/role';
 import { Link } from 'react-router-dom';
 import { CalendarClock, Check, ChevronLeft, FolderGit2, FolderOpen, GitBranch, Settings2, X, Zap } from 'lucide-react';
 import { api, post } from '../lib/api';
@@ -78,7 +79,7 @@ export function PersonaPanel({ agent, tab, onTab, onClose, onSaved, ws, canManag
     if (!agent?.id) return;
     setRoutines(null); setChannels(null);
     api<{ schedules: Routine[] }>('/api/schedules').then((data) => setRoutines(data.schedules.filter((row) => row.agentId === agent.id))).catch(() => setRoutines([]));
-    api<{ triggers: Channel[] }>('/api/triggers').then((data) => setChannels(data.triggers.filter((row) => row.agentId === agent.id))).catch(() => setChannels([]));
+    if (isOwner()) api<{ triggers: Channel[] }>('/api/triggers').then((data) => setChannels(data.triggers.filter((row) => row.agentId === agent.id))).catch(() => setChannels([]));
   }, [agent?.id]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape' && !(event.target as HTMLElement)?.closest?.('.menu-panel')) onClose(); };

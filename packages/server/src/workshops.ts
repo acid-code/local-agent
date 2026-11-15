@@ -1,6 +1,6 @@
 import fs from 'node:fs';
+import { safeInside } from './pathsafe.js';
 import path from 'node:path';
-import { isInside } from '@local-agent/shared';
 import type { Store } from './db.js';
 import { registerSharedRepo } from './repos.js';
 import { nid, now } from './util.js';
@@ -44,7 +44,7 @@ export function createWorkshop(store: Store, input: { name: string; projects: { 
   for (const project of projects) {
     for (const other of projects) {
       if (project === other) continue;
-      if (isInside(project.path, other.path)) throw new Error(`${other.label} sits inside ${project.label}. Add the parent once, or pick folders that sit beside each other.`);
+      if (safeInside(project.path, other.path)) throw new Error(`${other.label} sits inside ${project.label}. Add the parent once, or pick folders that sit beside each other.`);
     }
   }
   const id = nid('shop');
@@ -124,13 +124,13 @@ export function locatePath(input: {
   if (path.isAbsolute(target)) {
     const resolved = path.resolve(target);
     for (const root of roots) {
-      if (isInside(root.path, resolved)) return { root: root.path, full: resolved, write: root.write !== false, label: root.label };
+      if (safeInside(root.path, resolved)) return { root: root.path, full: resolved, write: root.write !== false, label: root.label };
     }
   }
   const inWorkspace = inside(input.workspace, target);
   if (inWorkspace) return { root: path.resolve(input.workspace), full: inWorkspace, write: true, label: null };
   for (const grant of input.grants ?? []) {
-    const full = path.isAbsolute(target) && isInside(grant.path, path.resolve(target)) ? path.resolve(target) : inside(grant.path, target);
+    const full = path.isAbsolute(target) && safeInside(grant.path, path.resolve(target)) ? path.resolve(target) : inside(grant.path, target);
     if (full) return { root: grant.path, full, write: grant.mode === 'write', label: null };
   }
   return null;
@@ -150,5 +150,5 @@ export function projectPath(roots: { label: string; path: string }[], project: s
 
 function inside(root: string, relative: string): string | null {
   const full = path.resolve(root, relative || '.');
-  return isInside(root, full) ? full : null;
+  return safeInside(root, full) ? full : null;
 }

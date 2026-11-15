@@ -55,9 +55,9 @@ export function Appearance() {
   return (
     <div className="card" id="appearance">
       <div className="card-head"><h3>Appearance</h3><span className="faint">{active.name} · saved to your account</span></div>
-      <div className="theme-grid" role="list">
+      <div className="theme-grid" role="group" aria-label="Themes">
         {THEMES.map((preset) => (
-          <button key={preset.id} type="button" role="listitem" className="theme-card" aria-pressed={selected(preset)} onClick={() => pick(preset.id)} title={preset.blurb}>
+          <button key={preset.id} type="button" className="theme-card" aria-pressed={selected(preset)} onClick={() => pick(preset.id)} title={preset.blurb}>
             <Swatch preset={preset} />
             <span className="theme-name"><span>{preset.name}</span><span aria-hidden>{preset.emoji}</span></span>
           </button>
@@ -66,7 +66,7 @@ export function Appearance() {
 
       <div className="theme-preview" aria-label="Live preview" style={{ marginTop: 14 }}>
         <div className="msg user"><div className="prose"><p>Can you plan a cosy Sunday for us? ☕</p></div></div>
-        <div className="msg"><div className="who"><span className="face initials" style={{ width: 24, height: 24, background: 'var(--brass)', color: 'var(--ink)', fontSize: 10 }}>B</span><strong>Buddy</strong><span className="faint">now</span></div><div className="prose"><p>Of course! Slow breakfast, a walk in the park, then <a href="#appearance">a picnic list</a>.</p></div></div>
+        <div className="msg"><div className="who"><span className="face initials" style={{ width: 24, height: 24, background: 'var(--brass)', color: 'var(--ink)', fontSize: 10 }}>B</span><strong>Buddy</strong><span className="faint">now</span></div><div className="prose"><p>Of course! Slow breakfast, a walk in the park, then <a href="#appearance" style={{ textDecoration: 'underline' }}>a picnic list</a>.</p></div></div>
         <div className="row"><button type="button" className="btn primary">Send</button><button type="button" className="btn">Cancel</button><span className="muted">Muted text</span><span className="faint">Faint text</span></div>
       </div>
 
@@ -109,20 +109,20 @@ export function Appearance() {
       <div className="appearance-row" id="wallpapers">
         <label>Background</label>
         <div>
-          <div className="wall-grid" role="list">
-            <button type="button" role="listitem" className="wall-card" aria-pressed={!choice.wallpaper || choice.wallpaper === 'none'} onClick={() => update({ wallpaper: 'none' })}>
+          <div className="wall-grid" role="group" aria-label="Wallpapers">
+            <button type="button" className="wall-card" aria-pressed={!choice.wallpaper || choice.wallpaper === 'none'} onClick={() => update({ wallpaper: 'none' })}>
               <span className="wall-thumb">∅</span><span className="wall-name">None</span>
             </button>
             {WALLPAPERS.map((wall) => {
               const art = renderWallpaper(wall.id, 'pattern', active.scheme === 'dark');
               return (
-                <button key={wall.id} type="button" role="listitem" className="wall-card" aria-pressed={choice.wallpaper === wall.id} onClick={() => update({ wallpaper: wall.id })}>
+                <button key={wall.id} type="button" className="wall-card" aria-pressed={choice.wallpaper === wall.id} onClick={() => update({ wallpaper: wall.id })}>
                   <span className="wall-thumb" style={{ backgroundImage: art?.image, backgroundSize: '110px 110px' }} />
                   <span className="wall-name">{wall.emoji} {wall.name}</span>
                 </button>
               );
             })}
-            <button type="button" role="listitem" className="wall-card" aria-pressed={choice.wallpaper === 'upload'} disabled={uploading} onClick={() => fileInput.current?.click()}>
+            <button type="button" className="wall-card" aria-pressed={choice.wallpaper === 'upload'} disabled={uploading} onClick={() => fileInput.current?.click()}>
               <span className="wall-thumb" style={choice.wallpaper === 'upload' ? { backgroundImage: `url("/api/me/wallpaper?v=${choice.wallpaperVersion || 0}")`, backgroundSize: 'cover' } : undefined}>{choice.wallpaper === 'upload' ? '' : '📷'}</span>
               <span className="wall-name">{uploading ? 'Uploading…' : 'Your photo'}</span>
             </button>

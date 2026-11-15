@@ -142,7 +142,9 @@ export class Engine {
     const beat = setInterval(() => this.touch(runId), 5000);
     try {
       this.store.updateRun(runId, { status: 'running', error: null, endedAt: null, leaseOwner: this.instanceId });
-      this.bus.publish({ type: 'status', runId, status: 'running' });
+      // sessionId lets any open page of this chat (another tab, or a timer firing here) attach to the run.
+      const started = this.store.getRun(runId);
+      this.bus.publish({ type: 'status', runId, status: 'running', sessionId: started?.sessionId, parentRunId: started?.parentRunId ?? null } as never);
       while (true) {
         const run = this.store.getRun(runId);
         if (!run || run.cursor.phase === 'done' || run.status === 'stopped') break;
@@ -330,6 +332,7 @@ export class Engine {
     const prepared = await prepareRepos(this.store, run, stage);
     const staged = { ...run, cursor: { ...run.cursor, stage: prepared.stage, syncNote: prepared.syncNote, branched: prepared.branched } };
     await this.probeToolSupport();
+    await this.ensureSomeModel(agent.id);
     const decision = this.choose(agent, staged);
     let reason = prepared.lockedOut || decision.reason;
     let switched = prepared.lockedOut ? true : decision.switched;
@@ -398,6 +401,7 @@ export class Engine {
       current = this.store.updateRun(run.id, { cursor: { ...current.cursor, modelId: undefined, agentUpdatedAt: agent.updatedAt, configVersion: settings.version } })!;
     }
     if (!current.cursor.modelId) {
+      await this.ensureSomeModel(agent.id);
       const decision = this.choose(agent, current);
       current = this.store.updateRun(run.id, { cursor: { ...current.cursor, modelId: decision.modelId, routingReason: decision.reason, switched: decision.switched, reasoning: Boolean(decision.reasoning) }, modelId: decision.modelId, routingNote: decision.reason, switched: decision.switched })!;
       if (decision.unload.length) await this.unload(decision.unload);
@@ -1060,7 +1064,19 @@ export class Engine {
     }
   }
 
+  /** A fresh install has not scanned for Ollama yet: look once (briefly) before saying there is no model. */
+  private async ensureSomeModel(agentId: string) {
+    // OLLAMA_HOST moved (new port, restored or upgraded data folder): re-scan so chats stop going to the old address.
+    const host = process.env.OLLAMA_HOST?.replace(/\/$/, '');
+    const stored = this.store.getProvider('prov_ollama')?.baseUrl;
+    const moved = Boolean(host && /^https?:\/\//.test(host) && !this.providerOverride && stored && stored !== `${host}/v1` && this.rescannedFor !== host);
+    if (moved) this.rescannedFor = host!; // once per address, so an unreachable host never slows every turn
+    if (!moved && this.candidates(this.store.getSettings(), agentId).length) return;
+    await Promise.race([this.refreshModels(), new Promise((resolve) => setTimeout(resolve, 6000))]);
+  }
+
   private refreshing: Promise<unknown> | null = null;
+  private rescannedFor: string | null = null;
   private refreshModels() {
     if (this.providerOverride || this.refreshing) return this.refreshing;
     this.refreshing = scanMachine(this.fetchImpl, this.docker, this.store)

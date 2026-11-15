@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { safeInside } from './pathsafe.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
@@ -21,7 +22,7 @@ import { createBackup, listBackups, shipBackup, stageRestore } from './ops.js';
 import { telegramQueue } from './notify.js';
 import { ollamaLoaded } from './ollama.js';
 import { doctorChecks, geminiStateOf, missingRoleModels, redactValue, searchLogs, zipStore, LOG_COMPONENTS, type LogComponent } from './debug.js';
-import { previewPrune, runPrune, snapshotResources } from './resources.js';
+import { ensureDiskRoom, isDiskFullError, previewPrune, runPrune, snapshotResources } from './resources.js';
 import { speak, transcribe, voiceStatus, VoiceError, KOKORO_COMMAND, WHISPER_COMMAND } from './voice.js';
 import { formatSearch, listWorkspace, readWorkspaceFile, searxngHealth, searxngQuery } from './tools.js';
 import {
@@ -537,7 +538,12 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const agent = store.getAgent((req.params as { id: string }).id);
     if (!agent) throw http(404, 'Persona not found.');
     const relative = String((req.query as { path?: string }).path || '');
-    return { path: relative, content: await readWorkspaceFile(agent.workspacePath, relative) };
+    try { return { path: relative, content: await readWorkspaceFile(agent.workspacePath, relative) }; }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'EISDIR' || code === 'ENOTDIR' || code === 'ENAMETOOLONG' || code === 'ERR_INVALID_ARG_VALUE') throw http(404, 'File not found.');
+      throw http(400, error instanceof Error ? error.message : 'Bad path.');
+    }
   });
 
   app.get('/api/rooms', async (req) => ({ rooms: store.listRooms(me(req)) }));
@@ -551,9 +557,12 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   app.post('/api/files', { bodyLimit: Math.ceil(MAX_FILE_BYTES * 1.4) + 4096 }, async (req) => {
     const body = parse(z.object({ name: z.string().min(1).max(200), contentBase64: z.string().min(1), sessionId: z.string().optional() }), req.body);
     if (body.sessionId) mustOwn(store, req, 'session', body.sessionId, 'Chat not found.');
+    const bytes = Buffer.from(body.contentBase64, 'base64');
+    ensureDiskRoom(config.dataDir, bytes.length);
     try {
-      return { file: saveFile(store, config.dataDir, { name: body.name, bytes: Buffer.from(body.contentBase64, 'base64'), sessionId: body.sessionId ?? null, source: 'upload', ownerId: me(req) }) };
+      return { file: saveFile(store, config.dataDir, { name: body.name, bytes, sessionId: body.sessionId ?? null, source: 'upload', ownerId: me(req) }) };
     } catch (error) {
+      if (isDiskFullError(error)) throw http(507, 'The disk is full. Free some space, then try again.');
       throw http(400, error instanceof Error ? error.message : 'Could not save the file.');
     }
   });
@@ -646,7 +655,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const root = rootFor(req, (req.params as { root: string }).root);
     const q = req.query as { path?: string; download?: string };
     const full = path.resolve(root.path, String(q.path || ''));
-    if (!isInside(root.path, full) || !fs.existsSync(full) || !fs.statSync(full).isFile()) throw http(404, 'File not found.');
+    if (!safeInside(root.path, full) || !fs.existsSync(full) || !fs.statSync(full).isFile()) throw http(404, 'File not found.');
     const name = path.basename(full);
     const download = q.download === '1';
     const mime = mimeFor(name);
@@ -824,7 +833,18 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const session = store.getSession(id);
     if (!session) throw http(404, 'Chat not found.');
     const workshop = session.workshopId ? getWorkshop(store, session.workshopId) : null;
-    return { session, messages: store.listMessages(id), summaries: store.listSummaries(id), plan: readPlan(store, id), edits: listEdits(store, id), archived: store.listArchived(id), workshop };
+    // ?limit=N returns only the newest N messages (and hasMore); older pages come from /messages?before=.
+    const limit = Number((req.query as { limit?: string }).limit);
+    const page = Number.isFinite(limit) && limit > 0 ? store.pageMessages(id, Math.min(500, Math.floor(limit))) : { messages: store.listMessages(id), hasMore: false };
+    // A reply still running here (another tab, or a reload mid-run), so the page can attach to its stream.
+    const activeRun = (store.db.prepare(`SELECT id, status FROM runs WHERE session_id = ? AND parent_run_id IS NULL AND status IN ('running', 'awaiting_approval', 'paused') ORDER BY started_at DESC LIMIT 1`).get(id) as { id: string; status: string } | undefined) ?? null;
+    return { session, activeRun, messages: page.messages, hasMore: page.hasMore, summaries: store.listSummaries(id), plan: readPlan(store, id), edits: listEdits(store, id), archived: store.listArchived(id), workshop };
+  });
+  app.get('/api/sessions/:id/messages', async (req) => {
+    const id = (req.params as { id: string }).id;
+    mustOwn(store, req, 'session', id, 'Chat not found.');
+    const query = parse(z.object({ before: z.string().max(80).optional(), limit: z.coerce.number().int().min(1).max(500).default(100) }), req.query);
+    return store.pageMessages(id, query.limit ?? 100, query.before ?? null);
   });
   app.patch('/api/sessions/:id', async (req) => {
     const body = parse(z.object({ title: z.string().optional(), mode: z.enum(['chat', 'code']).optional(), modelPin: z.string().nullable().optional(), agentId: z.string().optional(), workshopId: z.string().nullable().optional() }), req.body);
@@ -1217,6 +1237,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   });
   app.get('/api/backups', async () => ({ backups: listBackups(config.dataDir) }));
   app.post('/api/backups', async () => {
+    ensureDiskRoom(config.dataDir, fs.existsSync(path.join(config.dataDir, 'local-agent.db')) ? fs.statSync(path.join(config.dataDir, 'local-agent.db')).size : 0);
     const backup = await createBackup(config.dataDir);
     const shipped = await shipBackup(backup.file, store.getSettings());
     return { backup, shipped };
@@ -1667,11 +1688,21 @@ async function runSetup(action: string, model: string | undefined, jobId: string
       if (!response.ok || !response.body) throw new Error(`Ollama pull failed (${response.status}).`);
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
+      // Ollama reports a failed pull (unknown model, disk full) as an {"error"} line inside a 200 stream.
+      let pending = '';
+      let failure = '';
       while (true) {
         const chunk = await reader.read();
         if (chunk.done) break;
-        store.appendJob(jobId, decoder.decode(chunk.value));
+        const text = decoder.decode(chunk.value, { stream: true });
+        store.appendJob(jobId, text);
+        pending += text;
+        const lines = pending.split('\n');
+        pending = lines.pop() ?? '';
+        for (const line of lines) { try { const row = JSON.parse(line) as { error?: string }; if (row.error) failure = row.error; } catch { /* progress text */ } }
       }
+      try { const row = JSON.parse(pending) as { error?: string }; if (row.error) failure = row.error; } catch { /* no trailing line */ }
+      if (failure) throw new Error(`Ollama could not pull ${name}: ${failure}`);
     } else if (action === 'start-searxng') {
       if (!(await docker.ping())) throw new Error(`Docker is not available at ${docker.describe()}.`);
       const config = searxngConfig(ctx.config.dataDir);
