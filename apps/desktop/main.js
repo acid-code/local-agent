@@ -2,6 +2,7 @@ const { app, BrowserWindow, Menu, ipcMain, shell } = require('electron');
 // Downloads (Save in the file viewer) ask where to put the file with the native save dialog.
 const fs = require('fs');
 const path = require('path');
+const { startUpdates } = require('./updater');
 
 const SETUP = path.join(__dirname, 'setup.html');
 
@@ -203,6 +204,7 @@ if (!gotLock) {
   app.whenReady().then(() => {
     app.setAppUserModelId('com.localagent.desktop');
     createWindow();
+    startUpdates(BrowserWindow.getAllWindows()[0]);
   });
 
   app.on('window-all-closed', () => {

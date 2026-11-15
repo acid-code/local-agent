@@ -4,6 +4,12 @@ def keystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
 def keystorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
 def keystoreAlias = System.getenv("ANDROID_KEY_ALIAS")
 def keystoreKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+// Version: always increasing, so updates install over the old app. CI run number on GitHub, else the local commit count.
+def buildNumber = { ->
+    def run = System.getenv("GITHUB_RUN_NUMBER")
+    if (run) return run.toInteger() + 100
+    try { return "git rev-list --count HEAD".execute(null, rootDir).text.trim().toInteger() } catch (ignored) { return 1 }
+}()
 
 android {
     namespace "com.localagent.app"
@@ -23,8 +29,8 @@ android {
         applicationId "com.localagent.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode buildNumber
+        versionName "0.2.${buildNumber}"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.

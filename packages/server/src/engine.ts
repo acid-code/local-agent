@@ -21,6 +21,9 @@ import {
   type RunCursor,
   type ToolCall,
   isHebrewText,
+  riskOf,
+  needsApproval,
+  type ApprovalMode,
 } from '@local-agent/shared';
 import { Bus } from './bus.js';
 import type { Agent, ModelRow, RunRow, Store } from './db.js';
@@ -41,6 +44,8 @@ import { scanMachine } from './discovery.js';
 import { CrashError, InterruptedToolError, StopError, clampText, now } from './util.js';
 import type { Vault } from './vault.js';
 import { cleanupHebrew } from './hebrew-cleanup.js';
+import { LONG_TASK_STEPS, MAX_TASK_ROUNDS, TASKS_HINT, openTasks, tasksNote, tasksTool } from './tasks.js';
+import { HONESTY_RULE, checkFinalReply, recoveryHint } from './recovery.js';
 import { ocrTool, type OcrMode, type OcrResult } from './ocr.js';
 import { getLanguage, languageHint, replyLanguage, wantsCleanup } from './language.js';
 import { CITE_HINT, findContextTool, shareFileTool } from './files.js';
@@ -387,12 +392,18 @@ export class Engine {
     this.checkpoint(run.id, cursor, 'Context ready');
   }
 
+  /** Model turns allowed: more for code, staged work and long tasks with a task list; helpers keep their own lower cap. */
+  private stepCap(cursor: RunCursor, sessionMode?: string) {
+    const settings = this.store.getSettings();
+    const base = cursor.longTask ? Math.max(settings.maxSteps, LONG_TASK_STEPS) : sessionMode === 'code' || cursor.stage ? Math.max(settings.maxSteps, 24) : settings.maxSteps;
+    return cursor.maxSteps ? Math.min(cursor.maxSteps, base) : base;
+  }
+
   private async stepModel(run: RunRow, signal: AbortSignal) {
     await this.waitIfPaused(run.id, signal);
     const settings = this.store.getSettings();
     const sessionMode = this.store.getSession(run.sessionId)?.mode;
-    const baseSteps = sessionMode === 'code' || run.cursor.stage ? Math.max(settings.maxSteps, 24) : settings.maxSteps;
-    const maxSteps = run.cursor.maxSteps ? Math.min(run.cursor.maxSteps, baseSteps) : baseSteps;
+    const maxSteps = this.stepCap(run.cursor, sessionMode);
     let current = this.store.getRun(run.id)!;
     if (current.cursor.turn >= maxSteps) {
       this.store.updateRun(run.id, { cursor: { ...current.cursor, phase: 'summarize' } });
@@ -558,7 +569,33 @@ export class Engine {
     const cost = ((usage.inputTokens * (model.priceIn ?? 0)) + (usage.outputTokens * (model.priceOut ?? 0))) / 1_000_000;
     const note = [current.cursor.switched ? current.cursor.routingReason : '', built.cutNote].filter(Boolean).join(' ') || null;
     text = this.vault.redact(text);
-    if (!toolCalls?.length && text.trim()) text = await this.polishHebrew(run, agent, model, text);
+    if (!toolCalls?.length && text.trim()) {
+      const rounds = current.cursor.recovery?.rounds ?? 0;
+      const check = checkFinalReply(this.store.listSteps(run.id), text, rounds, maxSteps - current.cursor.turn, this.replyLang(agent, this.userText(run)) === 'he');
+      if (check.action === 'retry') {
+        this.store.updateStep(step.id, { status: 'completed', output: { text, discarded: check.reason }, tokensIn: usage.inputTokens, tokensOut: usage.outputTokens, costUsd: cost, latencyMs: Date.now() - started, endedAt: now() });
+        this.store.addStep({ runId: run.id, kind: 'contract', name: 'verify', status: 'completed', input: { round: rounds + 1 }, output: `Sent back: ${check.reason}`, toolCallId: null, turn: current.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now() });
+        this.store.addLog('warn', `Run ${run.id}: ${check.reason} Asking ${model.name} to recover (round ${rounds + 1}).`, undefined, 'engine');
+        const fresh = this.store.getRun(run.id)!;
+        this.store.updateRun(run.id, { cursor: { ...current.cursor, phase: 'model', turn: current.cursor.turn + 1, recovery: { rounds: rounds + 1, note: check.note } }, inputTokens: fresh.inputTokens + usage.inputTokens, outputTokens: fresh.outputTokens + usage.outputTokens, costUsd: fresh.costUsd + cost });
+        return;
+      }
+      const open = check.action === 'ok' ? openTasks(this.store, run.sessionId, run.id) : [];
+      const taskRounds = current.cursor.taskRounds ?? 0;
+      if (open.length && taskRounds < MAX_TASK_ROUNDS && maxSteps - current.cursor.turn > 1) {
+        this.store.updateStep(step.id, { status: 'completed', output: { text, discarded: 'open tasks' }, tokensIn: usage.inputTokens, tokensOut: usage.outputTokens, costUsd: cost, latencyMs: Date.now() - started, endedAt: now() });
+        this.store.addStep({ runId: run.id, kind: 'contract', name: 'verify', status: 'completed', input: { tasks: open.length }, output: `Sent back: ${open.length} task(s) still open`, toolCallId: null, turn: current.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now() });
+        const fresh = this.store.getRun(run.id)!;
+        this.store.updateRun(run.id, { cursor: { ...current.cursor, phase: 'model', turn: current.cursor.turn + 1, taskRounds: taskRounds + 1, recovery: { rounds: current.cursor.recovery?.rounds ?? 0, note: tasksNote(open) } }, inputTokens: fresh.inputTokens + usage.inputTokens, outputTokens: fresh.outputTokens + usage.outputTokens, costUsd: fresh.costUsd + cost });
+        return;
+      }
+      if (open.length) text += `\n\n⚠️ ${open.length} task(s) still open: ${open.join('; ')}`;
+      if (check.action === 'footer') {
+        text += check.footer;
+        this.store.addLog('warn', `Run ${run.id}: ${check.reason} Added a note to the reply.`, undefined, 'engine');
+      }
+      text = await this.polishHebrew(run, agent, model, text);
+    }
     const assistant = this.store.insertMessage({
       sessionId: run.sessionId, role: 'assistant', content: text, toolCalls: toolCalls?.length ? toolCalls : null,
       agentId: agent.id, runId: run.id, toolCallId: null, toolName: null, imageUrl: null, routingNote: note,
@@ -668,7 +705,13 @@ export class Engine {
         continue;
       }
       let reason = tool.approval(args, toolContext);
-      if (!settings.approvalForDestructive && ['shell', 'write_file', 'docker_run', 'docker_rm'].includes(tool.name)) reason = null;
+      const risk = riskOf(call.name, args, reason);
+      const mode: ApprovalMode = limits.approvalMode ?? settings.approvalMode ?? (settings.approvalForDestructive ? 'balanced' : 'autonomous');
+      if (needsApproval(risk.tier, reason, mode)) reason = `[${risk.tier} risk] ${reason ?? risk.why}`;
+      else {
+        if (reason) this.store.addLog('info', `Auto-approved ${call.name} (${risk.tier} risk, ${mode} mode): ${reason}`, undefined, 'approvals');
+        reason = null;
+      }
       if (reason) {
         let approval = run.cursor.approvalId ? this.store.getApproval(run.cursor.approvalId) : null;
         if (!approval || approval.toolCallId !== call.id || approval.status === 'denied') {
@@ -702,15 +745,19 @@ export class Engine {
         if (error instanceof CrashError || error instanceof StopError || error instanceof InterruptedToolError) throw error;
         const message = error instanceof Error ? error.message : String(error);
         this.store.updateStep(step.id, { status: 'failed', error: message, endedAt: now(), latencyMs: Date.now() - started });
-        this.persistTool(run, call, `Error: ${message}`, 'failed', false);
+        this.persistTool(run, call, `Error: ${message}${recoveryHint(call.name, message)}`, 'failed', false);
       }
       if (call.name === 'plan' && Array.isArray(args.items) && args.items.length && run.cursor.stage === 'plan') handoff = true;
+      if (call.name === 'tasks' && args.action === 'set' && Array.isArray(args.items) && args.items.length >= 2) {
+        const live = this.store.getRun(run.id)!;
+        if (!live.cursor.longTask) this.store.updateRun(run.id, { cursor: { ...live.cursor, longTask: true } });
+      }
       completed.add(call.id);
       this.bumpTools(run.id, completed);
     }
     const latest = this.store.getRun(run.id)!;
     const turn = latest.cursor.turn + 1;
-    let next: RunCursor = { ...latest.cursor, phase: turn >= (latest.cursor.maxSteps ? Math.min(latest.cursor.maxSteps, this.store.getSettings().maxSteps) : this.store.getSettings().maxSteps) ? 'summarize' : 'model', turn, toolCalls: undefined, completedToolIds: [], approvalId: undefined };
+    let next: RunCursor = { ...latest.cursor, phase: turn >= this.stepCap(latest.cursor, this.store.getSession(run.sessionId)?.mode) ? 'summarize' : 'model', turn, toolCalls: undefined, completedToolIds: [], approvalId: undefined };
     if (handoff) {
       const approval = this.store.createApproval({ runId: run.id, toolCallId: 'plan', toolName: 'plan', args: { stage: 'plan' }, reason: 'Start coding from this plan. Edit the plan first if you want to change it.' });
       const waiting = { ...latest.cursor, phase: 'tools' as const, stage: 'plan' as const, approvalId: approval.id };
@@ -897,7 +944,8 @@ export class Engine {
     const toolNames = this.tools(agent, session?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId)).map((tool) => tool.name);
     const nudge = run.cursor.helperId ? '' : skillNudge(run.cursor.turn, toolNames);
     const languageNote = languageHint(this.replyLang(agent, user?.content ?? ''));
-    const system = `${agent.systemPrompt}${sharedRepoBrief(this.store)}${chatWorkspaces}${rulesNote}${memoryNote}${stageNote}${roleNote}${kbHint}${CITE_HINT}${nudge}${languageNote}`;
+    const recoveryNote = run.cursor.recovery?.note ?? '';
+    const system = `${agent.systemPrompt}${sharedRepoBrief(this.store)}${chatWorkspaces}${rulesNote}${memoryNote}${stageNote}${roleNote}${kbHint}${CITE_HINT}${HONESTY_RULE}${run.cursor.helperId ? '' : TASKS_HINT}${nudge}${languageNote}${recoveryNote}`;
     const preambleGuess = `${system}\n${notes.map((note) => note.content).join('\n')}`;
     if (model.providerId === 'prov_gemini' && estimateTokens(preambleGuess, 'gemini') > budget * 0.75) {
       const key = process.env.GEMINI_API_KEY;
@@ -1143,7 +1191,7 @@ export class Engine {
     names.add('share_file');
     names.add('read_slides');
     if (this.ocrReader) names.add('read_image_text');
-    for (const name of ['manage_timer', 'manage_trigger', 'spawn_agent', 'helpers', 'memory_file', 'search_chats', 'propose_skill', 'run_tool_script', 'time_now', 'think']) names.add(name);
+    for (const name of ['tasks', 'manage_timer', 'manage_trigger', 'spawn_agent', 'helpers', 'memory_file', 'search_chats', 'propose_skill', 'run_tool_script', 'time_now', 'think']) names.add(name);
     if (this.store.getSettings().imageGen.mode !== 'off') names.add('generate_image');
     if (stage === 'plan') {
       for (const name of ['web_search', 'web_fetch', 'read_file', 'list_dir', 'grep', 'glob', 'plan', 'recall', 'consult_agent']) names.add(name);
@@ -1162,7 +1210,7 @@ export class Engine {
     if (helper) for (const name of HELPER_DENIED) names.delete(name);
     // Built-in connectors the owner switched off take their tools with them.
     for (const name of disabledConnectorTools(this.store)) names.delete(name);
-    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), ...slidesTools({ dataDir: this.libraryDir, image: async (prompt, ctx) => ({ fileId: (await generateImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }, { prompt, ownerId: ctx.ownerId, shape: 'landscape', sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal })).file.id }) }), ...this.autonomy.tools(), memoryFileTool(), searchChatsTool(), proposeSkillTool(), ...CONNECTOR_TOOLS(), ...(this.ocrReader ? [ocrTool(this.ocrReader)] : []), ...this.extraTools, ...mcp.map((row) => row.tool)];
+    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), ...slidesTools({ dataDir: this.libraryDir, image: async (prompt, ctx) => ({ fileId: (await generateImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }, { prompt, ownerId: ctx.ownerId, shape: 'landscape', sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal })).file.id }) }), ...this.autonomy.tools(), tasksTool(), memoryFileTool(), searchChatsTool(), proposeSkillTool(), ...CONNECTOR_TOOLS(), ...(this.ocrReader ? [ocrTool(this.ocrReader)] : []), ...this.extraTools, ...mcp.map((row) => row.tool)];
     const seen = new Set<string>();
     const chosen = catalog.filter((tool) => {
       if (!names.has(tool.name) || seen.has(tool.name)) return false;
@@ -1405,6 +1453,7 @@ export class Engine {
       maxTokensPerDay: specific.maxTokensPerDay ?? settings.dailyTokenLimit,
       maxSpendUsd: specific.maxSpendUsd ?? settings.dailySpendLimitUsd,
       maxRunMs: specific.maxRunMs ?? null,
+      approvalMode: specific.approvalMode,
     };
   }
 

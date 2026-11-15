@@ -15,7 +15,7 @@ import { t as tr } from '../i18n';
 
 interface Secret { id: string; name: string; handle: string; scope: string; revokedAt: string | null }
 interface Audit { id: number; action: string; actor: string; createdAt: string }
-interface SettingsShape { codeApproval: string; geminiTier: string; sandbox: string; autoResume: boolean; approvalForDestructive: boolean; readOnly?: boolean; dailyTokenLimit?: number | null; killSwitch?: boolean }
+interface SettingsShape { codeApproval: string; geminiTier: string; sandbox: string; autoResume: boolean; approvalForDestructive: boolean; approvalMode?: string; readOnly?: boolean; dailyTokenLimit?: number | null; killSwitch?: boolean }
 
 interface Def { id: string; label: string; icon: LucideIcon; blurb: string; words: string; owner?: boolean; group: 'General' | 'Admin' }
 /** One page, in this order. Old deep links (#vault, #policy, #backups…) land on the matching section. */
@@ -293,6 +293,14 @@ function OwnerSettings() {
       {show('policy') && settings && (
         <div className="card" id="policy">
           <h3>{tr('Approvals')}</h3>
+          <label className="field"><span>{tr('Ask before')}</span>
+            <select value={settings.approvalMode ?? (settings.approvalForDestructive ? 'balanced' : 'autonomous')} onChange={async (event) => { await patchSettings({ approvalMode: event.target.value }); await load(); }}>
+              <option value="cautious">{tr('Cautious: any change, even inside the workspace')}</option>
+              <option value="balanced">{tr('Balanced: deleting, containers, scripts and anything risky')}</option>
+              <option value="autonomous">{tr('Autonomous: only high risk (push, send, pay, delete, sudo)')}</option>
+            </select>
+          </label>
+          <p className="faint">{tr('High-risk actions always ask, in every mode. Reading and searching never ask.')}</p>
           <label className="field"><span>{tr('Code edits')}</span>
             <select value={settings.codeApproval} onChange={async (event) => { await patchSettings({ codeApproval: event.target.value }); await load(); }}>
               <option value="sandbox-auto">{tr('Auto inside the workspace, ask for host paths and push')}</option>

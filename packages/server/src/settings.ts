@@ -14,6 +14,8 @@ export interface Settings {
   /** How many web_search hits go back to the model. */
   searchHits: number;
   approvalForDestructive: boolean;
+  /** Which risk tiers ask first: cautious (low+), balanced (medium+), autonomous (high only). High always asks. */
+  approvalMode?: 'cautious' | 'balanced' | 'autonomous';
   mcpAllowHost: boolean;
   geminiTier: 'free' | 'paid';
   /** sandbox-auto approves edits inside the agent workspace. Host paths and git push always ask. */
@@ -37,7 +39,7 @@ export interface Settings {
   debugLevel: 'info' | 'debug';
   /** api name -> whether Ollama reported tool support. Absent means unknown. */
   toolSupport: Record<string, boolean>;
-  agentLimits: Record<string, { maxTokensPerDay?: number; maxSpendUsd?: number; maxRunMs?: number; readOnly?: boolean }>;
+  agentLimits: Record<string, { maxTokensPerDay?: number; maxSpendUsd?: number; maxRunMs?: number; readOnly?: boolean; approvalMode?: 'cautious' | 'balanced' | 'autonomous' }>;
   /** The image role. Auto tries the local runner first, then Gemini when the account may use it. */
   imageGen: ImageGenSettings;
   /** Hard RAM cap for everything local-agent runs (Ollama models + KV cache, image runner, server). */

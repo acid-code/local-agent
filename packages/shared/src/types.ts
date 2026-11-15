@@ -51,6 +51,11 @@ export type RunStatus =
 
 export interface RunCursor {
   phase: RunPhase;
+  /** Recovery rounds after a reply claimed success over a failed tool call, and the note sent back to the model. */
+  recovery?: { rounds: number; note?: string };
+  /** A task list with 2+ items was set: allow more model turns. taskRounds counts verify-before-done send-backs. */
+  longTask?: boolean;
+  taskRounds?: number;
   /** Background helper limits: fewer model steps, a shorter wall clock, and only these tools. */
   maxSteps?: number;
   timeoutMs?: number;

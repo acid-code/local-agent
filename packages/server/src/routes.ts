@@ -199,6 +199,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       searxngUrl: z.string().optional(),
       searchHits: z.number().int().min(1).max(20).optional(),
       approvalForDestructive: z.boolean().optional(),
+      approvalMode: z.enum(['cautious', 'balanced', 'autonomous']).optional(),
       mcpAllowHost: z.boolean().optional(),
       geminiTier: z.enum(['free', 'paid']).optional(),
       codeApproval: z.enum(['sandbox-auto', 'always']).optional(),
