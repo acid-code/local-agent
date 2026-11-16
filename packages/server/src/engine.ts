@@ -628,7 +628,7 @@ export class Engine {
       let args = parseArgs(call.arguments);
       const speaker = this.store.getAgent(run.agentId);
       const contract = speaker ? contractForAgent(speaker.name) : null;
-      if (contract && contract.tools.length && !contract.tools.includes(call.name) && !['request_secret', 'kb_search', 'load_skill'].includes(call.name)) {
+      if (contract && contract.tools.length && !contract.tools.includes(call.name) && !CONTRACT_ALWAYS.has(call.name)) {
         const message = `${contract.name} is not allowed to call ${call.name}.`;
         this.store.addStep({ runId: run.id, kind: 'contract', name: call.name, status: 'failed', input: args, output: message, toolCallId: call.id, turn: run.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: message, startedAt: now() });
         this.persistTool(run, call, message, 'failed');
@@ -1741,6 +1741,9 @@ function quotaDay(date = new Date()) {
 }
 
 /** Resident size from the tag (Q4 weights ≈ 0.6 GB per billion parameters plus runtime); unknown sizes count as small. */
+/** Personal tools every persona keeps whatever its contract lists (they still go through approval tiers): reminders, time, task list, memory. */
+const CONTRACT_ALWAYS = new Set(['request_secret', 'kb_search', 'load_skill', 'manage_timer', 'time_now', 'tasks', 'think', 'memory_file', 'search_chats']);
+
 export function roughModelGiB(apiName: string): number {
   const size = Number(apiName.toLowerCase().match(/(\d+(?:\.\d+)?)b\b/)?.[1] ?? 4);
   return size * 0.6 + 1;
