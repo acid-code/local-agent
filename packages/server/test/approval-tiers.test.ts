@@ -68,3 +68,21 @@ describe('engine applies tiers', () => {
     await built.app.close();
   });
 });
+
+describe('contract personas keep reminders', () => {
+  it('lets a contract persona (Researcher) call manage_timer, which then asks for approval', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'la-timer-')); dirs.push(dir);
+    const provider = new ScriptProvider();
+    const built = await buildApp({ dataDir: dir, startScheduler: false, serveWeb: false, providerOverride: () => provider as unknown as ModelProvider });
+    const res = await built.app.inject({ method: 'POST', url: '/api/setup', payload: { username: 'asaf', password: ['fixture', 'owner', '11'].join('-') } });
+    const cookies = { la_session: res.cookies.find((item) => item.name === 'la_session')!.value };
+    const agent = (await built.app.inject({ method: 'POST', url: '/api/agents', cookies, payload: { name: 'Researcher', systemPrompt: 't', toolAllowlist: ['web_search'], modelId: 'model_rehearsal' } })).json().agent as { id: string; ownerId: string };
+    const session = built.store.createSession({ agentId: agent.id, ownerId: agent.ownerId });
+    provider.steps = [{ toolCalls: [{ id: 'r1', name: 'manage_timer', arguments: JSON.stringify({ action: 'create', name: 'Call mom', cron: '0 18 * * *', prompt: 'Remind me to call mom' }) }] }, { text: 'ok' }];
+    const run = await built.engine.startTurn({ sessionId: session.id, agentId: agent.id, content: 'remind me daily at 18:00 to call mom' });
+    for (let i = 0; i < 200 && built.store.getRun(run.id)?.status === 'running'; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(built.store.getRun(run.id)?.status).toBe('awaiting_approval');
+    expect(built.store.listApprovals('pending').find((row) => row.runId === run.id)?.reason).toMatch(/Create timer “Call mom”/);
+    await built.app.close();
+  });
+});
