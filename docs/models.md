@@ -62,22 +62,38 @@ OLLAMA_VULKAN=1 OLLAMA_IGPU_ENABLE=1 GGML_VK_VISIBLE_DEVICES=0 OLLAMA_FLASH_ATTE
 OLLAMA_KV_CACHE_TYPE=q8_0 OLLAMA_CONTEXT_LENGTH=16384 OLLAMA_MAX_LOADED_MODELS=2 OLLAMA_KEEP_ALIVE=15m
 ```
 
-## UMA frame buffer and GTT
+## GPU memory on the Radeon 780M
 
-- **BIOS: UMA Frame Buffer Size = 2 GB** (or Auto). Do not set 16 GB: a carve-out is lost to the CPU even when the GPU is idle.
-  The iGPU borrows the rest dynamically through GTT.
-- Raise GTT to 40 GiB so large models fit on the GPU:
+The 780M has no memory of its own; it shares system RAM in two ways. The **UMA frame buffer** is a fixed slice reserved
+in the BIOS (lost to the CPU even when idle). **GTT** is shared RAM the GPU borrows on demand; Vulkan (Ollama, llama.cpp)
+uses GTT, so that is the limit to raise.
+
+1. **BIOS:** keep **UMA Frame Buffer Size at Auto or 2–4 GB**. Raise it only if a runtime insists on dedicated VRAM
+   (some ROCm builds do); Vulkan does not.
+2. **Raise the GTT limit** (Ubuntu Server 26.04 LTS) to ~38 GB so the iGPU can hold the main model and its KV cache:
 
 ```bash
-echo "options ttm pages_limit=10485760 page_pool_size=10485760" | sudo tee /etc/modprobe.d/amdgpu-gtt.conf   # 40 GiB in 4 KiB pages
-echo "options amdgpu gttsize=40960" | sudo tee -a /etc/modprobe.d/amdgpu-gtt.conf                            # older kernels
-sudo update-initramfs -u && sudo reboot
-sudo usermod -aG render,video ollama
-sudo apt install mesa-vulkan-drivers vulkan-tools && vulkaninfo --summary | grep -i radv
-cat /sys/class/drm/card*/device/mem_info_gtt_total   # expect ~42949672960
+sudo sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT="/&ttm.pages_limit=9961472 amdgpu.gttsize=38912 /' /etc/default/grub
+sudo update-grub && sudo reboot
+# after the reboot:
+cat /sys/class/drm/card*/device/mem_info_gtt_total   # expect ~40802189312 (38 GiB)
+sudo usermod -aG render,video ollama && sudo apt install -y mesa-vulkan-drivers vulkan-tools
 ```
 
-Kernel 6.10+ recommended for the 780M. GTT memory is still system RAM: the 40 GB app cap already counts it.
+   `ttm.pages_limit` counts 4 KiB pages (38 × 262144 = 9961472); `amdgpu.gttsize` is MiB (38 × 1024 = 38912). For
+   40 GB use 10485760 / 40960; do not go higher on a 48 GB box. GTT is still system RAM, and the app's 40 GB cap counts it.
+3. **Verify:** `sudo bash scripts/bench-runtime.sh gemma4:26b-a4b`. It reports the GTT size and whether Vulkan beats the CPU.
+
+### llama.cpp flags worth benchmarking
+
+If you run `llama-server` (Vulkan) instead of or next to Ollama, try these one at a time with `llama-bench`:
+
+- **KV cache quantisation:** `-ctk q8_0 -ctv q8_0` (half the KV memory, near-lossless) or `q4_0` (quarter, some quality
+  loss on long contexts). Needs flash attention (`-fa`). Ollama's equivalent is `OLLAMA_KV_CACHE_TYPE=q8_0`.
+- **`--mlock --no-mmap`:** loads the whole model into locked RAM so it is never paged out; steadier latency after idle.
+  In Docker add `--cap-add IPC_LOCK` (and `--ulimit memlock=-1`), or mlock fails.
+- **Speculative decoding:** not worth it for the MoE models here (Gemma 4 26B-A4B, Qwen3.6-35B-A3B): with only 3–4B
+  active parameters they already decode like small models, and the draft model costs RAM and bandwidth.
 
 ## Installing the models
 

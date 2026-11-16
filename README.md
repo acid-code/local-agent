@@ -7,7 +7,7 @@ This guide takes you from a new mini PC in its box to the app open on your phone
 waiting for downloads. Copy each command exactly: select it, copy, paste it into the terminal, press Enter.
 
 **Words you will see**
-- **Terminal**: a window where you type commands. On Ubuntu press `Ctrl+Alt+T` to open one.
+- **Terminal**: a window where you type commands. On Ubuntu Server you are in one as soon as you log in; from a laptop, `ssh asaf@<mini-pc-ip>` opens one.
 - **sudo**: runs a command as administrator. It asks for your computer password; nothing shows while you type it. That is normal.
 - **Model**: the "brain" the assistant uses. You download it once and it runs on the mini PC.
 - **Tailscale**: a free app that connects your phone to your mini PC safely from anywhere, like a private cable.
@@ -17,16 +17,18 @@ waiting for downloads. Copy each command exactly: select it, copy, paste it into
 **1. Plug in the mini PC.** Connect a screen, keyboard, mouse, the network cable (or Wi-Fi later) and power. Turn it on.
 *You should see:* the maker's logo, then Windows or a setup screen.
 
-**2. Install Ubuntu (the Linux system).** On another computer, download [Ubuntu 24.04 LTS Desktop](https://ubuntu.com/download/desktop)
+**2. Install Ubuntu (the Linux system).** On another computer, download [Ubuntu Server 26.04 LTS](https://ubuntu.com/download/server) (the recommended system)
 and write it to a USB stick (8 GB or more) with [balenaEtcher](https://etcher.balena.io). Plug the stick into the mini PC,
 restart it and keep pressing `F7` (or `F11`/`Esc`, depending on the maker) to pick the USB stick. Choose
-"Install Ubuntu", then "Erase disk and install Ubuntu". Pick a username (for example `asaf`) and a password you will remember.
-*You should see:* the Ubuntu desktop after a restart.
+"Install Ubuntu Server", use the entire disk, and tick **Install OpenSSH server**. Pick a username (for example `asaf`) and a password you will remember.
+*You should see:* a text login prompt after a restart. Log in; `ip -4 addr` shows the mini PC's address (`192.168.x.x`).
 
 **3. Give the graphics chip a small memory slice.** Restart and keep pressing `Del` to open the BIOS (the settings
-screen before the system starts). Find **UMA Frame Buffer Size** (often under Advanced → AMD CBS or Graphics) and set it to
-**2G**. Save and exit (`F10`). Why: the assistant borrows memory for graphics only when it needs it; [details](docs/models.md#uma-frame-buffer-and-gtt).
+screen before the system starts). Find **UMA Frame Buffer Size** (often under Advanced → AMD CBS or Graphics) and keep it at
+**Auto** (or 2–4 GB). Save and exit (`F10`). Why: the assistant borrows memory for graphics only when it needs it; [details](docs/models.md#gpu-memory-on-the-radeon-780m).
 *You should see:* Ubuntu starts as before. If you cannot find the setting, skip this step.
+Then let the graphics chip borrow ~38 GB of RAM: follow [GPU memory on the Radeon 780M](docs/models.md#gpu-memory-on-the-radeon-780m)
+(one command and a reboot).
 
 **4. Download local-agent.** Open a terminal and paste:
 
@@ -58,12 +60,12 @@ Open the link it prints, sign in (Google, Microsoft or Apple account is fine) an
 `tailscale ip -4` and write down the address.
 *You should see:* an address like `100.101.102.103`.
 
-**7. Create your account.** On the mini PC (or a laptop on the same home network), open the browser and go to the
+**7. Create your account.** On a laptop on the same home network, open the browser and go to the
 `Setup` address from step 5, for example `http://192.168.1.20:8788`. Paste the setup token, then choose your app username
 and password (8+ characters; this is separate from the Ubuntu password).
 *You should see:* your account is created and the page offers optional extras (a Gemini key, Telegram). You can skip them for now.
 
-**8. Install the AI models.** Open `http://localhost:8787` on the mini PC, sign in, and go to **Setup → Recommended models
+**8. Install the AI models.** From a laptop on the same network open `http://<mini-pc-ip>:8787`, sign in, and go to **Setup → Recommended models
 for this machine**. It recognises the mini PC and lists one model per job (chat, Hebrew, code, reading pictures). Press
 **Install recommended models**. About 45 GB downloads, which can take 30–60 minutes.
 *You should see:* a progress line per model, ending with "Models installed and roles saved."
