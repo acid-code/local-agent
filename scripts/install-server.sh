@@ -274,6 +274,7 @@ fi
 # Filesystem, fetch, git, memory, time, sequential thinking, SQLite and the browser run inside the app (no download).
 if command -v docker >/dev/null 2>&1; then
   run docker pull docker.io/searxng/searxng:latest || echo "SearXNG image not pulled; web search starts once the network is up."
+  run docker pull returntocorp/semgrep:latest || echo "Semgrep image not pulled; code scanning will require network access on first run."
 fi
 if ! command -v google-chrome >/dev/null 2>&1 && ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1; then
   echo "Note: no Chrome/Chromium found. The Browser connector falls back to plain fetch until one is installed."
