@@ -170,7 +170,13 @@ export function ownerOf(store: Store, kind: Kind, id: string): string | null {
     workshop: 'SELECT owner_id AS o FROM workshops WHERE id = ?',
   };
   try {
-    const row = store.db.prepare(sql[kind]).get(id) as { o: string } | undefined;
+    let row = store.db.prepare(sql[kind]).get(id) as { o: string } | undefined;
+    if (!row && kind === 'file') {
+      const clean = String(id || '').replace(/^file:/, '').trim();
+      if (clean && !clean.startsWith('file_')) {
+        row = store.db.prepare(sql.file).get(`file_${clean}`) as { o: string } | undefined;
+      }
+    }
     return row ? String(row.o || OWNER_ID) : null;
   } catch {
     return null;

@@ -79,7 +79,9 @@ export function Chat() {
   const [loadingNote, setLoadingNote] = useState('');
   const [breakdown, setBreakdown] = useState<ContextBreakdown | null>(null);
   const [miniAgents, setMiniAgents] = useState<MiniAgentRow[]>([]);
-  const [keptEdits, setKeptEdits] = useState<Set<string>>(() => new Set());
+  const [keptEdits, setKeptEdits] = useState<Set<string>>(() => {
+    try { return new Set(JSON.parse(localStorage.getItem('la-kept-edits') || '[]') as string[]); } catch { return new Set(); }
+  });
   const [nudgeDismissed, setNudgeDismissed] = useState(false);
   const [voiceLoop, setVoiceLoop] = useState(false);
   const voiceLoopRef = useRef(false);
@@ -1039,7 +1041,12 @@ export function Chat() {
               key={edit.id}
               edit={edit}
               kept={keptEdits.has(edit.id)}
-              onKeep={() => setKeptEdits((prev) => new Set(prev).add(edit.id))}
+              onKeep={() => setKeptEdits((prev) => {
+                const next = new Set(prev);
+                next.add(edit.id);
+                try { localStorage.setItem('la-kept-edits', JSON.stringify([...next].slice(-500))); } catch { /* ignore */ }
+                return next;
+              })}
               onRevert={async () => {
                 try {
                   await post(`/api/edits/${edit.id}/revert`);
