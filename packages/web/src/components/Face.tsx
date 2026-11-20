@@ -48,15 +48,29 @@ const EYES: [number, number, number][] = [[35, 45, 27], [37, 48, 27], [31, 41, 3
 const hash = (text: string) => { let h = 0; for (const ch of text) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return h; };
 
 function Blob({ agent, accent, size }: { agent: FaceAgent; accent: string; size: number }) {
+  const seed = hash(agent.id || agent.name);
   const ref = /^blob-(\d)$/.exec(agent.avatarRef || '');
-  const shape = ref ? Number(ref[1]) % BLOB_PATHS.length : hash(agent.id || agent.name) % BLOB_PATHS.length;
+  const shape = ref ? Number(ref[1]) % BLOB_PATHS.length : seed % BLOB_PATHS.length;
   const [left, right, y] = EYES[shape]!;
   const ink = '#16181b';
+  const blinkDelay = `${((seed % 37) / 10).toFixed(1)}s`;
+  const floatDelay = `${((seed % 29) / 10).toFixed(1)}s`;
   return (
-    <svg className="face blob" width={size} height={size} viewBox="0 0 64 64" aria-hidden>
-      <path d={BLOB_PATHS[shape]} fill={accent} />
-      <rect x={left - 2.9} y={y - 6.5} width="5.8" height="13" rx="2.9" fill={ink} />
-      <rect x={right - 2.9} y={y - 6.5} width="5.8" height="13" rx="2.9" fill={ink} />
+    <svg
+      className="face blob"
+      width={size}
+      height={size}
+      viewBox="0 0 64 64"
+      style={{ ['--blink-delay' as string]: blinkDelay, ['--float-delay' as string]: floatDelay }}
+      aria-hidden
+    >
+      <g className="blob-inner">
+        <path className="blob-body" d={BLOB_PATHS[shape]} fill={accent} />
+        <g className="blob-eyes" style={{ transformOrigin: `${(left + right) / 2}px ${y}px` }}>
+          <rect className="blob-eye" x={left - 2.9} y={y - 6.5} width="5.8" height="13" rx="2.9" fill={ink} />
+          <rect className="blob-eye" x={right - 2.9} y={y - 6.5} width="5.8" height="13" rx="2.9" fill={ink} />
+        </g>
+      </g>
     </svg>
   );
 }
