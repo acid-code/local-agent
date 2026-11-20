@@ -90,7 +90,7 @@ export function proposeSkillTool(): Tool {
     mutates: () => true,
     approval: (args, ctx) => {
       const existing = args.slug && ctx ? listSkills(ctx.store).find((skill) => skill.slug === String(args.slug)) : null;
-      const head = existing ? `Update shared skill “${existing.name}” to v${existing.version + 1}` : `Save new shared skill “${String(args.name || '').slice(0, 60)}”`;
+      const head = existing ? `Update skill “${existing.name}” to v${existing.version + 1}` : `Save new skill “${String(args.name || '').slice(0, 60)}”`;
       const scriptTag = args.scriptName ? ` (+ script ${String(args.scriptName).slice(0, 40)})` : '';
       return `${head}${scriptTag}: ${String(args.description || '').slice(0, 160)}`;
     },
