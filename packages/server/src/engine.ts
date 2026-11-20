@@ -52,7 +52,7 @@ import { HONESTY_RULE, checkFinalReply, recoveryHint } from './recovery.js';
 import { ocrTool, understandImageTool, type ImageAnalysisResult, type OcrMode, type OcrResult } from './ocr.js';
 import { getLanguage, languageHint, replyLanguage, wantsCleanup } from './language.js';
 import { CITE_HINT, findContextTool, shareFileTool } from './files.js';
-import { generateImage, imageTool, localStatus } from './images.js';
+import { fetchImageTool, fetchWebImage, generateImage, imageTool, localStatus } from './images.js';
 import { slidesTools } from './slides.js';
 import { NO_MODEL_MESSAGE } from './usable-models.js';
 import { BudgetError, type Lease, type MemoryBudget } from './memory.js';
@@ -1223,7 +1223,8 @@ export class Engine {
         : '',
       (() => {
         const caps: string[] = [];
-        if (toolNames.includes('make_slides')) caps.push('make_slides (generate real .pptx PowerPoint files, with optional generated images)');
+        if (toolNames.includes('make_slides')) caps.push('make_slides (generate real .pptx PowerPoint files with embedded images — automatically generates or fetches real images from Wikimedia Commons/web)');
+        if (toolNames.includes('fetch_image')) caps.push('fetch_image (search and download real high-resolution PNG/JPEG photos & scientific/medical diagrams from Wikimedia Commons or SearXNG as [file:<id>] to embed in slides or chat)');
         if (toolNames.includes('read_slides')) caps.push('read_slides (inspect .pptx decks)');
         if (toolNames.includes('read_image_text')) caps.push('read_image_text (run local OCR on images/screenshots)');
         if (toolNames.includes('understand_image')) caps.push('understand_image (full multimodal vision analysis: scene description, colors/shades/hex codes, charts/numbers, layout, and text)');
@@ -1529,6 +1530,7 @@ export class Engine {
     names.add('share_file');
     names.add('make_slides');
     names.add('read_slides');
+    names.add('fetch_image');
     names.add('browse');
     if ((agent.ownerId || OWNER_ID) === OWNER_ID) {
       names.add('create_project');
@@ -1556,7 +1558,7 @@ export class Engine {
     if (helper) for (const name of HELPER_DENIED) names.delete(name);
     // Built-in connectors the owner switched off take their tools with them.
     for (const name of disabledConnectorTools(this.store)) names.delete(name);
-    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), ...slidesTools({ dataDir: this.libraryDir, image: async (prompt, ctx) => ({ fileId: (await generateImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }, { prompt, ownerId: ctx.ownerId, shape: 'landscape', sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal })).file.id }) }), ...this.autonomy.tools(), tasksTool(), memoryFileTool(), searchChatsTool(), proposeSkillTool(), ...CONNECTOR_TOOLS(), ...vercelTools(), ...(this.ocrReader ? [ocrTool(this.ocrReader)] : []), ...(this.imageAnalyzer ? [understandImageTool(this.imageAnalyzer)] : []), ...this.extraTools, ...mcp.map((row) => row.tool)];
+    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), fetchImageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl }), ...slidesTools({ dataDir: this.libraryDir, image: async (prompt, ctx) => { try { return { fileId: (await generateImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }, { prompt, ownerId: ctx.ownerId, shape: 'landscape', sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal })).file.id }; } catch { const searxngUrl = this.store.getSettings().searxngUrl || process.env.SEARXNG_URL || ''; return { fileId: (await fetchWebImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, searxngUrl }, { query: prompt, ownerId: ctx.ownerId, sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal })).file.id }; } } }), ...this.autonomy.tools(), tasksTool(), memoryFileTool(), searchChatsTool(), proposeSkillTool(), ...CONNECTOR_TOOLS(), ...vercelTools(), ...(this.ocrReader ? [ocrTool(this.ocrReader)] : []), ...(this.imageAnalyzer ? [understandImageTool(this.imageAnalyzer)] : []), ...this.extraTools, ...mcp.map((row) => row.tool)];
     const seen = new Set<string>();
     const chosen = catalog.filter((tool) => {
       if (!names.has(tool.name) || seen.has(tool.name)) return false;
@@ -2108,7 +2110,7 @@ const CONTRACT_ALWAYS = new Set([
   'request_secret', 'kb_search', 'load_skill', 'manage_timer', 'manage_trigger',
   'time_now', 'tasks', 'think', 'memory_file', 'search_chats',
   'spawn_agent', 'helpers', 'propose_skill', 'read_output', 'run_skill_script',
-  'find_context', 'share_file', 'make_slides', 'read_slides', 'browse', 'create_project', 'vercel', 'turbo_inspect', 'read_image_text', 'understand_image', 'generate_image', 'repo_sync',
+  'find_context', 'share_file', 'make_slides', 'read_slides', 'fetch_image', 'browse', 'create_project', 'vercel', 'turbo_inspect', 'read_image_text', 'understand_image', 'generate_image', 'repo_sync',
 ]);
 
 export function roughModelGiB(apiName: string): number {

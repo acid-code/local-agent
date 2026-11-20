@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { execFile } from 'node:child_process';
-import { imageCatalog, imageFileName, type ImageModelSpec } from '@local-agent/shared';
+import { imageCatalog, imageFileName, isBlockedUrl, type ImageModelSpec } from '@local-agent/shared';
 import type { Store } from './db.js';
 import type { ImageGenSettings, Settings } from './settings.js';
 import type { Tool } from './tools.js';
@@ -202,6 +202,122 @@ export function imageTool(deps: Omit<GenerateDeps, 'store'>): Tool {
       });
       const secs = Math.round(result.ms / 1000);
       return `Made [file:${result.file.id}] with ${result.detail} in ${secs} s.${result.slow && secs > 15 ? ' Local generation is slow on this machine; say so if the user asks for many.' : ''} Mention [file:${result.file.id}] in the reply.`;
+    },
+  };
+}
+
+function sniffImageMime(buf: Buffer): 'image/png' | 'image/jpeg' | null {
+  if (buf.length < 12) return null;
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  return null;
+}
+
+async function downloadValidImage(fetchImpl: typeof fetch, url: string, signal?: AbortSignal): Promise<{ bytes: Buffer; mime: 'image/png' | 'image/jpeg' } | null> {
+  if (!url || !/^https?:\/\//i.test(url) || isBlockedUrl(url)) return null;
+  try {
+    const combined = signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000);
+    const res = await fetchImpl(url, {
+      signal: combined,
+      headers: { 'User-Agent': 'local-agent/0.1 (https://github.com/acid-code/local-agent)' },
+    });
+    if (!res.ok) return null;
+    const len = Number(res.headers.get('content-length') || 0);
+    if (len > 8 * 1024 * 1024) return null;
+    const bytes = Buffer.from(await res.arrayBuffer());
+    if (bytes.length > 8 * 1024 * 1024) return null;
+    const mime = sniffImageMime(bytes);
+    if (!mime) return null;
+    return { bytes, mime };
+  } catch {
+    return null;
+  }
+}
+
+/** Search Wikimedia Commons first (great for science, medical diagrams & photos), then local SearXNG image search, and save a verified PNG/JPEG to the user's Library. */
+export async function fetchWebImage(
+  deps: { store: Store; dataDir: string; fetchImpl: typeof fetch; searxngUrl?: string },
+  input: { query: string; ownerId: string; sessionId?: string | null; agentId?: string | null; signal?: AbortSignal },
+) {
+  const query = input.query.trim().slice(0, 200);
+  if (!query) throw new Error('Provide an image search query.');
+  const candidates: Array<{ url: string; provider: string }> = [];
+
+  // 1. Wikimedia Commons (high-res diagrams & photography, free, no API key)
+  try {
+    const wikiUrl = `https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrnamespace=6&gsrlimit=8&prop=imageinfo&iiprop=url|mime|size&iiurlwidth=1280&format=json&gsrsearch=${encodeURIComponent(query)}`;
+    const combined = input.signal ? AbortSignal.any([input.signal, AbortSignal.timeout(8_000)]) : AbortSignal.timeout(8_000);
+    const res = await deps.fetchImpl(wikiUrl, { signal: combined, headers: { 'User-Agent': 'local-agent/0.1 (https://github.com/acid-code/local-agent)' } });
+    if (res.ok) {
+      const data = await res.json() as { query?: { pages?: Record<string, { imageinfo?: Array<{ url?: string; thumburl?: string; mime?: string }> }> } };
+      for (const page of Object.values(data.query?.pages || {})) {
+        const info = page.imageinfo?.[0];
+        if (!info) continue;
+        // Prefer thumburl (Wikimedia renders SVG/huge images to 1280px PNG/JPEG automatically!)
+        const pick = info.thumburl || (info.mime === 'image/png' || info.mime === 'image/jpeg' ? info.url : undefined);
+        if (pick) candidates.push({ url: pick, provider: 'Wikimedia Commons' });
+      }
+    }
+  } catch { /* fall through to SearXNG */ }
+
+  // 2. Local SearXNG image search fallback
+  const searx = (deps.searxngUrl || process.env.SEARXNG_URL || '').replace(/\/$/, '');
+  if (searx) {
+    try {
+      const combined = input.signal ? AbortSignal.any([input.signal, AbortSignal.timeout(8_000)]) : AbortSignal.timeout(8_000);
+      const res = await deps.fetchImpl(`${searx}/search?q=${encodeURIComponent(query)}&categories=images&format=json`, { signal: combined });
+      if (res.ok) {
+        const data = await res.json() as { results?: Array<{ img_src?: string; thumbnail_src?: string }> };
+        for (const r of (data.results || []).slice(0, 8)) {
+          if (r.img_src) candidates.push({ url: r.img_src, provider: 'SearXNG' });
+          if (r.thumbnail_src) candidates.push({ url: r.thumbnail_src, provider: 'SearXNG' });
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  for (const cand of candidates) {
+    const img = await downloadValidImage(deps.fetchImpl, cand.url, input.signal);
+    if (!img) continue;
+    const ext = img.mime === 'image/jpeg' ? 'jpg' : 'png';
+    const slug = query.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'web-image';
+    const file = saveFile(deps.store, deps.dataDir, {
+      name: `${slug}.${ext}`,
+      bytes: img.bytes,
+      mime: img.mime,
+      sessionId: input.sessionId ?? null,
+      agentId: input.agentId ?? null,
+      source: 'agent',
+      ownerId: input.ownerId,
+    });
+    return { file, sourceUrl: cand.url, provider: cand.provider };
+  }
+  throw new Error(`No downloadable PNG/JPEG image found for "${query}".`);
+}
+
+export function fetchImageTool(deps: { dataDir: string; fetchImpl: typeof fetch }): Tool {
+  return {
+    name: 'fetch_image',
+    description:
+      'Find and download a real high-resolution PNG/JPEG photo or scientific/medical diagram from Wikimedia Commons or SearXNG image search. '
+      + 'Saves it to the user\'s Library and returns [file:<id>] so you can embed it in make_slides (image.fileId), inspect it with understand_image, or show it in chat. '
+      + 'Works with zero API key and zero GPU RAM. Use concise English search keywords.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Concise English search keywords for the photo or diagram (e.g. "osteoporosis bone remodeling osteoclast osteoblast diagram").' },
+      },
+      required: ['query'],
+      additionalProperties: false,
+    },
+    mutates: () => false,
+    approval: () => null,
+    async execute(args, ctx) {
+      const result = await fetchWebImage(
+        { store: ctx.store, dataDir: deps.dataDir, fetchImpl: deps.fetchImpl, searxngUrl: ctx.searxngUrl },
+        { query: String(args.query || ''), ownerId: ctx.agent.ownerId || OWNER_ID, sessionId: ctx.sessionId, agentId: ctx.agent.id, signal: ctx.signal },
+      );
+      return `Saved [file:${result.file.id}] from ${result.provider} (${result.sourceUrl}). You can embed it in make_slides using image: { fileId: "${result.file.id}" } or mention [file:${result.file.id}] in your reply.`;
     },
   };
 }
