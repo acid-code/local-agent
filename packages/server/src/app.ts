@@ -147,9 +147,17 @@ export async function buildApp(options: {
   registerRoutes(app, { store, engine, bus, docker, mcp, vault, notifier, config, fetchImpl: options.fetchImpl ?? fetch, autoConnectors: options.startScheduler !== false && !process.env.VITEST });
 
   if (options.serveWeb !== false && fs.existsSync(config.webDist)) {
-    await app.register(fastifyStatic, { root: config.webDist });
+    await app.register(fastifyStatic, {
+      root: config.webDist,
+      setHeaders(res, filePath) {
+        if (filePath.endsWith('index.html')) {
+          res.header('Cache-Control', 'no-store, must-revalidate');
+        }
+      },
+    });
     app.setNotFoundHandler((req, reply) => {
       if (req.url.startsWith('/api/')) return reply.code(404).send({ error: 'Not found.' });
+      reply.header('Cache-Control', 'no-store, must-revalidate');
       return reply.sendFile('index.html');
     });
   }

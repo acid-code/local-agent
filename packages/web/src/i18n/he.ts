@@ -1460,4 +1460,8 @@ export const he: Record<string, string> = {
   "Creating…": "יוצר…",
   "Project name (e.g. gym-tracker)": "שם הפרויקט (למשל gym-tracker)",
   "Short description (optional)": "תיאור קצר (אופציונלי)",
+  "Retry": "נסו שוב",
+  "Change server…": "החלפת שרת…",
+  "Could not reach the server.": "לא ניתן להתחבר לשרת.",
+  "The server took too long to answer.": "השרת לא הגיב בזמן.",
 };

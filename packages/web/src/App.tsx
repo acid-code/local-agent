@@ -1,5 +1,5 @@
 import { syncAccountLanguage } from './components/LanguagePicker';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { setRole } from './lib/role';
 import { Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 import { api, ApiError } from './lib/api';
@@ -26,15 +26,61 @@ export interface Me { needsSetup: boolean; authenticated: boolean; username?: st
 
 export function App() {
   const [me, setMe] = useState<Me | null>(null);
+  const [bootError, setBootError] = useState<string>('');
   const navigate = useNavigate();
 
-  useEffect(() => {
-    api<Me>('/api/auth/me').then((data) => { setMe(data); if (data.authenticated) { void loadAccountTheme(); void syncAccountLanguage(); } }).catch((error: ApiError) => {
-      if (error.status === 401) setMe({ needsSetup: false, authenticated: false });
-    });
+  const loadMe = useCallback(() => {
+    setBootError('');
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 10_000);
+    api<Me>('/api/auth/me', { signal: controller.signal })
+      .then((data) => {
+        setMe(data);
+        if (data.authenticated) {
+          void loadAccountTheme();
+          void syncAccountLanguage();
+        }
+      })
+      .catch((error: unknown) => {
+        if (error instanceof ApiError && error.status === 401) {
+          setMe({ needsSetup: false, authenticated: false });
+          return;
+        }
+        const aborted = error instanceof DOMException && error.name === 'AbortError';
+        const message = aborted
+          ? t('The server took too long to answer.')
+          : error instanceof Error && error.message && !/failed to fetch/i.test(error.message)
+            ? error.message
+            : t('Could not reach the server.');
+        setBootError(message);
+      })
+      .finally(() => window.clearTimeout(timer));
   }, []);
 
-  if (!me) return <div className="login"><p className="muted">{t('Opening the workshop…')}</p></div>;
+  useEffect(() => {
+    loadMe();
+  }, [loadMe]);
+
+  const desktopBridge = (window as unknown as { localAgent?: { openSetup?: (msg?: string) => void } }).localAgent;
+
+  if (!me) {
+    if (bootError) {
+      return (
+        <div className="login">
+          <div className="card" style={{ maxWidth: 420, textAlign: 'center', display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <p style={{ margin: 0 }}>{bootError}</p>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap' }}>
+              <button type="button" className="btn btn-primary" onClick={loadMe}>{t('Retry')}</button>
+              {desktopBridge?.openSetup && (
+                <button type="button" className="btn" onClick={() => desktopBridge.openSetup?.(bootError)}>{t('Change server…')}</button>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return <div className="login"><p className="muted">{t('Opening the workshop…')}</p></div>;
+  }
   if (!me.authenticated) return <Login me={me} onIn={() => { void api<Me>('/api/auth/me').then((data) => { setMe(data); void loadAccountTheme(); void syncAccountLanguage(); }); navigate('/'); }} />;
 
   const owner = me.role !== 'member';

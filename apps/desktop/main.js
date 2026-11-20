@@ -168,6 +168,12 @@ function createWindow() {
 
 ipcMain.handle('get-url', () => readUrl());
 
+ipcMain.handle('open-setup', (event, message) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (win) void showSetup(win, message ? String(message) : undefined);
+  return { ok: true };
+});
+
 // The web app reports its theme background so the window opens in the right colour next time.
 ipcMain.handle('set-background', (event, value) => {
   const color = String(value || '');
