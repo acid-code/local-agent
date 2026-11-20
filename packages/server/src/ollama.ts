@@ -45,8 +45,8 @@ export async function ollamaLoaded(fetchImpl: typeof fetch): Promise<LoadedModel
   }
 }
 
-export async function toolCapabilityWarnings(fetchImpl: typeof fetch, models: { name: string; apiName: string; local: boolean; embedding: boolean }[]): Promise<string[]> {
-  const chat = models.filter((model) => model.local && !model.embedding);
+export async function toolCapabilityWarnings(fetchImpl: typeof fetch, models: { name: string; apiName: string; local: boolean; embedding: boolean; providerId?: string }[]): Promise<string[]> {
+  const chat = models.filter((model) => model.local && !model.embedding && (!model.providerId || model.providerId === 'prov_ollama'));
   if (!chat.length) return [];
   const warnings: string[] = [];
   let unanswered = 0;

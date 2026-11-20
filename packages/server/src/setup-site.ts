@@ -412,8 +412,10 @@ const PAGE = `<!doctype html>
     .ok { color: #c8e6c4; }
     .imglist { list-style: none; padding: 0; } .imglist li { padding: 10px 0; border-top: 1px solid rgba(255,255,255,.08); } .imglist progress { width: 60%; vertical-align: middle; }
     .steps { display: flex; gap: 0.4rem; flex-wrap: wrap; margin: 1rem 0; }
-    .steps span { border: 1px solid rgba(243,236,223,.16); border-radius: 999px; padding: 0.2rem 0.6rem; color: #b7b1a6; }
-    .steps span.on { color: #1a140c; background: #e4b56a; border-color: #e4b56a; }
+    .steps button { width: auto; margin: 0; border: 1px solid rgba(243,236,223,.16); border-radius: 999px; padding: 0.2rem 0.6rem; color: #b7b1a6; background: transparent; font-size: .85rem; cursor: pointer; }
+    .steps button:hover:not(:disabled) { border-color: rgba(243,236,223,.4); color: #f3ecdf; }
+    .steps button.on { color: #1a140c; background: #e4b56a; border-color: #e4b56a; }
+    .steps button:disabled { opacity: .45; cursor: default; }
   </style>
 </head>
 <body>
@@ -426,11 +428,12 @@ const PAGE = `<!doctype html>
     const app = document.querySelector('#app');
     const steps = ['Account', 'Models', 'Cloud keys', 'Notifications', 'Backups', 'Defaults'];
     let step = 0;
+    let authed = false;
     function field(label, name, type, value) {
       return '<label>' + label + '</label><input name="' + name + '" type="' + (type || 'text') + '" value="' + (value || '') + '" />';
     }
     function nav() {
-      return '<div class="steps">' + steps.map((name, index) => '<span class="' + (index === step ? 'on' : '') + '">' + name + '</span>').join('') + '</div>';
+      return '<div class="steps">' + steps.map((name, index) => '<button type="button" data-step="' + index + '" class="' + (index === step ? 'on' : '') + '"' + (!authed && index > 0 ? ' disabled' : '') + '>' + name + '</button>').join('') + '</div>';
     }
     async function api(path, opts) {
       const res = await fetch(path, { credentials: 'same-origin', headers: opts && opts.body ? { 'content-type': 'application/json' } : {}, ...opts });
@@ -438,10 +441,25 @@ const PAGE = `<!doctype html>
       if (!res.ok) throw new Error(data.error || res.statusText);
       return data;
     }
-    function show(html) { app.innerHTML = nav() + html; }
+    function show(html) {
+      app.innerHTML = nav() + html;
+      app.querySelectorAll('.steps [data-step]').forEach((btn) => {
+        btn.onclick = () => {
+          const idx = Number(btn.dataset.step);
+          if (!authed && idx > 0) return;
+          if (idx === 0) void boot();
+          else if (idx === 1) void models();
+          else if (idx === 2) keys();
+          else if (idx === 3) notes();
+          else if (idx === 4) backups();
+          else if (idx === 5) void boot();
+        };
+      });
+    }
     async function boot() {
       try {
         const state = await api('/api/setup/state');
+        authed = Boolean(state.authenticated);
         if (state.needsOwner) return account();
         if (!state.authenticated) return login();
         return defaults(state);
