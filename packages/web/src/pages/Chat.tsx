@@ -20,6 +20,7 @@ import { ContextRing } from '../components/ContextRing';
 import { ContextNudgeBanner, DecisionTimeline, InlineDiffCard, LocalRepoPicker, MiniAgentStrip, type MiniAgentRow } from '../components/ChatUpgrades';
 import { parseSources, toolSummary, type ContextBreakdown } from '@local-agent/shared';
 import { toast, errorText } from '../lib/toast';
+import { copyText } from '../lib/files';
 import { speak, subscribeSpeaking } from '../lib/speak';
 import { api, post } from '../lib/api';
 import { isAbort, latestOnly } from '../lib/latest';
@@ -55,6 +56,8 @@ export function Chat() {
   const [edits, setEdits] = useState<Edit[]>([]);
   const [draft, setDraft] = useState('');
   const [streaming, setStreaming] = useState('');
+  const [liveTps, setLiveTps] = useState<number | null>(null);
+  const streamMetricsRef = useRef<{ startedAt: number; chunks: number; chars: number }>({ startedAt: 0, chunks: 0, chars: 0 });
   const [runId, setRunId] = useState<string | null>(null);
   const runSession = useRef<string | null>(null);
   const [status, setStatus] = useState('');
@@ -396,8 +399,22 @@ export function Chat() {
           return;
         }
       }
-      if (data.type === 'token') setStreaming((value) => value + data.text);
-      if (data.type === 'thinking') setThinking((value) => value + data.text);
+      if (data.type === 'token' || data.type === 'thinking') {
+        const piece = String(data.text || '');
+        if (data.type === 'token') setStreaming((value) => value + piece);
+        else setThinking((value) => value + piece);
+        const nowMs = performance.now();
+        const m = streamMetricsRef.current;
+        if (!m.startedAt) m.startedAt = nowMs;
+        m.chunks += 1;
+        m.chars += piece.length;
+        const elapsed = (nowMs - m.startedAt) / 1000;
+        if (elapsed >= 0.35) {
+          // Each SSE delta from llama-server/Ollama is ~1 token (or ~3.5 chars when coalesced).
+          const estTokens = Math.max(m.chunks, Math.round(m.chars / 3.6));
+          setLiveTps(Math.round((estTokens / elapsed) * 10) / 10);
+        }
+      }
       if (data.type === 'error') setRunError(String(data.message || 'The reply failed.'));
       if (data.type === 'step' && data.step) {
         setSteps((value) => [...value.filter((step) => step.id !== data.step.id), data.step]);
@@ -410,6 +427,7 @@ export function Chat() {
         setMessages((value) => [...value.filter((m) => m.id !== data.message.id), data.message]);
         setStreaming('');
         setThinking('');
+        streamMetricsRef.current = { startedAt: 0, chunks: 0, chars: 0 };
         // Auto-speak reply if the responding persona has Answer by voice enabled or Voice-First Mode is on.
         if (data.message?.role === 'assistant' && data.message?.content?.trim() && !(data.message.toolCalls?.length)) {
           const speaker = agentsRef.current.find((a) => a.id === data.message.agentId);
@@ -577,11 +595,13 @@ export function Chat() {
   }
 
   async function copy(id: string, text: string) {
-    try {
-      await navigator.clipboard.writeText(text);
+    const ok = await copyText(text);
+    if (ok) {
       setCopied(id);
       setTimeout(() => setCopied((value) => (value === id ? null : value)), 1500);
-    } catch { toast(t('Copy is blocked here. Select the text instead.'), 'info'); }
+    } else {
+      toast(t('Copy is blocked here. Select the text instead.'), 'info');
+    }
   }
 
   async function removeChat(id: string) {
@@ -837,7 +857,7 @@ export function Chat() {
           </div>
         </div>
         {steps.length > 0 && (
-          <DecisionTimeline steps={steps} live={Boolean(active)} docked onStop={() => control('stop')} />
+          <DecisionTimeline steps={steps} live={Boolean(active)} liveTokPerSec={liveTps} docked onStop={() => control('stop')} />
         )}
         {(current || chatWs.roots.length > 0) && (
           <div className="ws-strip" aria-label={t('Workspaces in this chat')}>

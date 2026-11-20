@@ -134,13 +134,24 @@ const mapFile = (row: Record<string, unknown>): FileRow => ({
   ownerId: String(row.owner_id || OWNER_ID),
 });
 
+function fileRow(store: Store, id: string, columns = '*'): Record<string, unknown> | undefined {
+  const clean = String(id || '').replace(/^file:/, '').trim();
+  if (!clean) return undefined;
+  const direct = store.db.prepare(`SELECT ${columns} FROM files WHERE id = ?`).get(clean) as Record<string, unknown> | undefined;
+  if (direct) return direct;
+  if (!clean.startsWith('file_')) {
+    return store.db.prepare(`SELECT ${columns} FROM files WHERE id = ?`).get(`file_${clean}`) as Record<string, unknown> | undefined;
+  }
+  return undefined;
+}
+
 export function getFile(store: Store, id: string): FileRow | null {
-  const row = store.db.prepare('SELECT * FROM files WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+  const row = fileRow(store, id, '*');
   return row ? mapFile(row) : null;
 }
 
 export function filePath(store: Store, dataDir: string, id: string): string | null {
-  const row = store.db.prepare('SELECT rel_path, owner_id FROM files WHERE id = ?').get(id) as { rel_path: string; owner_id?: string } | undefined;
+  const row = fileRow(store, id, 'rel_path, owner_id') as { rel_path: string; owner_id?: string } | undefined;
   if (!row) return null;
   const owner = row.owner_id || OWNER_ID;
   const root = owner === OWNER_ID ? filesDir(dataDir) : path.resolve(accountDir(dataDir, owner), 'files');
@@ -149,7 +160,7 @@ export function filePath(store: Store, dataDir: string, id: string): string | nu
 }
 
 export function fileText(store: Store, id: string): string {
-  const row = store.db.prepare('SELECT text_index FROM files WHERE id = ?').get(id) as { text_index: string } | undefined;
+  const row = fileRow(store, id, 'text_index') as { text_index: string } | undefined;
   return row?.text_index ?? '';
 }
 

@@ -97,6 +97,31 @@ export function openExternally(url: string, name: string, mime = 'application/oc
 }
 
 /** Share sheet: Android intent, Web Share with a file where the browser supports it, else copy the link. */
+/** Copy text to clipboard even on plain HTTP (Tailscale/LAN) where navigator.clipboard is restricted. */
+export async function copyText(text: string): Promise<boolean> {
+  if (navigator.clipboard?.writeText && window.isSecureContext) {
+    try { await navigator.clipboard.writeText(text); return true; } catch { /* fall through to textarea */ }
+  }
+  try {
+    const el = document.createElement('textarea');
+    el.value = text;
+    el.setAttribute('readonly', '');
+    el.style.position = 'fixed';
+    el.style.top = '-9999px';
+    el.style.opacity = '0';
+    document.body.appendChild(el);
+    el.focus();
+    el.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(el);
+    if (ok) return true;
+  } catch { /* ignore */ }
+  if (navigator.clipboard?.writeText) {
+    try { await navigator.clipboard.writeText(text); return true; } catch { /* ignore */ }
+  }
+  return false;
+}
+
 export async function shareFile(url: string, name: string, mime = 'application/octet-stream') {
   const bridge = android();
   if (bridge?.share) { bridge.share(absolute(url), name, mime); return; }
@@ -110,7 +135,7 @@ export async function shareFile(url: string, name: string, mime = 'application/o
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') return;
   }
-  await navigator.clipboard?.writeText(absolute(url)).catch(() => undefined);
+  await copyText(absolute(url));
   toast('Link copied. Sharing files is not available in this browser.', 'info');
 }
 

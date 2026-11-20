@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Download, ExternalLink, FileArchive, FileQuestion, Quote, Share2, X, ScanText, Copy } from 'lucide-react';
 import hljs from 'highlight.js/lib/common';
 import { Markdown } from './Markdown';
-import { extOf, fileMeta, humanSize, kindOf, openExternally, pathRawUrl, rawUrl, saveFile, shareFile, type FileKind } from '../lib/files';
+import { copyText, extOf, fileMeta, humanSize, kindOf, openExternally, pathRawUrl, rawUrl, saveFile, shareFile, type FileKind } from '../lib/files';
 import { errorText, toast } from '../lib/toast';
 import { t as tr } from '../i18n';
 
@@ -49,7 +49,7 @@ export function FileViewer({ source, anchor, onClose, onQuote }: { source: Viewe
       const { result } = await api<{ result: { text: string; engine: string; model?: string; confidence: number | null; notes: string[] } }>('/api/ocr', { method: 'POST', body: JSON.stringify({ fileId: source.id, mode }) });
       const how = result.engine === 'vision' ? tr('Read by {0}', [result.model || 'a vision model']) : tr('Tesseract · confidence {0}%', [Math.round(result.confidence ?? 0)]);
       setOcr({ busy: false, text: result.text, how, mode });
-      if (result.text) { await navigator.clipboard?.writeText(result.text).then(() => toast(tr('Text copied.'), 'ok')).catch(() => undefined); }
+      if (result.text) { void copyText(result.text).then((ok) => { if (ok) toast(tr('Text copied.'), 'ok'); }); }
       else toast(tr('No text found in this picture.'), 'info');
     } catch (error) { setOcr(null); toast(errorText(error), 'error'); }
   };
@@ -89,7 +89,7 @@ export function FileViewer({ source, anchor, onClose, onQuote }: { source: Viewe
             <section className="ocr-panel" aria-label={tr('Text in this picture')}>
               <header><strong>{tr('Text in this picture')}</strong><span className="faint">{ocr.how}</span><span className="spacer" />
                 {ocr.mode !== 'handwriting' && <button className="btn ghost small" onClick={() => void readText('handwriting')}>{tr('Read as handwriting')}</button>}
-                <button className="btn ghost small" onClick={() => void navigator.clipboard?.writeText(ocr.text || '').then(() => toast(tr('Text copied.'), 'ok'))}><Copy size={14} /> {tr('Copy')}</button>
+                <button className="btn ghost small" onClick={() => void copyText(ocr.text || '').then((ok) => { if (ok) toast(tr('Text copied.'), 'ok'); })}><Copy size={14} /> {tr('Copy')}</button>
                 {onQuote && <button className="btn ghost small" onClick={() => quote(ocr.text || '')}><Quote size={14} /> {tr('Quote')}</button>}
               </header>
               <div className="ocr-text">{(ocr.text || tr('No text found in this picture.')).split('\n').map((line, index) => <p key={index} dir="auto">{line || '\u00a0'}</p>)}</div>

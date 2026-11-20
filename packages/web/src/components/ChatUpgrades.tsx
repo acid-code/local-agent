@@ -217,11 +217,13 @@ export function InlineDiffCard({
 export function DecisionTimeline({
   steps,
   live,
+  liveTokPerSec,
   docked,
   onStop,
 }: {
   steps: TraceStep[];
   live: boolean;
+  liveTokPerSec?: number | null;
   docked?: boolean;
   onStop?: () => void;
 }) {
@@ -232,6 +234,11 @@ export function DecisionTimeline({
 
   const toolCount = visible.filter((s) => s.kind === 'tool').length;
   const activeStep = visible.find((s) => s.status === 'running');
+  const completedModelSteps = visible.filter((s) => s.kind === 'model' && s.tokensOut && s.latencyMs && s.latencyMs > 0);
+  const totalOut = completedModelSteps.reduce((acc, s) => acc + (s.tokensOut || 0), 0);
+  const totalSec = completedModelSteps.reduce((acc, s) => acc + ((s.latencyMs || 0) / 1000), 0);
+  const avgTps = totalOut > 0 && totalSec > 0 ? Math.round((totalOut / totalSec) * 10) / 10 : null;
+  const shownTps = live ? (liveTokPerSec ?? avgTps) : avgTps;
 
   return (
     <div className={`decision-trace${docked ? ' docked' : ''}${live ? ' live' : ''}`}>
@@ -245,6 +252,11 @@ export function DecisionTimeline({
               : t('Decision path · {0} steps ({1} tools)', [visible.length, toolCount])}
           </span>
         </button>
+        {shownTps != null && shownTps > 0 && (
+          <span className="decision-tps mono" title={live ? 'Live decode speed' : 'Average decode speed'}>
+            {shownTps.toFixed(1)} t/s
+          </span>
+        )}
         {live && onStop && (
           <button type="button" className="btn ghost small danger" onClick={onStop}>
             <Square size={12} aria-hidden /> {t('Cancel')}

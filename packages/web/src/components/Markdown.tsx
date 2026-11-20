@@ -6,6 +6,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import { AtSign, Check, Copy, CornerUpLeft, FileText, Quote } from 'lucide-react';
 import { fileMeta, linkCitations, parseCiteHref, type Cite } from '../lib/files';
+import { copyText } from '../lib/files';
 import { t } from '../i18n';
 
 /** How citation chips and code-block quotes reach the chat. */
@@ -76,7 +77,7 @@ function CodeBlock({ children, sourceId, onQuote }: { children: ReactNode; sourc
         <span className="code-lang">{lang}</span>
         <span className="spacer" />
         {onQuote && sourceId && <button type="button" className="code-btn" title={t('Quote this code in your reply')} onClick={() => onQuote(textOf(children), sourceId)}><Quote size={13} aria-hidden />{' '}{t('Quote')}</button>}
-        <button type="button" className="code-btn" title={t('Copy code')} onClick={() => { void navigator.clipboard?.writeText(textOf(children)).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }); }}>{copied ? <Check size={13} aria-hidden /> : <Copy size={13} aria-hidden />} {copied ? t('Copied') : t('Copy')}</button>
+        <button type="button" className="code-btn" title={t('Copy code')} onClick={() => { void copyText(textOf(children)).then((ok) => { if (ok) { setCopied(true); setTimeout(() => setCopied(false), 1500); } }); }}>{copied ? <Check size={13} aria-hidden /> : <Copy size={13} aria-hidden />} {copied ? t('Copied') : t('Copy')}</button>
       </div>
       <pre>{children}</pre>
     </div>
