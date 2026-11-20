@@ -3,8 +3,9 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { isInside } from '@local-agent/shared';
 import { locatePath, projectPath, type PathHit } from './workshops.js';
-import { addProjectNote, explainPull, git, pushApproval, tryLockRepo } from './repos.js';
-import { openPullRequest, validBranch } from './gitops.js';
+import { addProjectNote, explainPull, git, listSharedRepos, pushApproval, registerSharedRepo, tryLockRepo } from './repos.js';
+import { getChatWorkspaces, setChatWorkspaces } from './chat-workspaces.js';
+import { listGitRoots, openPullRequest, validBranch } from './gitops.js';
 import { runPreCommitSemgrep } from './semgrep.js';
 import { OWNER_ID, foreignPath } from './accounts.js';
 import type { Store } from './db.js';
@@ -141,6 +142,61 @@ function allowedRoot(ctx: ToolContext, target: string): PathHit | null {
     grants: grantsFor(ctx.store, ctx.agent.id).filter((grant) => !ctx.libraryDir || !foreignPath(ctx.libraryDir, ctx.agent.ownerId || OWNER_ID, grant.path)),
     target,
   });
+}
+
+/** Create a brand-new local git project under LA_PROJECTS_DIR (/projects), optionally create a GitHub repo, and attach it to a chat. */
+export async function scaffoldProject(input: {
+  store: Store;
+  ownerId: string;
+  name: string;
+  description?: string;
+  createGithub?: boolean;
+  isPrivate?: boolean;
+  token?: string | null;
+  fetchImpl?: typeof fetch;
+  sessionId?: string | null;
+}) {
+  const safeName = path.basename(input.name.trim()).toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+  if (!safeName) throw new Error('Enter a valid project name (letters, numbers, hyphens).');
+  const root = path.resolve(process.env.LA_PROJECTS_DIR || '/projects');
+  await fs.mkdir(root, { recursive: true });
+  const target = path.resolve(root, safeName);
+  if (!target.startsWith(`${root}${path.sep}`)) throw new Error('Invalid project path.');
+  const exists = await fs.access(target).then(() => true).catch(() => false);
+  if (!exists) {
+    await fs.mkdir(target, { recursive: true });
+    await fs.writeFile(path.join(target, 'README.md'), `# ${safeName}\n\n${(input.description || 'Created with local-agent.').trim()}\n`, 'utf8');
+    await git(target, ['init', '-b', 'main']).catch(() => git(target, ['init']));
+    await git(target, ['add', 'README.md']).catch(() => undefined);
+    await git(target, ['-c', 'user.name=local-agent', '-c', 'user.email=agent@local-agent.local', 'commit', '-m', 'Initial commit']).catch(() => undefined);
+  }
+  let remoteUrl: string | null = null;
+  if (input.createGithub && input.token) {
+    const res = await (input.fetchImpl || fetch)('https://api.github.com/user/repos', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${input.token}`, 'user-agent': 'local-agent', accept: 'application/vnd.github+json' },
+      body: JSON.stringify({ name: safeName, description: input.description || '', private: input.isPrivate !== false }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (res.ok) {
+      const created = await res.json() as { clone_url?: string };
+      remoteUrl = created.clone_url || null;
+      if (remoteUrl) {
+        await git(target, ['remote', 'add', 'origin', remoteUrl]).catch(() => git(target, ['remote', 'set-url', 'origin', remoteUrl!]).catch(() => undefined));
+      }
+    }
+  }
+  const existing = listSharedRepos(input.store).find((r) => path.resolve(r.path) === target);
+  const repo = existing ?? registerSharedRepo(input.store, { label: safeName, path: target, remote: remoteUrl });
+  if (input.sessionId) {
+    const rootEntry = listGitRoots(input.store, input.ownerId).find((r) => path.resolve(r.path) === target);
+    const rootId = rootEntry?.id ?? `repo:${repo.label}`;
+    const current = getChatWorkspaces(input.store, input.sessionId);
+    if (!current.some((item) => item.kind === 'root' && item.id === rootId)) {
+      setChatWorkspaces(input.store, input.sessionId, [...current, { kind: 'root', id: rootId }]);
+    }
+  }
+  return { repo, path: target, remoteUrl, alreadyExisted: exists };
 }
 
 export const CODING_TOOLS: Tool[] = [
@@ -328,6 +384,33 @@ export const CODING_TOOLS: Tool[] = [
       const mode = args.mode === 'write' ? 'write' : 'read';
       const grant = grantFolder(ctx.store, ctx.agent.id, String(args.path), mode);
       return `Granted ${grant.mode} on ${grant.path}. Tools can use it. It is not mounted into other containers unless you say so.`;
+    },
+  },
+  {
+    name: 'create_project',
+    description: 'Create a brand-new local git project/repo under /projects/<name>, attach it to this chat immediately so you can write code and run tests in it, and optionally create a private GitHub repository for it (when GITHUB_TOKEN is saved in Vault). Ideal when the user has a new app or script idea.',
+    parameters: obj({
+      name: { type: 'string', description: 'Short repo/folder name (e.g. gym-tracker).' },
+      description: { type: 'string', description: 'One-line description for README and GitHub.' },
+      createGithub: { type: 'boolean', description: 'If true and GITHUB_TOKEN is set, also create a private GitHub repo and wire origin.' },
+      isPrivate: { type: 'boolean', description: 'Whether the GitHub repo should be private (default true).' },
+    }, ['name']),
+    mutates: () => true,
+    approval: (args) => `Create new project “${String(args.name || '').slice(0, 60)}”${args.createGithub ? ' (+ GitHub repo)' : ''}`,
+    async execute(args, ctx) {
+      if ((ctx.agent.ownerId || OWNER_ID) !== OWNER_ID) throw new Error('Only the owner can create new projects.');
+      const res = await scaffoldProject({
+        store: ctx.store,
+        ownerId: ctx.agent.ownerId || OWNER_ID,
+        name: String(args.name || ''),
+        description: args.description ? String(args.description) : undefined,
+        createGithub: Boolean(args.createGithub),
+        isPrivate: args.isPrivate !== false,
+        token: ctx.gitIdentity?.token,
+        fetchImpl: ctx.fetchImpl,
+        sessionId: ctx.sessionId,
+      });
+      return `Project "${res.repo.label}" is ready at ${res.path} and attached to this chat${res.remoteUrl ? ` (GitHub: ${res.remoteUrl})` : ''}. You can now write files under ${res.repo.label}/ and run git/shell commands in it.`;
     },
   },
   {

@@ -324,11 +324,14 @@ export function LocalRepoPicker({
   onAttached: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [tab, setTab] = useState<'local' | 'github'>('local');
+  const [tab, setTab] = useState<'local' | 'github' | 'new'>('local');
   const [repos, setRepos] = useState<{ name: string; path: string; isGit: boolean }[] | null>(null);
   const [ghRepos, setGhRepos] = useState<{ name: string; fullName: string; cloneUrl: string; isPrivate: boolean; cloned: boolean }[] | null>(null);
   const [ghUser, setGhUser] = useState('');
   const [ghError, setGhError] = useState('');
+  const [newName, setNewName] = useState('');
+  const [newDesc, setNewDesc] = useState('');
+  const [newGithub, setNewGithub] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
 
   useEffect(() => {
@@ -361,6 +364,7 @@ export function LocalRepoPicker({
             <div className="row" style={{ gap: 4 }}>
               <button type="button" className={tab === 'local' ? 'btn primary small' : 'btn ghost small'} onClick={() => setTab('local')}>{t('Local')}</button>
               <button type="button" className={tab === 'github' ? 'btn primary small' : 'btn ghost small'} onClick={() => setTab('github')}>{t('GitHub')}</button>
+              <button type="button" className={tab === 'new' ? 'btn primary small' : 'btn ghost small'} onClick={() => setTab('new')}>{t('New')}</button>
             </div>
             <button type="button" className="icon-btn" aria-label={t('Close')} onClick={() => setOpen(false)}><X size={14} /></button>
           </div>
@@ -394,6 +398,37 @@ export function LocalRepoPicker({
                 ))}
               </div>
             )
+          ) : tab === 'new' ? (
+            <form
+              className="repo-picker-list"
+              onSubmit={async (e) => {
+                e.preventDefault();
+                if (!newName.trim()) return;
+                setBusy('create');
+                try {
+                  const res = await post<{ repo: { label: string }; remoteUrl?: string | null }>('/api/projects/create', {
+                    name: newName.trim(),
+                    description: newDesc.trim() || undefined,
+                    createGithub: newGithub,
+                    isPrivate: true,
+                    sessionId: sessionId || undefined,
+                  });
+                  toast(res.remoteUrl ? t('Created {0} (+ GitHub repo).', [res.repo.label]) : t('Created & attached {0}.', [res.repo.label]), 'ok');
+                  setNewName(''); setNewDesc(''); setRepos(null); setOpen(false);
+                  onAttached();
+                } catch (error) { toast(errorText(error), 'error'); } finally { setBusy(null); }
+              }}
+            >
+              <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder={t('Project name (e.g. gym-tracker)')} required />
+              <input value={newDesc} onChange={(e) => setNewDesc(e.target.value)} placeholder={t('Short description (optional)')} />
+              <label className="row" style={{ gap: 6, fontSize: 12 }}>
+                <input type="checkbox" checked={newGithub} onChange={(e) => setNewGithub(e.target.checked)} />
+                <span>{t('Also create private GitHub repo')}</span>
+              </label>
+              <button type="submit" className="btn primary small" disabled={busy === 'create' || !newName.trim()}>
+                {busy === 'create' ? t('Creating…') : t('Create & attach')}
+              </button>
+            </form>
           ) : (
             <div className="repo-picker-list">
               <form className="row" style={{ gap: 4, marginBottom: 4 }} onSubmit={(e) => { e.preventDefault(); loadGithub(ghUser); }}>

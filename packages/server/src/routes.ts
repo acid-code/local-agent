@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { MACHINE_PROFILES, autoMapFor, autoMapForPlan, planInstall, type InstallPlan, profileFor, residentGiB, FREE_TIER_OBSERVED_AT, FREE_TIER_SNAPSHOT, VERSION, geminiQuotaDay, nextCron, quotaAvailability } from '@local-agent/shared';
 import { authenticate, hashPassword, noteFailure, rateLimit, setSession, verifyPassword } from './auth.js';
 import { TEMPLATES } from './catalog.js';
-import { detectCodingClis, listEdits, readPlan, replacePlan, revertBatch, RollbackConflict, updatePlanItem } from './coding.js';
+import { detectCodingClis, listEdits, readPlan, replacePlan, revertBatch, RollbackConflict, scaffoldProject, updatePlanItem } from './coding.js';
 import { secretDrift, secretNames, writeSecret } from './config.js';
 import { inDockerContainer, type DockerCtl } from './docker.js';
 import { checklist, findSearxng, readGpu, scanMachine, setupPreview } from './discovery.js';
@@ -1053,6 +1053,30 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       return { repo, ...(await resolveChatWorkspaces(store, body.sessionId, me(req))) };
     }
     return { repo };
+  });
+  app.post('/api/projects/create', async (req) => {
+    if (accountOf(req).role !== 'owner') throw http(403, 'Only the owner can create new projects.');
+    const body = parse(z.object({
+      name: z.string().min(1).max(60),
+      description: z.string().max(240).optional(),
+      createGithub: z.boolean().optional(),
+      isPrivate: z.boolean().optional(),
+      sessionId: z.string().optional(),
+    }), req.body);
+    if (body.sessionId) mustOwn(store, req, 'session', body.sessionId, 'Chat not found.');
+    const res = await scaffoldProject({
+      store,
+      ownerId: me(req),
+      name: body.name,
+      description: body.description,
+      createGithub: Boolean(body.createGithub),
+      isPrivate: body.isPrivate !== false,
+      token: gitToken() || process.env.GITHUB_TOKEN || null,
+      fetchImpl,
+      sessionId: body.sessionId ?? null,
+    });
+    if (body.sessionId) return { ...res, ...(await resolveChatWorkspaces(store, body.sessionId, me(req))) };
+    return res;
   });
   app.get('/api/sessions/:id/mention-files', async (req) => {
     const id = (req.params as { id: string }).id;

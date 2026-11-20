@@ -1227,6 +1227,7 @@ export class Engine {
         if (toolNames.includes('read_image_text')) caps.push('read_image_text (run local OCR on images/screenshots)');
         if (toolNames.includes('understand_image')) caps.push('understand_image (full multimodal vision analysis: scene description, colors/shades/hex codes, charts/numbers, layout, and text)');
         if (toolNames.includes('browse')) caps.push('browse (open public web pages in headless Chromium, capture screenshots as [file:<id>] to inspect visuals with understand_image, and interact via click/fill/press/scroll)');
+        if (toolNames.includes('create_project')) caps.push('create_project (spin up a brand-new local git repo + optional private GitHub repo and start building immediately)');
         if (toolNames.includes('generate_image')) caps.push('generate_image (create images locally)');
         if (toolNames.includes('propose_skill')) caps.push('propose_skill + run_skill_script (create reusable skills and custom scripts shared across all personas)');
         return caps.length
@@ -1526,6 +1527,7 @@ export class Engine {
     names.add('make_slides');
     names.add('read_slides');
     names.add('browse');
+    if ((agent.ownerId || OWNER_ID) === OWNER_ID) names.add('create_project');
     if (this.ocrReader) names.add('read_image_text');
     if (this.imageAnalyzer) names.add('understand_image');
     for (const name of ['tasks', 'manage_timer', 'manage_trigger', 'spawn_agent', 'helpers', 'memory_file', 'search_chats', 'propose_skill', 'run_tool_script', 'time_now', 'think']) names.add(name);
@@ -2099,7 +2101,7 @@ const CONTRACT_ALWAYS = new Set([
   'request_secret', 'kb_search', 'load_skill', 'manage_timer', 'manage_trigger',
   'time_now', 'tasks', 'think', 'memory_file', 'search_chats',
   'spawn_agent', 'helpers', 'propose_skill', 'read_output', 'run_skill_script',
-  'find_context', 'share_file', 'make_slides', 'read_slides', 'browse', 'read_image_text', 'understand_image', 'generate_image', 'repo_sync',
+  'find_context', 'share_file', 'make_slides', 'read_slides', 'browse', 'create_project', 'read_image_text', 'understand_image', 'generate_image', 'repo_sync',
 ]);
 
 export function roughModelGiB(apiName: string): number {

@@ -1453,4 +1453,11 @@ export const he: Record<string, string> = {
   "Load": "טעינה",
   "Loading GitHub repos…": "טוען מאגרי GitHub…",
   "No repos found. Add GITHUB_TOKEN in Settings → Vault for private repos.": "לא נמצאו מאגרים. הוסיפו GITHUB_TOKEN בהגדרות ← כספת עבור מאגרים פרטיים.",
+  "Also create private GitHub repo": "ליצור גם מאגר פרטי ב-GitHub",
+  "Create & attach": "יצירה וצירוף",
+  "Created & attached {0}.": "{0} נוצר וצורף.",
+  "Created {0} (+ GitHub repo).": "{0} נוצר (+ מאגר GitHub).",
+  "Creating…": "יוצר…",
+  "Project name (e.g. gym-tracker)": "שם הפרויקט (למשל gym-tracker)",
+  "Short description (optional)": "תיאור קצר (אופציונלי)",
 };
