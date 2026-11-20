@@ -24,18 +24,29 @@ export const SPEC_PART = 'docProps/local-agent-deck.json';
 
 export interface ChartSpec { type: 'bar' | 'line' | 'pie' | 'doughnut'; labels: string[]; series: { name: string; values: number[] }[]; title?: string }
 export interface SlideSpec {
-  layout?: 'title' | 'bullets' | 'chart' | 'image' | 'quote' | 'section';
+  /** split = picture bleeding off one half + text on the other; cards = bullets as numbered cards; stats = big-number tiles; image = full-bleed hero picture. */
+  layout?: 'title' | 'bullets' | 'chart' | 'image' | 'quote' | 'section' | 'split' | 'cards' | 'stats';
   title: string; subtitle?: string; bullets?: string[]; notes?: string;
+  /** Small label above the title (e.g. the part of the talk: "מבוא | מחלת העצם"). */
+  kicker?: string;
+  /** Source line printed at the bottom of the slide. */
+  source?: string;
+  /** Big-number tiles for layout "stats" (2-4 of them). */
+  stats?: { value: string; label: string }[];
   chart?: ChartSpec;
-  /** An existing image file, or a prompt for the image model (resolved before building). */
-  image?: { fileId?: string; prompt?: string; caption?: string };
+  /** An existing image file, a short English photo search (query), or a prompt for the image model (resolved before building). */
+  image?: { fileId?: string; query?: string; prompt?: string; caption?: string };
 }
-export interface DeckSpec { title: string; author?: string; lang?: 'he' | 'en' | 'auto'; font?: DeckFont; theme?: 'light' | 'dark' | 'warm'; slides: SlideSpec[] }
+export type DeckTheme = 'light' | 'dark' | 'warm' | 'ocean' | 'clinical';
+export interface DeckSpec { title: string; author?: string; lang?: 'he' | 'en' | 'auto'; font?: DeckFont; theme?: DeckTheme; slides: SlideSpec[] }
 
-const THEMES = {
-  light: { bg: 'FFFFFF', text: '1F2937', muted: '6B7280', accent: '2563EB', chart: ['2563EB', 'F59E0B', '10B981', 'EF4444', '8B5CF6'] },
-  dark: { bg: '111827', text: 'F9FAFB', muted: '9CA3AF', accent: '60A5FA', chart: ['60A5FA', 'FBBF24', '34D399', 'F87171', 'A78BFA'] },
-  warm: { bg: 'FFF8F0', text: '3B2F2F', muted: '8A7360', accent: 'D9480F', chart: ['D9480F', 'F59F00', '2B8A3E', '1971C2', '9C36B5'] },
+interface Palette { bg: string; text: string; muted: string; accent: string; accent2: string; panel: string; hero: string; onHero: string; chart: string[] }
+const THEMES: Record<DeckTheme, Palette> = {
+  light: { bg: 'FFFFFF', text: '1F2937', muted: '6B7280', accent: '2563EB', accent2: 'F59E0B', panel: 'F3F4F6', hero: '1E3A8A', onHero: 'FFFFFF', chart: ['2563EB', 'F59E0B', '10B981', 'EF4444', '8B5CF6'] },
+  dark: { bg: '111827', text: 'F9FAFB', muted: '9CA3AF', accent: '60A5FA', accent2: 'FBBF24', panel: '1F2937', hero: '0B1220', onHero: 'FFFFFF', chart: ['60A5FA', 'FBBF24', '34D399', 'F87171', 'A78BFA'] },
+  warm: { bg: 'FFF8F0', text: '3B2F2F', muted: '8A7360', accent: 'D9480F', accent2: 'F59F00', panel: 'FFEEDB', hero: '7C2D12', onHero: 'FFF8F0', chart: ['D9480F', 'F59F00', '2B8A3E', '1971C2', '9C36B5'] },
+  ocean: { bg: 'F4F8FB', text: '0F2A3D', muted: '5B7285', accent: '0E7490', accent2: 'F59E0B', panel: 'FFFFFF', hero: '0B2A3D', onHero: 'FFFFFF', chart: ['0E7490', 'F59E0B', '10B981', 'E11D48', '6366F1'] },
+  clinical: { bg: 'FFFFFF', text: '1B2B3A', muted: '64748B', accent: '0F766E', accent2: '2563EB', panel: 'EEF4F7', hero: '0F2B46', onHero: 'FFFFFF', chart: ['0F766E', '2563EB', 'F59E0B', 'E11D48', '7C3AED'] },
 };
 
 export function fontDir() {
@@ -56,6 +67,7 @@ export function validateDeck(raw: unknown): DeckSpec {
   if (spec.slides.length > 60) throw new Error('Keep a deck to 60 slides or fewer.');
   for (const [index, slide] of spec.slides.entries()) {
     if (!slide || typeof slide.title !== 'string') throw new Error(`Slide ${index + 1} needs a title.`);
+    if (slide.stats && (!Array.isArray(slide.stats) || slide.stats.some((tile) => !tile || typeof tile.value !== 'string' || typeof tile.label !== 'string'))) throw new Error(`Slide ${index + 1}: each stat needs a value and a label (strings).`);
     if (slide.chart) {
       const { labels, series } = slide.chart;
       if (!Array.isArray(labels) || !Array.isArray(series) || !series.length || series.some((row) => !Array.isArray(row.values) || row.values.length !== labels.length || row.values.some((value) => typeof value !== 'number' || !Number.isFinite(value)))) {
@@ -63,14 +75,36 @@ export function validateDeck(raw: unknown): DeckSpec {
       }
     }
   }
-  return { ...spec, font: DECK_FONTS.includes(spec.font as DeckFont) ? spec.font : 'Heebo', theme: spec.theme && spec.theme in THEMES ? spec.theme : 'light' };
+  return { ...spec, font: DECK_FONTS.includes(spec.font as DeckFont) ? spec.font : 'Heebo', theme: spec.theme && spec.theme in THEMES ? spec.theme : 'clinical' };
+}
+
+type Picture = { bytes: Buffer; mime: string };
+const wordCount = (text: string) => text.trim().split(/\s+/).filter(Boolean).length;
+
+/** Picture, stats and density review of a deck, so the agent can fix a plain/ugly deck before the user sees it. */
+export function lintDeck(input: DeckSpec, images: Map<number, Picture>): string[] {
+  const spec = validateDeck(input);
+  const warnings: string[] = [];
+  const bare: number[] = [];
+  const dense: number[] = [];
+  spec.slides.forEach((slide, index) => {
+    const layout = slide.layout ?? (index === 0 ? 'title' : slide.chart ? 'chart' : slide.stats ? 'stats' : slide.image ? 'split' : 'bullets');
+    if (index > 0 && !images.has(index) && !slide.chart && !slide.stats && layout !== 'section' && layout !== 'quote') bare.push(index + 1);
+    if ((slide.bullets?.length ?? 0) > 5 || (slide.bullets ?? []).some((line) => wordCount(line) > 16)) dense.push(index + 1);
+  });
+  const total = spec.slides.length;
+  if (total > 3 && (total - 1 - bare.length) / (total - 1) < 0.6) warnings.push(`Only ${total - 1 - bare.length} of ${total - 1} content slides have a picture, chart or stats (slides without: ${bare.join(', ')}). Give at least 60% of them a real picture: image {query: "short English photo search"} for photos/diagrams, or image {prompt} for generated art.`);
+  if (dense.length) warnings.push(`Slides ${dense.join(', ')} are text-heavy (more than 5 bullets or a bullet over 16 words). Cut to 3-4 short bullets, use layout "cards" or "stats", and move detail into notes.`);
+  if (spec.slides.some((slide) => slide.title.length > 70)) warnings.push('Some titles are over 70 characters; make titles short noun phrases.');
+  if (!spec.slides.some((slide) => slide.source)) warnings.push('No slide has a "source" line; add one under every slide that states facts or numbers.');
+  return warnings;
 }
 
 /** Build the .pptx. `images` maps a slide index to picture bytes (already generated or loaded). */
-export async function buildDeck(input: DeckSpec, images: Map<number, { bytes: Buffer; mime: string }> = new Map()): Promise<Buffer> {
+export async function buildDeck(input: DeckSpec, images: Map<number, Picture> = new Map()): Promise<Buffer> {
   const spec = validateDeck(input);
   const rtl = deckIsHebrew(spec);
-  const theme = THEMES[spec.theme ?? 'light'];
+  const theme = THEMES[spec.theme ?? 'clinical'];
   const font = spec.font ?? 'Heebo';
   const lang = rtl ? 'he-IL' : 'en-US';
   const align = rtl ? 'right' : 'left';
@@ -81,33 +115,122 @@ export async function buildDeck(input: DeckSpec, images: Map<number, { bytes: Bu
   pres.author = spec.author || 'local-agent';
   pres.company = 'local-agent';
   pres.theme = { headFontFace: font, bodyFontFace: font };
+  const W = 13.33;
+  const H = 7.5;
   const text = { fontFace: font, color: theme.text, lang, rtlMode: rtl, align } as const;
+  const data = (picture: Picture) => `${picture.mime};base64,${picture.bytes.toString('base64')}`;
+  const bullet = (line: string) => ({ text: line, options: { bullet: rtl ? { characterCode: '25CF', indent: 18 } : true, breakLine: true } });
+  /** The reading side is the right in Hebrew and the left in English; "far" is the opposite edge. */
+  const readX = (width: number, margin = 0.7) => (rtl ? W - margin - width : margin);
 
   for (const [index, slide] of spec.slides.entries()) {
     const page = pres.addSlide();
-    page.background = { color: theme.bg };
-    const layout = slide.layout ?? (index === 0 ? 'title' : slide.chart ? 'chart' : slide.image ? 'image' : 'bullets');
-    if (layout === 'title' || layout === 'section') {
-      page.addShape(pres.ShapeType.rect, { x: rtl ? 12.73 : 0, y: 0, w: 0.6, h: 7.5, fill: { color: theme.accent }, line: { color: theme.accent } });
-      page.addText(slide.title, { ...text, x: 0.9, y: 2.3, w: 11.5, h: 1.6, fontSize: layout === 'title' ? 44 : 36, bold: true });
-      if (slide.subtitle) page.addText(slide.subtitle, { ...text, x: 0.9, y: 3.9, w: 11.5, h: 1, fontSize: 22, color: theme.muted });
-    } else if (layout === 'quote') {
-      page.addText(slide.title, { ...text, x: 1.2, y: 2, w: 10.9, h: 2.6, fontSize: 32, italic: true, align: 'center' });
-      if (slide.subtitle) page.addText(`— ${slide.subtitle}`, { ...text, x: 1.2, y: 4.8, w: 10.9, h: 0.8, fontSize: 18, color: theme.muted, align: 'center' });
+    const picture = images.get(index);
+    const requested = slide.layout ?? (index === 0 ? 'title' : slide.chart ? 'chart' : slide.stats ? 'stats' : slide.image ? 'split' : 'bullets');
+    // A picture-less split/image slide falls back to a plain content slide instead of leaving a hole.
+    const layout = (requested === 'split' || requested === 'image') && !picture ? 'bullets' : requested;
+    const number = String(index + 1).padStart(2, '0');
+    let footerOnDark = false;
+    const kicker = (x: number, y: number, w: number, color: string) => { if (slide.kicker) page.addText(slide.kicker, { ...text, x, y, w, h: 0.4, fontSize: 14, bold: true, color, charSpacing: 1 }); };
+    const heading = (x: number, y: number, w: number) => {
+      kicker(x, y, w, theme.accent);
+      page.addText(slide.title, { ...text, x, y: y + (slide.kicker ? 0.38 : 0), w, h: 1.1, fontSize: 32, bold: true, valign: 'top', fit: 'shrink' });
+      page.addShape(pres.ShapeType.rect, { x: rtl ? x + w - 1.1 : x, y: y + (slide.kicker ? 1.52 : 1.14), w: 1.1, h: 0.07, fill: { color: theme.accent2 }, line: { color: theme.accent2 } });
+    };
+
+    if (layout === 'title' || layout === 'section' || layout === 'quote') {
+      footerOnDark = true;
+      page.background = { color: theme.hero };
+      if (picture && layout === 'title') {
+        page.addImage({ data: data(picture), x: 0, y: 0, w: W, h: H, sizing: { type: 'cover', w: W, h: H } });
+        page.addShape(pres.ShapeType.rect, { x: 0, y: 0, w: W, h: H, fill: { color: theme.hero, transparency: 28 }, line: { color: theme.hero, transparency: 100 } });
+      } else {
+        page.addShape(pres.ShapeType.ellipse, { x: rtl ? -2.2 : W - 5.2, y: -2.4, w: 7, h: 7, fill: { color: theme.accent, transparency: 55 }, line: { color: theme.accent, transparency: 100 } });
+        page.addShape(pres.ShapeType.ellipse, { x: rtl ? W - 4.4 : -1.8, y: H - 3.4, w: 5.6, h: 5.6, fill: { color: theme.accent2, transparency: 78 }, line: { color: theme.accent2, transparency: 100 } });
+      }
+      page.addShape(pres.ShapeType.rect, { x: readX(0.14, 0.7), y: 2.2, w: 0.14, h: 2.6, fill: { color: theme.accent2 }, line: { color: theme.accent2 } });
+      const tx = readX(10.6, 1.05);
+      if (layout === 'section') page.addText(number, { ...text, color: theme.accent2, x: tx, y: 1.5, w: 4, h: 0.9, fontSize: 40, bold: true });
+      kicker(tx, layout === 'section' ? 2.35 : 1.8, 10.6, theme.accent2);
+      if (layout === 'quote') {
+        page.addText('“', { ...text, color: theme.accent2, x: tx, y: 1.1, w: 2, h: 1.4, fontSize: 96, bold: true, align: 'left', rtlMode: false });
+        page.addText(slide.title, { ...text, color: theme.onHero, x: tx, y: 2.3, w: 10.6, h: 3, fontSize: 34, italic: true, valign: 'top', fit: 'shrink' });
+        if (slide.subtitle) page.addText(`— ${slide.subtitle}`, { ...text, color: theme.accent2, x: tx, y: 5.4, w: 10.6, h: 0.7, fontSize: 18 });
+      } else {
+        page.addText(slide.title, { ...text, color: theme.onHero, x: tx, y: 2.2, w: 10.6, h: 1.9, fontSize: layout === 'title' ? 50 : 40, bold: true, valign: 'middle', fit: 'shrink' });
+        if (slide.subtitle) page.addText(slide.subtitle, { ...text, color: theme.onHero, x: tx, y: 4.2, w: 10.6, h: 1.1, fontSize: 22, valign: 'top', transparency: 15 });
+      }
+    } else if (layout === 'image' && picture) {
+      footerOnDark = true;
+      page.background = { color: theme.hero };
+      page.addImage({ data: data(picture), x: 0, y: 0, w: W, h: H, sizing: { type: 'cover', w: W, h: H } });
+      page.addShape(pres.ShapeType.rect, { x: 0, y: H - 2.5, w: W, h: 2.5, fill: { color: '000000', transparency: 38 }, line: { color: '000000', transparency: 100 } });
+      kicker(readX(11.9, 0.7), H - 2.35, 11.9, theme.accent2);
+      page.addText(slide.title, { ...text, color: 'FFFFFF', x: readX(11.9, 0.7), y: H - 1.95, w: 11.9, h: 0.9, fontSize: 32, bold: true, fit: 'shrink' });
+      const caption = slide.image?.caption || slide.subtitle;
+      if (caption) page.addText(caption, { ...text, color: 'E5E7EB', x: readX(11.9, 0.7), y: H - 1.05, w: 11.9, h: 0.6, fontSize: 16, valign: 'top' });
+    } else if (layout === 'split' && picture) {
+      page.background = { color: theme.bg };
+      const half = W / 2;
+      page.addImage({ data: data(picture), x: rtl ? 0 : half, y: 0, w: half, h: H, sizing: { type: 'cover', w: half, h: H } });
+      if (slide.image?.caption) {
+        page.addShape(pres.ShapeType.rect, { x: rtl ? 0 : half, y: H - 0.6, w: half, h: 0.6, fill: { color: '000000', transparency: 45 }, line: { color: '000000', transparency: 100 } });
+        page.addText(slide.image.caption, { ...text, color: 'FFFFFF', x: (rtl ? 0 : half) + 0.3, y: H - 0.6, w: half - 0.6, h: 0.6, fontSize: 12, valign: 'middle', align: 'center' });
+      }
+      const tx = rtl ? half + 0.5 : 0.7;
+      const tw = half - 1.2;
+      heading(tx, 0.6, tw);
+      const lines = slide.bullets ?? [];
+      if (lines.length) page.addText(lines.map(bullet), { ...text, x: tx, y: 2.35, w: tw, h: 4.3, fontSize: lines.length > 4 ? 18 : 21, valign: 'top', paraSpaceAfter: 10, fit: 'shrink' });
+    } else if (layout === 'stats') {
+      page.background = { color: theme.bg };
+      heading(readX(11.9), 0.55, 11.9);
+      const tiles = (slide.stats ?? []).slice(0, 4);
+      const gap = 0.35;
+      const tw = tiles.length ? (11.9 - gap * (tiles.length - 1)) / tiles.length : 0;
+      tiles.forEach((tile, i) => {
+        const x = 0.7 + (rtl ? tiles.length - 1 - i : i) * (tw + gap);
+        page.addShape(pres.ShapeType.roundRect, { x, y: 2.45, w: tw, h: 3.0, rectRadius: 0.12, fill: { color: theme.panel }, line: { color: theme.panel } });
+        page.addShape(pres.ShapeType.rect, { x: x + tw / 2 - 0.4, y: 2.45, w: 0.8, h: 0.08, fill: { color: theme.accent }, line: { color: theme.accent } });
+        page.addText(tile.value, { ...text, color: theme.accent, x: x + 0.15, y: 2.75, w: tw - 0.3, h: 1.4, fontSize: tiles.length > 3 ? 46 : 56, bold: true, align: 'center', valign: 'middle', fit: 'shrink' });
+        page.addText(tile.label, { ...text, color: theme.muted, x: x + 0.25, y: 4.2, w: tw - 0.5, h: 1.1, fontSize: 17, align: 'center', valign: 'top', fit: 'shrink' });
+      });
+      if (slide.bullets?.length) page.addText(slide.bullets.slice(0, 2).map(bullet), { ...text, x: readX(11.9), y: 5.7, w: 11.9, h: 1.1, fontSize: 17, valign: 'top', fit: 'shrink' });
+    } else if (layout === 'cards') {
+      page.background = { color: theme.bg };
+      heading(readX(11.9), 0.55, 11.9);
+      const items = (slide.bullets ?? []).slice(0, 6);
+      const cols = items.length > 4 ? 3 : 2;
+      const rows = Math.ceil(items.length / cols);
+      const gap = 0.3;
+      const cw = (11.9 - gap * (cols - 1)) / cols;
+      const ch = Math.min(2.2, (4.4 - gap * (rows - 1)) / rows);
+      items.forEach((line, i) => {
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        const x = 0.7 + (rtl ? cols - 1 - col : col) * (cw + gap);
+        const y = 2.4 + row * (ch + gap);
+        page.addShape(pres.ShapeType.roundRect, { x, y, w: cw, h: ch, rectRadius: 0.1, fill: { color: theme.panel }, line: { color: theme.panel } });
+        page.addShape(pres.ShapeType.ellipse, { x: rtl ? x + cw - 0.75 : x + 0.25, y: y + 0.25, w: 0.5, h: 0.5, fill: { color: theme.accent }, line: { color: theme.accent } });
+        page.addText(String(i + 1), { ...text, color: 'FFFFFF', x: rtl ? x + cw - 0.75 : x + 0.25, y: y + 0.25, w: 0.5, h: 0.5, fontSize: 16, bold: true, align: 'center', valign: 'middle' });
+        page.addText(line, { ...text, x: x + 0.25, y: y + 0.85, w: cw - 0.5, h: ch - 1.0, fontSize: 18, valign: 'top', fit: 'shrink' });
+      });
     } else {
-      page.addText(slide.title, { ...text, x: 0.6, y: 0.35, w: 12.1, h: 1, fontSize: 32, bold: true, color: theme.accent });
-      const picture = images.get(index);
+      // bullets / chart (and picture-less split/image): clean content slide with an optional chart or picture on the far side.
+      page.background = { color: theme.bg };
       const hasSide = Boolean(slide.chart || picture);
-      // Text column on the reading side: right in Hebrew, left in English.
-      const textBox = hasSide ? { x: rtl ? 6.9 : 0.6, w: 5.8 } : { x: 0.6, w: 12.1 };
-      const sideBox = { x: rtl ? 0.6 : 6.9, y: 1.6, w: 5.8, h: 5.2 };
-      if (slide.bullets?.length) {
-        page.addText(slide.bullets.map((line) => ({ text: line, options: { bullet: rtl ? { characterCode: '25CF', indent: 18 } : true, breakLine: true } })), { ...text, ...textBox, y: 1.6, h: 5.2, fontSize: 20, valign: 'top', paraSpaceAfter: 8 });
+      const boxW = hasSide ? 5.9 : 11.9;
+      heading(readX(boxW), 0.55, boxW);
+      const sideX = rtl ? 0.7 : W - 0.7 - 5.7;
+      const lines = slide.bullets ?? [];
+      if (lines.length) {
+        page.addShape(pres.ShapeType.roundRect, { x: readX(boxW) - 0.1, y: 2.3, w: boxW + 0.2, h: 4.4, rectRadius: 0.1, fill: { color: theme.panel }, line: { color: theme.panel } });
+        page.addText(lines.map(bullet), { ...text, x: readX(boxW) + 0.2, y: 2.45, w: boxW - 0.4, h: 4.1, fontSize: hasSide || lines.length > 4 ? 19 : 23, valign: 'top', paraSpaceAfter: 12, fit: 'shrink' });
       }
       if (slide.chart) {
         const kind = { bar: pres.ChartType.bar, line: pres.ChartType.line, pie: pres.ChartType.pie, doughnut: pres.ChartType.doughnut }[slide.chart.type] ?? pres.ChartType.bar;
         page.addChart(kind as unknown as Parameters<typeof page.addChart>[0], slide.chart.series.map((row) => ({ name: row.name, labels: slide.chart!.labels, values: row.values })), {
-          ...(hasSide && slide.bullets?.length ? sideBox : { x: 0.9, y: 1.6, w: 11.5, h: 5.2 }),
+          ...(hasSide && lines.length ? { x: sideX, y: 2.3, w: 5.7, h: 4.4 } : { x: 0.9, y: 2.2, w: 11.5, h: 4.6 }),
           chartColors: theme.chart, showLegend: slide.chart.series.length > 1 || kind === pres.ChartType.pie, legendPos: 'b', legendFontFace: font, legendColor: theme.text,
           catAxisLabelFontFace: font, valAxisLabelFontFace: font, catAxisLabelColor: theme.text, valAxisLabelColor: theme.muted, dataLabelFontFace: font,
           showTitle: Boolean(slide.chart.title), title: slide.chart.title, titleFontFace: font, titleColor: theme.text,
@@ -116,11 +239,13 @@ export async function buildDeck(input: DeckSpec, images: Map<number, { bytes: Bu
           showValue: kind === pres.ChartType.pie || kind === pres.ChartType.doughnut, showPercent: kind === pres.ChartType.pie,
         });
       } else if (picture) {
-        page.addImage({ data: `${picture.mime};base64,${picture.bytes.toString('base64')}`, ...sideBox, sizing: { type: 'contain', w: sideBox.w, h: sideBox.h } });
-        if (slide.image?.caption) page.addText(slide.image.caption, { ...text, x: sideBox.x, y: 6.85, w: sideBox.w, h: 0.4, fontSize: 12, color: theme.muted, align: 'center' });
+        page.addImage({ data: data(picture), x: sideX, y: 2.3, w: 5.7, h: 4.4, sizing: { type: 'cover', w: 5.7, h: 4.4 } });
+        if (slide.image?.caption) page.addText(slide.image.caption, { ...text, x: sideX, y: 6.72, w: 5.7, h: 0.35, fontSize: 11, color: theme.muted, align: 'center' });
       }
     }
-    page.addText(`${index + 1}`, { ...text, x: rtl ? 0.3 : 12.4, y: 6.95, w: 0.6, h: 0.35, fontSize: 11, color: theme.muted, align: rtl ? 'left' : 'right' });
+    const footColor = footerOnDark ? 'D1D5DB' : theme.muted;
+    page.addText(number, { ...text, color: footColor, x: rtl ? 0.5 : W - 1.2, y: 7.0, w: 0.7, h: 0.3, fontSize: 11, bold: true, align: rtl ? 'left' : 'right' });
+    if (slide.source) page.addText(slide.source, { ...text, color: footColor, x: readX(10.6, 0.7), y: 7.0, w: 10.6, h: 0.3, fontSize: 10, italic: true, fit: 'shrink' });
     if (slide.notes) page.addNotes(slide.notes);
   }
   const raw = await pres.write({ outputType: 'nodebuffer' }) as Buffer;
@@ -247,27 +372,45 @@ export function makeEot(ttf: Buffer): Buffer {
 }
 
 // ── Agent tools ───────────────────────────────────────────────────────────────────────────────────────────────
-export interface SlideDeps { dataDir: string; image?: (prompt: string, ctx: { ownerId: string; sessionId?: string | null; agentId?: string | null; signal?: AbortSignal }) => Promise<{ fileId: string }> }
+type ImageCtx = { ownerId: string; sessionId?: string | null; agentId?: string | null; signal?: AbortSignal };
+export interface SlideDeps {
+  dataDir: string;
+  /** Generate a picture from a prompt (local Stable Diffusion / Gemini). */
+  image?: (prompt: string, ctx: ImageCtx) => Promise<{ fileId: string }>;
+  /** Find a real photo or diagram on the web (Wikimedia Commons / SearXNG) from short English search words. */
+  photo?: (query: string, ctx: ImageCtx) => Promise<{ fileId: string }>;
+}
 
-async function loadImages(store: Store, deps: SlideDeps, spec: DeckSpec, ctx: { ownerId: string; sessionId?: string | null; agentId?: string | null; signal?: AbortSignal }, notes: string[]) {
+async function loadImages(store: Store, deps: SlideDeps, spec: DeckSpec, ctx: ImageCtx, notes: string[]) {
   const images = new Map<number, { bytes: Buffer; mime: string }>();
-  for (const [index, slide] of spec.slides.entries()) {
-    if (!slide.image) continue;
+  const resolveOne = async (index: number) => {
+    const slide = spec.slides[index]!;
+    if (!slide.image) return;
     let fileId = slide.image.fileId?.replace(/^file:/, '');
-    if (!fileId && slide.image.prompt && deps.image) {
-      try { fileId = (await deps.image(slide.image.prompt, ctx)).fileId; slide.image = { ...slide.image, fileId }; } catch (error) { notes.push(`Slide ${index + 1}: no picture (${error instanceof Error ? error.message : 'image model failed'}).`); continue; }
+    const errors: string[] = [];
+    // 1. a real photo/diagram by search words, 2. generated art from the prompt (which itself falls back to a web search).
+    if (!fileId && slide.image.query && deps.photo) {
+      try { fileId = (await deps.photo(slide.image.query, ctx)).fileId; } catch (error) { errors.push(error instanceof Error ? error.message : 'photo search failed'); }
     }
+    if (!fileId && slide.image.prompt && deps.image) {
+      try { fileId = (await deps.image(slide.image.prompt, ctx)).fileId; } catch (error) { errors.push(error instanceof Error ? error.message : 'image model failed'); }
+    }
+    if (fileId) slide.image = { ...slide.image, fileId };
+    else if (errors.length) { notes.push(`Slide ${index + 1}: no picture (${errors.join('; ')}). Try a simpler English image.query.`); return; }
     const file = fileId ? getFile(store, fileId) : null;
-    if (!file || (file.ownerId && file.ownerId !== ctx.ownerId && ctx.ownerId !== OWNER_ID) || !/^image\/(png|jpe?g|gif)/.test(file.mime)) { if (fileId) notes.push(`Slide ${index + 1}: picture ${fileId} not found or not PNG/JPEG.`); continue; }
+    if (!file || (file.ownerId && file.ownerId !== ctx.ownerId && ctx.ownerId !== OWNER_ID) || !/^image\/(png|jpe?g|gif)/.test(file.mime)) { if (fileId) notes.push(`Slide ${index + 1}: picture ${fileId} not found or not PNG/JPEG.`); return; }
     images.set(index, { bytes: fs.readFileSync(filePath(store, deps.dataDir, file.id)!), mime: file.mime });
-  }
+  };
+  // Three at a time: image search is quick, local generation is serialised by the RAM budget anyway.
+  const queue = spec.slides.map((_, index) => index).filter((index) => spec.slides[index]!.image);
+  await Promise.all(Array.from({ length: Math.min(3, queue.length) }, async () => { for (let next = queue.shift(); next !== undefined; next = queue.shift()) await resolveOne(next); }));
   return images;
 }
 
 export function slidesTools(deps: SlideDeps): Tool[] {
   const make: Tool = {
     name: 'make_slides',
-    description: 'Create or revise a PowerPoint deck (.pptx). Pass the whole deck as JSON: {title, lang:"he"|"en"|"auto", font:"Heebo"|"Assistant", theme:"light"|"dark"|"warm", slides:[{layout:"title"|"bullets"|"chart"|"image"|"quote"|"section", title, subtitle?, bullets?: string[], notes?: string (speaker notes), chart?: {type:"bar"|"line"|"pie"|"doughnut", labels:string[], series:[{name, values:number[]}], title?}, image?: {fileId?, prompt?, caption?}}]}. Hebrew decks are right-to-left with an embedded Hebrew font. image.prompt makes a picture with the image model. For an edit round, call read_slides first, change the JSON, and pass revise_file_id so the new version is saved next to the old one. Returns a [file:<id>] reference to put in the reply.',
+    description: 'Create or revise a PowerPoint deck (.pptx) that looks designed, not like a text dump. Pass the whole deck as JSON: {title, lang:"he"|"en"|"auto", font:"Heebo"|"Assistant", theme:"clinical"|"ocean"|"light"|"dark"|"warm", slides:[{layout, title, kicker?, subtitle?, bullets?, stats?, chart?, image?, source?, notes?}]}. Layouts: "title" (hero, put image on it), "section" (big number divider), "split" (full-height picture on one half + 3-4 bullets), "image" (full-bleed picture with caption), "cards" (3-6 short points as numbered cards), "stats" (stats:[{value:"1 in 3", label:"..."}] big-number tiles, 2-4), "chart" (chart:{type:"bar"|"line"|"pie"|"doughnut", labels, series:[{name, values}], title?} + optional bullets), "quote", "bullets" (plain, use sparingly). DESIGN RULES: at least 60% of slides carry a real picture: image:{query:"short English photo search words, e.g. osteoclast bone resorption diagram"} finds a real photo/diagram (Wikimedia Commons), image:{prompt:"vivid scene, no text"} generates art, image:{fileId} reuses a file (fetch_image gives file ids); add image.caption. Vary layouts (never 3 identical in a row), 3-4 bullets of at most 12 words, one idea per slide, kicker = the section label above the title, source = the source line printed at the bottom, notes = 2-4 spoken sentences. Hebrew decks are right-to-left with an embedded Hebrew font. For an edit round call read_slides first, change the JSON, and pass revise_file_id so the new version is saved next to the old one. The result lists design problems (missing pictures, text-heavy slides): fix them and call make_slides again with revise_file_id before replying. Returns a [file:<id>] reference to put in the reply.',
     parameters: { type: 'object', properties: { deck: { type: 'object' }, file_name: { type: 'string' }, revise_file_id: { type: 'string' } }, required: ['deck'], additionalProperties: false },
     mutates: () => false,
     approval: () => null,
@@ -277,12 +420,13 @@ export function slidesTools(deps: SlideDeps): Tool[] {
       const notes: string[] = [];
       const images = await loadImages(ctx.store, deps, spec, { ownerId, sessionId: ctx.sessionId, agentId: ctx.agent.id, signal: ctx.signal }, notes);
       const bytes = await buildDeck(spec, images);
+      const lint = lintDeck(spec, images);
       const previous = args.revise_file_id ? getFile(ctx.store, String(args.revise_file_id).replace(/^file:/, '')) : null;
       const base = String(args.file_name || previous?.name || spec.title).replace(/\.pptx$/i, '').replace(/[\\/:*?"<>|]+/g, ' ').trim().slice(0, 80) || 'deck';
       const version = previous ? ` v${(Number(previous.name.match(/ v(\d+)\.pptx$/i)?.[1]) || 1) + 1}` : '';
       const file = saveFile(ctx.store, deps.dataDir, { name: `${base.replace(/ v\d+$/i, '')}${version}.pptx`, bytes, mime: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', sessionId: ctx.sessionId ?? null, agentId: ctx.agent.id, source: 'agent', ownerId });
       const rtl = deckIsHebrew(spec);
-      return `Saved [file:${file.id}] (${spec.slides.length} slides, ${rtl ? 'Hebrew, right-to-left' : 'left-to-right'}, font ${spec.font}${images.size ? `, ${images.size} picture(s)` : ''}). ${notes.join(' ')} Mention [file:${file.id}] in the reply; the user can preview it and ask for changes.`;
+      return `Saved [file:${file.id}] (${spec.slides.length} slides, ${rtl ? 'Hebrew, right-to-left' : 'left-to-right'}, font ${spec.font}${images.size ? `, ${images.size} of ${spec.slides.length} slides with a picture` : ', no pictures'}). ${notes.join(' ')}${lint.length ? ` DESIGN CHECK - fix before replying (call make_slides again with revise_file_id="${file.id}"): ${lint.join(' ')}` : ' Design check passed.'} Mention [file:${file.id}] in the reply; the user can preview it and ask for changes.`;
     },
   };
   const read: Tool = {

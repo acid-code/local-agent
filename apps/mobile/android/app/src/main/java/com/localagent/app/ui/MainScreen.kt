@@ -23,6 +23,7 @@ fun LocalAgentApp(vm: ChatViewModel, onVoiceDictation: () -> Unit) {
     val state by vm.ui.collectAsState()
     var showSettings by remember { mutableStateOf(false) }
 
+    CompositionLocalProvider(LocalAgentApi provides vm.client) {
     when {
         state.checkingAuth -> {
             Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background), contentAlignment = Alignment.Center) {
@@ -49,6 +50,7 @@ fun LocalAgentApp(vm: ChatViewModel, onVoiceDictation: () -> Unit) {
             onOpenSettings = { showSettings = true },
             onVoiceDictation = onVoiceDictation,
         )
+    }
     }
 }
 

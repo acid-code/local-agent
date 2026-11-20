@@ -184,7 +184,7 @@ fun StreamingBubble(persona: Persona?, thinking: String, text: String) {
             }
         }
         if (thinking.isNotBlank()) {
-            ThinkingAccordion(thinking = thinking, defaultExpanded = true, label = if (text.isBlank()) "Thinking…" else "Reasoning")
+            ThinkingAccordion(thinking = thinking, defaultExpanded = false, label = if (text.isBlank()) "Thinking…" else "Reasoning")
         }
         if (text.isNotBlank()) FormattedMessageBody(text)
     }
@@ -213,19 +213,11 @@ fun ThinkingAccordion(thinking: String, defaultExpanded: Boolean, label: String 
 
 @Composable
 private fun FormattedMessageBody(raw: String) {
-    val parts = remember(raw) { raw.split("```") }
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        parts.forEachIndexed { index, part ->
-            if (part.isBlank()) return@forEachIndexed
-            if (index % 2 == 1) {
-                val code = part.substringAfter('\n', part).trimEnd()
-                Surface(color = MaterialTheme.colorScheme.background, shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
-                    Text(code, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace), modifier = Modifier.padding(10.dp))
-                }
-            } else {
-                Text(part.trim(), style = MaterialTheme.typography.bodyMedium, lineHeight = 22.sp)
-            }
-        }
+    val fileIds = remember(raw) { extractFileIds(raw) }
+    val text = remember(raw) { stripFileTokens(raw) }
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        if (text.isNotBlank()) MarkdownBody(text)
+        fileIds.forEach { id -> key(id) { FileCard(id) } }
     }
 }
 

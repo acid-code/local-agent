@@ -110,3 +110,10 @@ data class ServerSettings(
     val searxngUrl: String = "",
     val geminiTier: String = "free",
 )
+
+data class RemoteFile(
+    val id: String,
+    val name: String,
+    val mime: String,
+    val size: Long = 0,
+)

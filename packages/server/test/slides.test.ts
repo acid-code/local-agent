@@ -7,7 +7,7 @@ import { buildApp } from '../src/app.js';
 import { filePath, saveFile } from '../src/files.js';
 import { mockPng } from '../src/images.js';
 import { GALLERY } from '../src/gallery.js';
-import { buildDeck, makeEot, readDeckSpec, readDeckText, slidesTools, type DeckSpec } from '../src/slides.js';
+import { buildDeck, lintDeck, makeEot, readDeckSpec, readDeckText, slidesTools, type DeckSpec } from '../src/slides.js';
 import type { ToolContext } from '../src/tools.js';
 
 const dirs: string[] = [];
@@ -136,7 +136,7 @@ describe('Presenter persona and slide tools', () => {
     const ctx = { agent, store: built.store, sessionId: session.id, signal: new AbortController().signal, workspace: dir, depth: 0 } as unknown as ToolContext;
     const out = await make!.execute({ deck: { ...HEBREW, slides: [...HEBREW.slides, { title: 'החזון', bullets: ['עתיד ירוק'], image: { prompt: 'a green city skyline at sunrise' } }] } }, ctx);
     expect(out).toMatch(/Hebrew, right-to-left/);
-    expect(out).toMatch(/1 picture/);
+    expect(out).toMatch(/1 of 4 slides with a picture/);
     expect(prompts).toEqual(['a green city skyline at sunrise']);
     const id = /\[file:([^\]]+)\]/.exec(out)![1]!;
     const file = built.store.db.prepare('SELECT name FROM files WHERE id = ?').get(id) as { name: string };
@@ -154,5 +154,46 @@ describe('Presenter persona and slide tools', () => {
     expect(await deck.file('ppt/slides/slide2.xml')!.async('string')).toContain('פתחנו משרד בחיפה');
     expect(Object.keys(deck.files).some((name) => name.startsWith('ppt/media/'))).toBe(true);
     await built.app.close();
+  });
+});
+
+describe('designed deck layouts', () => {
+  const pic = (seed: string) => ({ bytes: mockPng(seed, 320, 200), mime: 'image/png' });
+  const DESIGNED: DeckSpec = {
+    title: 'עצם', lang: 'he', theme: 'clinical', slides: [
+      { layout: 'title', title: 'פרוליה', subtitle: 'טיפול באוסטאופורוזיס', kicker: 'הרצאה', image: { query: 'bone' } },
+      { layout: 'section', title: 'מבוא', kicker: 'חלק ראשון' },
+      { layout: 'split', title: 'שחלוף עצם', kicker: 'מבוא | מחלת העצם', bullets: ['בונים ומפרקים', 'איזון עדין'], source: 'מקור: NIH', image: { query: 'bone remodeling', caption: 'מחזור שחלוף' } },
+      { layout: 'stats', title: 'מספרים', stats: [{ value: '1 מתוך 3', label: 'נשים מעל 50' }, { value: '20%', label: 'גברים' }], source: 'מקור: IOF' },
+      { layout: 'cards', title: 'מנגנון', bullets: ['RANKL נקשר', 'מעכב אוסטאוקלסטים', 'ירידה בפירוק'] },
+      { layout: 'image', title: 'סריקת DEXA', image: { query: 'dexa scan', caption: 'צפיפות עצם' } },
+      { layout: 'quote', title: 'מניעה עדיפה על טיפול', subtitle: 'פתגם' },
+    ],
+  };
+
+  it('builds every layout with pictures, kickers, sources and numbered footers', async () => {
+    const images = new Map([[0, pic('a')], [2, pic('b')], [5, pic('c')]]);
+    const { read, names } = await parts(await buildDeck(DESIGNED, images));
+    for (const name of names.filter((item) => item.endsWith('.xml') || item.endsWith('.rels'))) expect(duplicateAttributes(await read(name)), name).toEqual([]);
+    expect(names.filter((name) => name.startsWith('ppt/media/')).length).toBeGreaterThanOrEqual(3);
+    const slide3 = await read('ppt/slides/slide3.xml');
+    expect(slide3).toContain('מבוא | מחלת העצם');
+    expect(slide3).toContain('מקור: NIH');
+    expect(slide3).toContain('>03<');
+    expect(await read('ppt/slides/slide4.xml')).toContain('1 מתוך 3');
+  });
+
+  it('falls back to a plain content slide when a picture slide has no picture', async () => {
+    const { read } = await parts(await buildDeck(DESIGNED, new Map()));
+    expect(await read('ppt/slides/slide3.xml')).toContain('בונים ומפרקים');
+  });
+
+  it('lints decks that are bare or text-heavy so the agent can fix them', () => {
+    const bare: DeckSpec = { title: 'x', slides: [{ title: 'one' }, ...Array.from({ length: 5 }, (_, i) => ({ title: `s${i}`, bullets: ['a', 'b', 'c', 'd', 'e', 'f'] }))] };
+    const warnings = lintDeck(bare, new Map());
+    expect(warnings.join(' ')).toMatch(/picture/);
+    expect(warnings.join(' ')).toMatch(/text-heavy/);
+    expect(warnings.join(' ')).toMatch(/source/);
+    expect(lintDeck(DESIGNED, new Map([[2, pic('b')], [5, pic('c')]])).join(' ')).not.toMatch(/Only/);
   });
 });

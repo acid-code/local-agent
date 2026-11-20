@@ -19,6 +19,7 @@ import java.util.concurrent.TimeUnit
 class ApiException(val statusCode: Int, message: String) : IOException(message)
 
 class LocalAgentClient(context: Context) {
+    private val appContext = context.applicationContext
     private val prefs = context.getSharedPreferences("local-agent-native", Context.MODE_PRIVATE)
     private val cacheDir = File(context.filesDir, "transcript-cache").apply { mkdirs() }
     private val jsonType = "application/json; charset=utf-8".toMediaType()
@@ -108,6 +109,36 @@ class LocalAgentClient(context: Context) {
             }
             if (raw.isBlank()) JSONObject() else JSONObject(raw)
         }
+    }
+
+    /** Metadata (name, type, size) of a file the agent saved to the Library. */
+    suspend fun fileMeta(id: String): RemoteFile? = withContext(Dispatchers.IO) {
+        runCatching {
+            val f = requestJson("GET", "/api/files/$id").optJSONObject("file") ?: return@runCatching null
+            RemoteFile(
+                id = f.optString("id", id),
+                name = f.optString("name", "file").ifBlank { "file" },
+                mime = f.optString("mime", "application/octet-stream").ifBlank { "application/octet-stream" },
+                size = f.optLong("size", 0),
+            )
+        }.getOrNull()
+    }
+
+    /** Download a Library file (with the saved session/token) into the app cache so it can be opened or shared. */
+    suspend fun downloadFile(id: String, name: String): File = withContext(Dispatchers.IO) {
+        val dir = File(appContext.cacheDir, "files").apply { mkdirs() }
+        val safe = name.replace(Regex("[\\\\/:*?\"<>|]+"), "_").ifBlank { "file" }
+        val out = File(dir, "${id.takeLast(8)}_$safe")
+        if (out.exists() && out.length() > 0) return@withContext out
+        val req = Request.Builder().url(url("/api/files/$id/raw?download=1")).build()
+        http.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) throw ApiException(resp.code, "HTTP ${resp.code}")
+            val body = resp.body ?: throw ApiException(resp.code, "Empty file")
+            val tmp = File(dir, "${out.name}.part")
+            body.byteStream().use { input -> tmp.outputStream().use { input.copyTo(it) } }
+            tmp.renameTo(out)
+        }
+        out
     }
 
     suspend fun checkHealth(): Boolean = withContext(Dispatchers.IO) {

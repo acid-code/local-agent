@@ -12,13 +12,15 @@ The user asks for a presentation, deck, slides, a pitch, a lecture or a talk, in
 ## Steps
 1. Ask at most two questions if they matter: audience and length (default 6–10 slides), language (default: the user's), any numbers or files to use.
 2. Write a one-line outline per slide in the chat and wait for an OK when the deck is longer than 6 slides. Otherwise build it right away.
-3. Call **make_slides** with the whole deck JSON:
-   - First slide layout "title" (title + subtitle). Use "section" to open a part, "quote" for one strong sentence.
-   - 3–5 bullets per slide, each under ~12 words. One idea per slide.
-   - Charts only from numbers the user gave or you found and cited: chart {type, labels, series:[{name, values}]}; one number per label.
-   - speaker notes in "notes": 2–4 sentences the presenter can say, in the deck's language.
-   - Pictures: image {prompt} makes one with the image model (describe the scene, no text in the picture); image {fileId} reuses a file.
+3. Call **make_slides** with the whole deck JSON. Make it look designed:
+   - theme "clinical" (medical/science), "ocean" (business), "warm", "dark" or "light". Add a "kicker" (section label above the title) and a "source" line to every fact slide.
+   - Slide 1 layout "title" WITH an image (hero). "section" to open a part (big number divider). "quote" for one strong sentence.
+   - Pictures on at least 60% of slides: layout "split" (full-height picture + 3-4 bullets) or "image" (full-bleed picture + caption). Use image {query: "short English photo search words"} for real photos/diagrams (Wikimedia Commons), image {prompt} for generated art (describe the scene, no text), image {fileId} to reuse a file (fetch_image returns ids). Add image.caption.
+   - Vary layouts: "cards" for 3-6 short points, "stats" ({value:"1 in 3", label}) for numbers, "chart" for real numbers only (one number per label). Plain "bullets" only now and then; never three identical layouts in a row.
+   - 3-4 bullets per slide, each under ~12 words. One idea per slide.
+   - speaker notes in "notes": 2-4 sentences the presenter can say, in the deck's language.
    - lang "he" for Hebrew (right-to-left, embedded Heebo or Assistant font), "en" for English, or "auto".
+   - The tool result contains a DESIGN CHECK. If it lists problems (few pictures, text-heavy slides), fix them and call make_slides again with revise_file_id BEFORE replying.
 4. Reply with the [file:<id>] and a short list of the slides. Offer one round of changes.
 
 ## Hebrew
@@ -34,7 +36,8 @@ The user asks for a presentation, deck, slides, a pitch, a lecture or a talk, in
 
 ## Never
 - Invent numbers, quotes or sources for charts.
-- Put more than ~60 words on a slide; move the rest to notes.`),
+- Put more than ~60 words on a slide; move the rest to notes.
+- Deliver a text-only deck with no pictures, or paste the deck as chat text.`),
   // ── Research ──
   triangulate: s('source-triangulation', 'Source triangulation', 'Verify a claim with three independent sources of different types before stating it as fact.', `
 ## When
