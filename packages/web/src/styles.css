@@ -2002,6 +2002,30 @@ button.state-card:hover, a.state-card:hover { background: var(--bg-3); }
   overflow: hidden;
 }
 .decision-trace.live { border-color: rgba(var(--brass-rgb), 0.45); }
+.decision-trace.docked {
+  position: relative;
+  margin: 0 14px 6px;
+  overflow: visible;
+  z-index: 20;
+  border-radius: calc(10px * var(--round));
+  background: var(--bg-2);
+}
+.decision-trace.docked .decision-head { padding: 4px 10px; min-height: 32px; }
+.decision-trace.docked .decision-toggle { min-width: 0; overflow: hidden; }
+.decision-trace.docked .decision-toggle span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.decision-trace.docked .decision-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  inset-inline: 0;
+  max-height: 48vh;
+  overflow: auto;
+  padding: 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-strong);
+  border-radius: calc(11px * var(--round));
+  box-shadow: var(--shadow);
+  z-index: 30;
+}
 .decision-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px; }
 .decision-toggle { flex: 1; display: flex; align-items: center; gap: 7px; border: 0; background: transparent; color: var(--muted); cursor: pointer; text-align: start; padding: 2px 0; font-weight: 500; }
 .decision-toggle:hover { color: var(--text); }

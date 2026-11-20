@@ -836,6 +836,9 @@ export function Chat() {
             ]} />}
           </div>
         </div>
+        {steps.length > 0 && (
+          <DecisionTimeline steps={steps} live={Boolean(active)} docked onStop={() => control('stop')} />
+        )}
         {(current || chatWs.roots.length > 0) && (
           <div className="ws-strip" aria-label={t('Workspaces in this chat')}>
             {chatWs.roots.map((root) => (
@@ -964,9 +967,6 @@ export function Chat() {
               )}
               {streaming && <div dir="auto"><Markdown text={streaming} streaming /></div>}
             </article>
-          )}
-          {steps.length > 0 && (
-            <DecisionTimeline steps={steps} live={Boolean(active)} onStop={() => control('stop')} />
           )}
           {asks.map((ask) => (
             <div key={ask.id} className="approval-card" role="alertdialog" aria-label={t('Approval needed')}>

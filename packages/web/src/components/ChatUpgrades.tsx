@@ -217,13 +217,15 @@ export function InlineDiffCard({
 export function DecisionTimeline({
   steps,
   live,
+  docked,
   onStop,
 }: {
   steps: TraceStep[];
   live: boolean;
+  docked?: boolean;
   onStop?: () => void;
 }) {
-  const [open, setOpen] = useState(live);
+  const [open, setOpen] = useState(docked ? false : live);
   const [expandedStep, setExpandedStep] = useState<string | null>(null);
   const visible = steps.filter((s) => s.kind === 'routing' || s.kind === 'tool' || s.kind === 'model' || s.kind === 'contract');
   if (!visible.length) return null;
@@ -232,7 +234,7 @@ export function DecisionTimeline({
   const activeStep = visible.find((s) => s.status === 'running');
 
   return (
-    <div className={`decision-trace${live ? ' live' : ''}`}>
+    <div className={`decision-trace${docked ? ' docked' : ''}${live ? ' live' : ''}`}>
       <div className="decision-head">
         <button type="button" className="decision-toggle" onClick={() => setOpen((v) => !v)}>
           {open ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
