@@ -230,8 +230,6 @@ export class Engine {
 
   /** Latest context breakdown for a session, or a quick live estimate when opening an idle chat. */
   getSessionContextBreakdown(sessionId: string): ContextBreakdown | null {
-    const cached = this.lastContext.get(sessionId);
-    if (cached) return cached;
     const session = this.store.getSession(sessionId);
     if (!session) return null;
     const agent = session.agentId ? this.store.getAgent(session.agentId) : null;
@@ -243,6 +241,8 @@ export class Engine {
       || this.store.listModels().find((m) => m.enabled && m.local && m.sizeClass === 'large' && m.providerId !== 'prov_rehearsal')
       || this.store.listModels().find((m) => m.enabled && m.local && m.providerId !== 'prov_rehearsal')
       || this.store.listModels().find((m) => m.enabled);
+    const cached = this.lastContext.get(sessionId);
+    if (cached && (!model || cached.budget + cached.outputReserve >= Math.min(model.contextWindow, model.practicalBudget))) return cached;
     if (!model) return null;
     const role = agent ? (contractForAgent(agent.name)?.modelRole || 'main') : 'main';
     const repoTask = session.mode === 'code' || Boolean(session.workshopId);
@@ -759,8 +759,25 @@ export class Engine {
           return;
         }
       }
+      if (isToolParseError(message) && !current.cursor.recovery?.note?.includes('invalid JSON')) {
+        this.store.addLog('warn', `${model.name} emitted malformed tool-call JSON; retrying on the same model.`, undefined, 'providers');
+        this.store.updateStep(step.id, { status: 'failed', error: message, endedAt: now(), latencyMs: Date.now() - started });
+        current = this.store.updateRun(run.id, {
+          cursor: {
+            ...current.cursor,
+            phase: 'model',
+            recovery: {
+              rounds: (current.cursor.recovery?.rounds ?? 0) + 1,
+              note: 'Your previous tool call failed because its arguments had invalid JSON (e.g. an unescaped quote or overly long string). Retry with strictly valid JSON—escape quotes properly and keep large payloads concise or split them across steps.',
+            },
+          },
+        })!;
+        return;
+      }
       if (isProviderOutage(message) && !current.cursor.providerFallback) {
-        const local = this.candidates(this.store.getSettings(), run.agentId).find((item) => item.local && item.id !== model.id);
+        const localCandidates = this.candidates(this.store.getSettings(), run.agentId).filter((item) => item.local && item.id !== model.id);
+        const local = localCandidates.filter((item) => item.contextWindow >= 16_384).sort((a, b) => b.contextWindow - a.contextWindow)[0]
+          || localCandidates[0];
         this.store.updateStep(step.id, { status: 'failed', error: message, endedAt: now(), latencyMs: Date.now() - started });
         if (local) {
           const reason = `Switched to ${local.name} — ${model.name} returned ${message.match(/429|5\d\d/)?.[0] || 'an error'}.`;
@@ -1911,7 +1928,12 @@ function recentRole(messages: { id: string; role: string }[], id: string) {
   return messages.find((message) => message.id === id)?.role;
 }
 
+function isToolParseError(message: string): boolean {
+  return /failed to parse tool call arguments as json|json\.exception\.parse_error|invalid tool call/i.test(message);
+}
+
 function isProviderOutage(message: string): boolean {
+  if (isToolParseError(message)) return false;
   return /\(429\)|\(5\d\d\)|status 429|status 5\d\d|rate limit|too many requests/i.test(message);
 }
 
