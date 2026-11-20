@@ -1446,4 +1446,11 @@ export const he: Record<string, string> = {
   "Working on workspace…": "עובד על סביבת העבודה…",
   "{0} mini-agent(s) running": "{0} מיני-סוכנים רצים",
   "… {0} more lines": "… עוד {0} שורות",
+  "Attach": "צירוף",
+  "Attach local or GitHub repo": "צירוף מאגר מקומי או מ-GitHub",
+  "Cloned & attached {0}.": "{0} שוכפל וצורף.",
+  "GitHub user (optional)": "משתמש GitHub (אופציונלי)",
+  "Load": "טעינה",
+  "Loading GitHub repos…": "טוען מאגרי GitHub…",
+  "No repos found. Add GITHUB_TOKEN in Settings → Vault for private repos.": "לא נמצאו מאגרים. הוסיפו GITHUB_TOKEN בהגדרות ← כספת עבור מאגרים פרטיים.",
 };

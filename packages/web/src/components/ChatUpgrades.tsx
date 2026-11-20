@@ -315,7 +315,7 @@ export function MentionPopover({
   );
 }
 
-/** One-click local repo picker scanning /projects for git repos and attaching them to this chat. */
+/** One-click Local (/projects) + GitHub repo picker to clone and attach repos straight into this chat. */
 export function LocalRepoPicker({
   sessionId,
   onAttached,
@@ -324,54 +324,111 @@ export function LocalRepoPicker({
   onAttached: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState<'local' | 'github'>('local');
   const [repos, setRepos] = useState<{ name: string; path: string; isGit: boolean }[] | null>(null);
+  const [ghRepos, setGhRepos] = useState<{ name: string; fullName: string; cloneUrl: string; isPrivate: boolean; cloned: boolean }[] | null>(null);
+  const [ghUser, setGhUser] = useState('');
+  const [ghError, setGhError] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!open || repos !== null) return;
+    if (!open || tab !== 'local' || repos !== null) return;
     api<{ repos: { name: string; path: string; isGit: boolean }[] }>('/api/projects/discover')
       .then((res) => setRepos(res.repos || []))
       .catch(() => setRepos([]));
-  }, [open, repos]);
+  }, [open, tab, repos]);
+
+  const loadGithub = (user = ghUser) => {
+    setGhError('');
+    setGhRepos(null);
+    api<{ repos: { name: string; fullName: string; cloneUrl: string; isPrivate: boolean; cloned: boolean }[] }>(`/api/github/repos${user.trim() ? `?user=${encodeURIComponent(user.trim())}` : ''}`)
+      .then((res) => setGhRepos(res.repos || []))
+      .catch((err) => { setGhRepos([]); setGhError(errorText(err)); });
+  };
+
+  useEffect(() => {
+    if (open && tab === 'github' && ghRepos === null && !ghError) loadGithub();
+  }, [open, tab]);
 
   return (
     <div className="repo-picker-wrap">
-      <button type="button" className="icon-btn round" title={t('Attach local repo')} aria-label={t('Attach local repo')} onClick={() => setOpen((v) => !v)}>
+      <button type="button" className="icon-btn round" title={t('Attach local or GitHub repo')} aria-label={t('Attach local or GitHub repo')} onClick={() => setOpen((v) => !v)}>
         <FolderGit2 size={17} />
       </button>
       {open && (
-        <div className="repo-picker-pop" role="dialog" aria-label={t('Attach local repo')}>
+        <div className="repo-picker-pop" role="dialog" aria-label={t('Attach local or GitHub repo')}>
           <div className="ctx-pop-head">
-            <strong>{t('Local repos')}</strong>
+            <div className="row" style={{ gap: 4 }}>
+              <button type="button" className={tab === 'local' ? 'btn primary small' : 'btn ghost small'} onClick={() => setTab('local')}>{t('Local')}</button>
+              <button type="button" className={tab === 'github' ? 'btn primary small' : 'btn ghost small'} onClick={() => setTab('github')}>{t('GitHub')}</button>
+            </div>
             <button type="button" className="icon-btn" aria-label={t('Close')} onClick={() => setOpen(false)}><X size={14} /></button>
           </div>
-          {repos === null ? (
-            <p className="faint">{t('Scanning…')}</p>
-          ) : repos.length === 0 ? (
-            <p className="faint">{t('No local repos found in /projects.')}</p>
+          {tab === 'local' ? (
+            repos === null ? (
+              <p className="faint">{t('Scanning…')}</p>
+            ) : repos.length === 0 ? (
+              <p className="faint">{t('No local repos found in /projects.')}</p>
+            ) : (
+              <div className="repo-picker-list">
+                {repos.map((r) => (
+                  <button
+                    key={r.path}
+                    type="button"
+                    className="repo-picker-row"
+                    disabled={busy === r.path}
+                    onClick={async () => {
+                      setBusy(r.path);
+                      try {
+                        await post('/api/projects/attach', { path: r.path, name: r.name, sessionId: sessionId || undefined });
+                        toast(t('Attached {0}.', [r.name]), 'ok');
+                        setOpen(false);
+                        onAttached();
+                      } catch (error) { toast(errorText(error), 'error'); } finally { setBusy(null); }
+                    }}
+                  >
+                    <FolderGit2 size={14} aria-hidden />
+                    <span className="mono ellipsis grow">{r.name}</span>
+                    {r.isGit && <span className="badge">git</span>}
+                  </button>
+                ))}
+              </div>
+            )
           ) : (
             <div className="repo-picker-list">
-              {repos.map((r) => (
-                <button
-                  key={r.path}
-                  type="button"
-                  className="repo-picker-row"
-                  disabled={busy === r.path}
-                  onClick={async () => {
-                    setBusy(r.path);
-                    try {
-                      await post('/api/projects/attach', { path: r.path, name: r.name, sessionId: sessionId || undefined });
-                      toast(t('Attached {0}.', [r.name]), 'ok');
-                      setOpen(false);
-                      onAttached();
-                    } catch (error) { toast(errorText(error), 'error'); } finally { setBusy(null); }
-                  }}
-                >
-                  <FolderGit2 size={14} aria-hidden />
-                  <span className="mono ellipsis grow">{r.name}</span>
-                  {r.isGit && <span className="badge">git</span>}
-                </button>
-              ))}
+              <form className="row" style={{ gap: 4, marginBottom: 4 }} onSubmit={(e) => { e.preventDefault(); loadGithub(ghUser); }}>
+                <input value={ghUser} onChange={(e) => setGhUser(e.target.value)} placeholder={t('GitHub user (optional)')} style={{ flex: 1, minWidth: 0 }} />
+                <button type="submit" className="btn ghost small">{t('Load')}</button>
+              </form>
+              {ghError && <p className="faint">{ghError}</p>}
+              {ghRepos === null ? (
+                <p className="faint">{t('Loading GitHub repos…')}</p>
+              ) : ghRepos.length === 0 ? (
+                <p className="faint">{t('No repos found. Add GITHUB_TOKEN in Settings → Vault for private repos.')}</p>
+              ) : (
+                ghRepos.map((r) => (
+                  <button
+                    key={r.fullName}
+                    type="button"
+                    className="repo-picker-row"
+                    disabled={busy === r.fullName}
+                    onClick={async () => {
+                      setBusy(r.fullName);
+                      try {
+                        await post('/api/github/clone', { cloneUrl: r.cloneUrl, name: r.name, sessionId: sessionId || undefined });
+                        toast(t('Cloned & attached {0}.', [r.name]), 'ok');
+                        setRepos(null);
+                        setOpen(false);
+                        onAttached();
+                      } catch (error) { toast(errorText(error), 'error'); } finally { setBusy(null); }
+                    }}
+                  >
+                    <GitBranch size={14} aria-hidden />
+                    <span className="mono ellipsis grow">{r.name}</span>
+                    <span className="badge">{busy === r.fullName ? '…' : r.cloned ? t('Attach') : t('Clone')}</span>
+                  </button>
+                ))
+              )}
             </div>
           )}
         </div>

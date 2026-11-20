@@ -999,6 +999,61 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     }
     return { repo };
   });
+  app.get('/api/github/repos', async (req) => {
+    if (accountOf(req).role !== 'owner') throw http(403, 'Only the owner can browse GitHub repos.');
+    const token = gitToken() || process.env.GITHUB_TOKEN || '';
+    const userParam = String((req.query as { user?: string }).user || '').trim();
+    const headers: Record<string, string> = { 'user-agent': 'local-agent', accept: 'application/vnd.github+json' };
+    if (token) headers.authorization = `Bearer ${token}`;
+    const url = token && !userParam
+      ? 'https://api.github.com/user/repos?sort=updated&per_page=40&affiliation=owner,collaborator'
+      : `https://api.github.com/users/${encodeURIComponent(userParam || 'acid-code')}/repos?sort=updated&per_page=30`;
+    const res = await fetchImpl(url, { headers, signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) throw http(res.status === 401 ? 401 : 502, `GitHub API returned ${res.status}. ${token ? 'Check GITHUB_TOKEN in Settings → Vault.' : 'Save GITHUB_TOKEN in Settings → Vault for private repos.'}`);
+    const list = await res.json() as { name: string; full_name: string; clone_url: string; private: boolean; description?: string | null; default_branch?: string }[];
+    const root = path.resolve(process.env.LA_PROJECTS_DIR || '/projects');
+    return {
+      authenticated: Boolean(token),
+      repos: list.map((r) => ({
+        name: r.name,
+        fullName: r.full_name,
+        cloneUrl: r.clone_url,
+        isPrivate: Boolean(r.private),
+        description: r.description || '',
+        defaultBranch: r.default_branch || 'main',
+        cloned: fs.existsSync(path.join(root, r.name)),
+      })),
+    };
+  });
+  app.post('/api/github/clone', async (req) => {
+    if (accountOf(req).role !== 'owner') throw http(403, 'Only the owner can clone GitHub repos.');
+    const body = parse(z.object({ cloneUrl: z.string().url(), name: z.string().min(1).max(80), sessionId: z.string().optional() }), req.body);
+    if (!/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+(\.git)?$/i.test(body.cloneUrl)) throw http(400, 'Only https://github.com/<owner>/<repo> URLs are allowed.');
+    const safeName = path.basename(body.name).replace(/[^a-zA-Z0-9._-]+/g, '-');
+    const root = path.resolve(process.env.LA_PROJECTS_DIR || '/projects');
+    await fs.promises.mkdir(root, { recursive: true });
+    const target = path.resolve(root, safeName);
+    if (!target.startsWith(`${root}${path.sep}`)) throw http(400, 'Invalid repo name.');
+    if (!fs.existsSync(target)) {
+      const token = gitToken() || process.env.GITHUB_TOKEN || '';
+      const authUrl = token ? body.cloneUrl.replace(/^https:\/\//i, `https://x-access-token:${encodeURIComponent(token)}@`) : body.cloneUrl;
+      await git(root, ['clone', authUrl, target]);
+      if (token) await git(target, ['remote', 'set-url', 'origin', body.cloneUrl]).catch(() => undefined);
+    }
+    const existing = listSharedRepos(store).find((r) => path.resolve(r.path) === target);
+    const repo = existing ?? registerSharedRepo(store, { label: safeName, path: target, remote: body.cloneUrl });
+    if (body.sessionId) {
+      mustOwn(store, req, 'session', body.sessionId, 'Chat not found.');
+      const rootEntry = listGitRoots(store, me(req)).find((r) => path.resolve(r.path) === target);
+      const rootId = rootEntry?.id ?? `repo:${repo.label}`;
+      const current = getChatWorkspaces(store, body.sessionId);
+      if (!current.some((item) => item.kind === 'root' && item.id === rootId)) {
+        setChatWorkspaces(store, body.sessionId, [...current, { kind: 'root', id: rootId }]);
+      }
+      return { repo, ...(await resolveChatWorkspaces(store, body.sessionId, me(req))) };
+    }
+    return { repo };
+  });
   app.get('/api/sessions/:id/mention-files', async (req) => {
     const id = (req.params as { id: string }).id;
     mustOwn(store, req, 'session', id, 'Chat not found.');
