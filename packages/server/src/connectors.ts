@@ -57,6 +57,13 @@ export const BUILTIN_CONNECTORS: BuiltinConnector[] = [
     async health() { try { new DatabaseSync(':memory:').prepare('SELECT 1').get(); return { status: 'healthy', detail: 'node:sqlite, read-only.' }; } catch { return { status: 'degraded', detail: 'node:sqlite unavailable.' }; } } },
   { id: 'docker', name: 'Docker', mcpEquivalent: 'docker-mcp', ownerOnly: true, description: 'List and inspect containers; run and remove need approval. Owner only.', tools: ['docker_ps', 'docker_inspect', 'docker_run', 'docker_rm'],
     async health(env) { return env.dockerAvailable() ? { status: 'healthy', detail: 'Docker answered.' } : { status: 'degraded', detail: 'Docker is not reachable.' }; } },
+  { id: 'vercel', name: 'Vercel & Turborepo', mcpEquivalent: 'vercel-api', ownerOnly: true, description: 'Inspect Vercel projects, build & runtime logs, Blob storage, env vars, redeploys, and Turborepo workspaces. Add VERCEL_TOKEN in Vault.', tools: ['vercel', 'turbo_inspect'],
+    async health(env) {
+      const hasSecret = Boolean(process.env.VERCEL_TOKEN || env.store.db.prepare("SELECT 1 FROM secrets WHERE name = 'VERCEL_TOKEN' AND revoked_at IS NULL LIMIT 1").get());
+      return hasSecret
+        ? { status: 'healthy', detail: 'VERCEL_TOKEN configured (plus turbo_inspect).' }
+        : { status: 'degraded', detail: 'turbo_inspect ready; add VERCEL_TOKEN in Settings → Vault for Vercel API & logs.' };
+    } },
 ];
 
 /**

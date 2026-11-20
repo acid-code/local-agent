@@ -28,6 +28,7 @@ import {
   type ApprovalMode,
 } from '@local-agent/shared';
 import { Bus } from './bus.js';
+import { vercelTools } from './vercel.js';
 import type { Agent, ModelRow, RunRow, Store } from './db.js';
 import type { DockerCtl } from './docker.js';
 import { indexText, retrieve, type VectorIndex } from './embeddings.js';
@@ -1228,6 +1229,8 @@ export class Engine {
         if (toolNames.includes('understand_image')) caps.push('understand_image (full multimodal vision analysis: scene description, colors/shades/hex codes, charts/numbers, layout, and text)');
         if (toolNames.includes('browse')) caps.push('browse (open public web pages in headless Chromium, capture screenshots as [file:<id>] to inspect visuals with understand_image, and interact via click/fill/press/scroll)');
         if (toolNames.includes('create_project')) caps.push('create_project (spin up a brand-new local git repo + optional private GitHub repo and start building immediately)');
+        if (toolNames.includes('vercel')) caps.push('vercel (inspect Vercel projects, deployments, build & runtime logs, env vars, Vercel Blob stores/diagnostics, update project settings/env vars, and trigger redeploys)');
+        if (toolNames.includes('turbo_inspect')) caps.push('turbo_inspect (inspect Turborepo monorepos, turbo.json strict env pass-through, vercel.json, and Next.js Blob image config)');
         if (toolNames.includes('generate_image')) caps.push('generate_image (create images locally)');
         if (toolNames.includes('propose_skill')) caps.push('propose_skill + run_skill_script (create reusable skills and custom scripts shared across all personas)');
         return caps.length
@@ -1527,7 +1530,11 @@ export class Engine {
     names.add('make_slides');
     names.add('read_slides');
     names.add('browse');
-    if ((agent.ownerId || OWNER_ID) === OWNER_ID) names.add('create_project');
+    if ((agent.ownerId || OWNER_ID) === OWNER_ID) {
+      names.add('create_project');
+      names.add('vercel');
+      names.add('turbo_inspect');
+    }
     if (this.ocrReader) names.add('read_image_text');
     if (this.imageAnalyzer) names.add('understand_image');
     for (const name of ['tasks', 'manage_timer', 'manage_trigger', 'spawn_agent', 'helpers', 'memory_file', 'search_chats', 'propose_skill', 'run_tool_script', 'time_now', 'think']) names.add(name);
@@ -1549,7 +1556,7 @@ export class Engine {
     if (helper) for (const name of HELPER_DENIED) names.delete(name);
     // Built-in connectors the owner switched off take their tools with them.
     for (const name of disabledConnectorTools(this.store)) names.delete(name);
-    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), ...slidesTools({ dataDir: this.libraryDir, image: async (prompt, ctx) => ({ fileId: (await generateImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }, { prompt, ownerId: ctx.ownerId, shape: 'landscape', sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal })).file.id }) }), ...this.autonomy.tools(), tasksTool(), memoryFileTool(), searchChatsTool(), proposeSkillTool(), ...CONNECTOR_TOOLS(), ...(this.ocrReader ? [ocrTool(this.ocrReader)] : []), ...(this.imageAnalyzer ? [understandImageTool(this.imageAnalyzer)] : []), ...this.extraTools, ...mcp.map((row) => row.tool)];
+    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), ...slidesTools({ dataDir: this.libraryDir, image: async (prompt, ctx) => ({ fileId: (await generateImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }, { prompt, ownerId: ctx.ownerId, shape: 'landscape', sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal })).file.id }) }), ...this.autonomy.tools(), tasksTool(), memoryFileTool(), searchChatsTool(), proposeSkillTool(), ...CONNECTOR_TOOLS(), ...vercelTools(), ...(this.ocrReader ? [ocrTool(this.ocrReader)] : []), ...(this.imageAnalyzer ? [understandImageTool(this.imageAnalyzer)] : []), ...this.extraTools, ...mcp.map((row) => row.tool)];
     const seen = new Set<string>();
     const chosen = catalog.filter((tool) => {
       if (!names.has(tool.name) || seen.has(tool.name)) return false;
@@ -2101,7 +2108,7 @@ const CONTRACT_ALWAYS = new Set([
   'request_secret', 'kb_search', 'load_skill', 'manage_timer', 'manage_trigger',
   'time_now', 'tasks', 'think', 'memory_file', 'search_chats',
   'spawn_agent', 'helpers', 'propose_skill', 'read_output', 'run_skill_script',
-  'find_context', 'share_file', 'make_slides', 'read_slides', 'browse', 'create_project', 'read_image_text', 'understand_image', 'generate_image', 'repo_sync',
+  'find_context', 'share_file', 'make_slides', 'read_slides', 'browse', 'create_project', 'vercel', 'turbo_inspect', 'read_image_text', 'understand_image', 'generate_image', 'repo_sync',
 ]);
 
 export function roughModelGiB(apiName: string): number {
