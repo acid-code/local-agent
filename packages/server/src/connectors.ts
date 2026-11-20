@@ -62,7 +62,7 @@ export const BUILTIN_CONNECTORS: BuiltinConnector[] = [
       const hasSecret = Boolean(process.env.VERCEL_TOKEN || env.store.db.prepare("SELECT 1 FROM secrets WHERE name = 'VERCEL_TOKEN' AND revoked_at IS NULL LIMIT 1").get());
       return hasSecret
         ? { status: 'healthy', detail: 'VERCEL_TOKEN configured (plus turbo_inspect).' }
-        : { status: 'degraded', detail: 'turbo_inspect ready; add VERCEL_TOKEN in Settings → Vault for Vercel API & logs.' };
+        : { status: 'healthy', detail: 'turbo_inspect ready (add VERCEL_TOKEN in Vault for Vercel API & logs).' };
     } },
 ];
 

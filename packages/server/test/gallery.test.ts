@@ -148,7 +148,7 @@ describe('built-in connectors', () => {
   it('are all present, enabled and healthy on a fresh install, with Docker for the owner only', async () => {
     const built = await setup({ docker: true });
     const report = (await built.app.inject({ method: 'GET', url: '/api/connectors', cookies: built.owner })).json();
-    expect(report.builtIn.map((row: { id: string }) => row.id).sort()).toEqual(['browser', 'docker', 'fetch', 'filesystem', 'git', 'memory', 'search', 'sqlite', 'thinking', 'time']);
+    expect(report.builtIn.map((row: { id: string }) => row.id).sort()).toEqual(['browser', 'docker', 'fetch', 'filesystem', 'git', 'memory', 'search', 'sqlite', 'thinking', 'time', 'vercel']);
     for (const row of report.builtIn) expect({ id: row.id, enabled: row.enabled, builtIn: row.builtIn, status: row.status }).toEqual({ id: row.id, enabled: true, builtIn: true, status: 'healthy' });
     expect(report.recommended.map((row: { id: string }) => row.id)).toEqual(expect.arrayContaining(['github', 'gmail', 'calendar']));
     expect(report.recommended.every((row: { connected: boolean }) => row.connected === false)).toBe(true);
