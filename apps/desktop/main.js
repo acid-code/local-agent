@@ -128,6 +128,7 @@ function createWindow() {
       submenu: [
         {
           label: 'Change server…',
+          accelerator: 'CmdOrCtrl+Shift+S',
           click: () => { void showSetup(win); },
         },
         {
