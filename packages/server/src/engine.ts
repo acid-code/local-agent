@@ -69,6 +69,7 @@ export class Engine {
   private readonly inflight = new Map<string, { abort: AbortController; paused: boolean; resumePause: () => void }>();
   private readonly liveStreams = new Map<string, { text: string; thinking: string; status: string; detail?: string; waitInfo?: unknown }>();
   private readonly lastContext = new Map<string, ContextBreakdown>();
+  private readonly compacting = new Set<string>();
   private readonly approvalWaiters = new Map<string, (status: 'approved' | 'denied') => void>();
   private readonly secretWaiters = new Map<string, (status: 'provided' | 'denied') => void>();
   private readonly heldLarge = new Map<string, string>();
@@ -208,6 +209,9 @@ export class Engine {
         this.bus.publish({ type: 'done', runId, run: ended });
         // Helper results are delivered from the run's own record, so they survive a restart (no in-memory callback needed).
         if (ended?.cursor.helperId && ['completed', 'failed', 'stopped', 'interrupted', 'cancelled'].includes(ended.status)) this.autonomy.deliver(ended);
+        if (ended && ended.status === 'completed' && !ended.cursor.helperId && !process.env.VITEST) {
+          void this.maybeAutoCompact(ended.sessionId);
+        }
       } catch { /* shutting down */ }
     }
   }
@@ -284,9 +288,45 @@ export class Engine {
     return messages.filter((m, idx) => idx >= tailStart || !activeCovers.has(m.id));
   }
 
+  /** Pick a fast lightweight model (e.g. gemma3:4b) for compaction/handoff so it finishes in ~3-5s without evicting llama-server's KV prefix cache. */
+  private fastSummaryModel(fallbackId?: string | null): ModelRow | undefined {
+    const models = this.store.listModels().filter((m) => m.enabled && !m.embedding && m.providerId !== 'prov_rehearsal');
+    const fastName = (this.store.getSettings().autoModels?.fast || '').trim().toLowerCase();
+    if (fastName) {
+      const exact = models.find((m) => m.apiName.toLowerCase() === fastName || m.name.toLowerCase() === fastName);
+      if (exact) return exact;
+    }
+    const smallLocal = models.find((m) => m.local && m.sizeClass === 'small' && m.providerId !== 'prov_llama');
+    if (smallLocal) return smallLocal;
+    return (fallbackId && this.store.getModel(fallbackId))
+      || (this.llama.isActive() ? this.llama.model() : undefined)
+      || models[0]
+      || this.store.listModels().find((m) => m.enabled);
+  }
+
+  /** Automatically compact a chat in the background on the fast model once context crosses 80%. */
+  private async maybeAutoCompact(sessionId: string): Promise<void> {
+    if (this.compacting.has(sessionId) || this.sessionBusy(sessionId)) return;
+    const breakdown = this.getSessionContextBreakdown(sessionId);
+    if (!breakdown || breakdown.budget <= 0 || breakdown.used / breakdown.budget < 0.8) return;
+    const messages = this.store.listMessages(sessionId);
+    const summaries = this.store.listSummaries(sessionId).map((s) => ({ id: s.id, level: s.level, content: s.content, covers: s.covers, foldedInto: s.foldedInto }));
+    if (this.uncoveredMessages(messages, summaries).length < 6) return;
+    this.compacting.add(sessionId);
+    try {
+      const result = await this.compactSession(sessionId);
+      if (result.compactedMessages > 0) {
+        this.store.addLog('info', `Auto-compacted ${result.compactedMessages} messages in background.`, undefined, 'context');
+        if (result.breakdown) this.bus.publish({ type: 'context', sessionId, breakdown: result.breakdown });
+      }
+    } catch { /* non-fatal */ } finally {
+      this.compacting.delete(sessionId);
+    }
+  }
+
   /**
-   * Compact older turns in a chat into a single structured summary right away.
-   * Frees context without starting a new chat and falls back deterministically if the model is busy.
+   * Compact older turns in a chat into a single structured summary right away using the fast model.
+   * Frees context in seconds without evicting the main model's KV cache and falls back deterministically if busy.
    */
   async compactSession(sessionId: string): Promise<{ summary: string; compactedMessages: number; breakdown: ContextBreakdown | null }> {
     const session = this.store.getSession(sessionId);
@@ -298,16 +338,13 @@ export class Engine {
       return { summary: '', compactedMessages: 0, breakdown: this.getSessionContextBreakdown(sessionId) };
     }
     const existing = this.store.listSummaries(sessionId);
-    const model = (session.activeModelId && this.store.getModel(session.activeModelId))
-      || (this.llama.isActive() ? this.llama.model() : undefined)
-      || this.store.listModels().find((m) => m.enabled && m.local && m.providerId !== 'prov_rehearsal')
-      || this.store.listModels().find((m) => m.enabled);
+    const model = this.fastSummaryModel(session.activeModelId);
     const prevRoot = [...existing].reverse().find((s) => s.level === 2)?.content || '';
     const transcript = older
-      .map((m) => `${m.role}${m.toolName ? `(${m.toolName})` : ''}: ${m.content.replace(/\s+/g, ' ').slice(0, 600)}`)
+      .map((m) => `${m.role}${m.toolName ? `(${m.toolName})` : ''}: ${m.content.replace(/\s+/g, ' ').slice(0, 420)}`)
       .join('\n')
-      .slice(-14_000);
-    const prompt = `Compact this conversation into a dense handoff summary (under 250 words) with bullet sections: Goal, Decisions, Files & Repos, Open Next Steps.\n\n${prevRoot ? `Previous summary:\n${prevRoot}\n\n` : ''}Transcript:\n${transcript}`;
+      .slice(-6_500);
+    const prompt = `Compact this conversation into a dense handoff summary (under 220 words) with bullet sections: Goal, Decisions, Files & Repos, Open Next Steps.\n\n${prevRoot ? `Previous summary:\n${prevRoot.slice(0, 900)}\n\n` : ''}Transcript:\n${transcript}`;
     const generated = model ? await this.trySummarize(model, prompt) : null;
     const summary = generated || this.fallbackSummary(older, prevRoot);
     const version = Math.max(0, ...existing.map((s) => s.version)) + 1;
@@ -337,15 +374,12 @@ export class Engine {
     const messages = this.store.listMessages(sessionId);
     const existing = this.store.listSummaries(sessionId);
     const prevRoot = [...existing].reverse().find((s) => s.level === 2)?.content || '';
-    const model = (source.activeModelId && this.store.getModel(source.activeModelId))
-      || (this.llama.isActive() ? this.llama.model() : undefined)
-      || this.store.listModels().find((m) => m.enabled && m.local && m.providerId !== 'prov_rehearsal')
-      || this.store.listModels().find((m) => m.enabled);
+    const model = this.fastSummaryModel(source.activeModelId);
     const transcript = messages
-      .map((m) => `${m.role}${m.toolName ? `(${m.toolName})` : ''}: ${m.content.replace(/\s+/g, ' ').slice(0, 700)}`)
+      .map((m) => `${m.role}${m.toolName ? `(${m.toolName})` : ''}: ${m.content.replace(/\s+/g, ' ').slice(0, 480)}`)
       .join('\n')
-      .slice(-16_000);
-    const prompt = `Write a concise continuation brief (under 300 words) so a fresh chat can pick up this work immediately without losing context. Use sections: **Goal**, **Completed**, **Files & Repos**, **Key Decisions**, **Next Steps**.\n\n${prevRoot ? `Earlier summary:\n${prevRoot}\n\n` : ''}Recent messages:\n${transcript}`;
+      .slice(-7_500);
+    const prompt = `Write a concise continuation brief (under 250 words) so a fresh chat can pick up this work immediately without losing context. Use sections: **Goal**, **Completed**, **Files & Repos**, **Key Decisions**, **Next Steps**.\n\n${prevRoot ? `Earlier summary:\n${prevRoot.slice(0, 900)}\n\n` : ''}Recent messages:\n${transcript}`;
     const generated = model && messages.length ? await this.trySummarize(model, prompt) : null;
     const summary = generated || this.fallbackSummary(messages, prevRoot);
     const baseTitle = (source.title || 'Chat').replace(/\s*\(cont\.\d*\)$/i, '').slice(0, 60);
@@ -1426,8 +1460,8 @@ export class Engine {
     try {
       const provider = this.provider(model);
       let text = '';
-      const timer = AbortSignal.timeout(120_000);
-      for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, signal: timer })) {
+      const timer = AbortSignal.timeout(30_000);
+      for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, noThink: true, signal: timer })) {
         if (event.type === 'token') text += event.text;
       }
       return text.trim().slice(0, 4000) || null;
