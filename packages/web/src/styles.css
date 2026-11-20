@@ -880,6 +880,20 @@ input[type="range"], input[type="checkbox"], input[type="radio"], progress { acc
 .chat.with-trace { grid-template-columns: 260px minmax(0, 1fr) 320px; }
 .chat.with-panel { grid-template-columns: 260px minmax(0, 1fr) 360px; }
 .chat.with-panel.with-trace .trace { display: none; }
+.chat.v2.with-trace .trace,
+.chat.v2.with-panel.with-trace .trace {
+  display: flex;
+  position: fixed;
+  top: 0;
+  inset-inline-end: 0;
+  bottom: 0;
+  width: min(400px, 92vw);
+  background: var(--bg-2);
+  z-index: 40;
+  box-shadow: var(--shadow);
+  padding-top: max(12px, env(safe-area-inset-top));
+}
+.chat.v2.with-trace .trace .sheet-head { display: flex; }
 :root:not([data-flat="off"]) .rail { background: var(--bg); padding: 12px 8px; }
 .messages-inner { max-width: 720px; margin: 0 auto; }
 .messages { padding: 24px 24px 12px; }

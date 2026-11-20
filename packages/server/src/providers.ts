@@ -379,12 +379,21 @@ async function* readOllama(response: Response): AsyncIterable<ProviderEvent> {
 function toOpenAI(message: ChatMessage) {
   if (message.role === 'tool') return { role: 'tool', tool_call_id: message.toolCallId, content: message.content };
   if (message.role === 'assistant' && message.toolCalls?.length) {
-    return { role: 'assistant', content: message.content || null, tool_calls: message.toolCalls.map((tool) => ({ id: tool.id, type: 'function', function: { name: tool.name, arguments: tool.arguments } })) };
+    return { role: 'assistant', content: message.content || null, tool_calls: message.toolCalls.map((tool) => ({ id: tool.id, type: 'function', function: { name: tool.name, arguments: safeJsonString(tool.arguments) } })) };
   }
   if (message.role === 'user' && message.imageUrl) {
     return { role: 'user', content: [{ type: 'text', text: message.content }, { type: 'image_url', image_url: { url: message.imageUrl } }] };
   }
   return { role: message.role, content: message.content };
+}
+
+function safeJsonString(value: string): string {
+  try {
+    JSON.parse(value);
+    return value;
+  } catch {
+    return JSON.stringify({ _malformed_arguments: (value || '').slice(0, 400) });
+  }
 }
 
 function toGemini(message: ChatMessage) {
