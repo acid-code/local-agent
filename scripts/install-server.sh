@@ -7,6 +7,7 @@ DRY_RUN=0
 MODE=docker
 WITH_OLLAMA=0
 WITH_TAILSCALE=0
+ALLOW_EMPTY_DATA=0
 APP_USER="${SUDO_USER:-${USER:-localagent}}"
 INSTALL_ROOT=/opt/local-agent
 PORT=8787
@@ -22,6 +23,7 @@ Usage: scripts/install-server.sh [options]
   --with-ollama       Install Ollama if it is missing.
   --with-tailscale    Install Tailscale if it is missing.
   --root PATH         Install location. Default: /opt/local-agent
+  --allow-empty-data  Allow starting a fresh empty data directory even if another install exists.
   -h, --help
 
 Vulkan/Mesa (for the Radeon 780M), Docker, the Compose plugin, and git are always checked.
@@ -34,6 +36,7 @@ while [[ $# -gt 0 ]]; do
     --native) MODE=native ;;
     --with-ollama) WITH_OLLAMA=1 ;;
     --with-tailscale) WITH_TAILSCALE=1 ;;
+    --allow-empty-data) ALLOW_EMPTY_DATA=1 ;;
     --user) APP_USER="${2:?}"; shift ;;
     --root) INSTALL_ROOT="${2:?}"; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -152,6 +155,37 @@ if [[ "$MODE" == "native" ]] && ! node_ok; then
   fi
 fi
 
+# Refuse to start on an empty data folder when an existing live install is found elsewhere.
+if [[ "$ALLOW_EMPTY_DATA" -eq 0 && ! -f "$INSTALL_ROOT/data/local-agent.db" ]]; then
+  for existing in /opt/local-agent/data "$SRC/data"; do
+    if [[ "$existing" != "$INSTALL_ROOT/data" && -f "$existing/local-agent.db" ]]; then
+      echo "Refusing to install with an empty data folder at $INSTALL_ROOT/data:" >&2
+      echo "  Found an existing local-agent database at $existing/local-agent.db." >&2
+      echo "  Pass --root $(dirname "$existing") to update that install, or --allow-empty-data to intentionally start a fresh empty instance." >&2
+      exit 1
+    fi
+  done
+fi
+
+# Automatic backup before any update or container change.
+if [[ -f "$INSTALL_ROOT/data/local-agent.db" ]]; then
+  BACKUP_STAMP="$(date -u +%Y-%m-%dT%H-%M-%SZ)"
+  BACKUP_FILE="$INSTALL_ROOT/data/backups/pre-update-${BACKUP_STAMP}.tar"
+  run mkdir -p "$INSTALL_ROOT/data/backups"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "+ back up $INSTALL_ROOT/data to $BACKUP_FILE"
+  else
+    BACKUP_ITEMS=()
+    for f in local-agent.db local-agent.db-wal local-agent.db-shm master.key cookie.secret secrets.env workspaces; do
+      [[ -e "$INSTALL_ROOT/data/$f" ]] && BACKUP_ITEMS+=("$f")
+    done
+    if [[ ${#BACKUP_ITEMS[@]} -gt 0 ]]; then
+      tar -C "$INSTALL_ROOT/data" -cf "$BACKUP_FILE" "${BACKUP_ITEMS[@]}"
+      echo "Backed up existing data to $BACKUP_FILE"
+    fi
+  fi
+fi
+
 run mkdir -p "$INSTALL_ROOT"
 if [[ "$SRC" != "$INSTALL_ROOT" ]]; then
   run mkdir -p "$INSTALL_ROOT/data" "$INSTALL_ROOT/data/workspaces" "$INSTALL_ROOT/data/backups"
@@ -160,13 +194,17 @@ fi
 run chown -R "$APP_USER:$APP_USER" "$INSTALL_ROOT"
 
 ENV_FILE="$INSTALL_ROOT/.env"
+# Unique Docker Compose project name per install (deterministic per install root unless already set).
+DEFAULT_PROJECT="local-agent-$(printf '%s' "$INSTALL_ROOT" | sha256sum | cut -c1-8)"
 if [[ ! -f "$ENV_FILE" ]]; then
   SECRET="$(openssl rand -hex 32)"
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "+ write $ENV_FILE with LA_HOST, LA_PORT, DATA_DIR, and a generated LA_COOKIE_SECRET"
+    echo "+ write $ENV_FILE with COMPOSE_PROJECT_NAME=$DEFAULT_PROJECT, LA_HOST, LA_PORT, DATA_DIR, and a generated LA_COOKIE_SECRET"
   else
     umask 077
     cat > "$ENV_FILE" <<EOF
+COMPOSE_PROJECT_NAME=$DEFAULT_PROJECT
+LA_COMPOSE_PROJECT=$DEFAULT_PROJECT
 LA_HOST=0.0.0.0
 LA_PORT=$PORT
 DATA_DIR=$INSTALL_ROOT/data
@@ -178,6 +216,19 @@ EOF
   fi
 else
   echo "Keeping existing $ENV_FILE"
+  if ! grep -q '^COMPOSE_PROJECT_NAME=' "$ENV_FILE"; then
+    # Keep existing live container project name if one is already mounted on this data dir.
+    EXISTING_PROJ=""
+    if command -v docker >/dev/null 2>&1; then
+      EXISTING_PROJ="$(docker ps -a --filter "label=com.docker.compose.project.working_dir=$INSTALL_ROOT" --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null | head -n 1 || true)"
+    fi
+    CHOSEN_PROJ="${EXISTING_PROJ:-$DEFAULT_PROJECT}"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      echo "+ append COMPOSE_PROJECT_NAME=$CHOSEN_PROJ to $ENV_FILE"
+    else
+      printf 'COMPOSE_PROJECT_NAME=%s\nLA_COMPOSE_PROJECT=%s\n' "$CHOSEN_PROJ" "$CHOSEN_PROJ" >> "$ENV_FILE"
+    fi
+  fi
   if ! grep -q '^OLLAMA_CONTEXT_LENGTH=' "$ENV_FILE"; then
     if [[ "$DRY_RUN" -eq 1 ]]; then
       echo "+ append OLLAMA_CONTEXT_LENGTH=32768 to $ENV_FILE"
@@ -187,17 +238,30 @@ else
   fi
 fi
 
-# Fallback when a request does not pass num_ctx. The app still sends num_ctx per call.
+# Configure Ollama systemd service: listen on 0.0.0.0 (reachable from Docker), Vulkan iGPU, Flash Attention, q8_0 KV cache, 2 resident models.
 if command -v ollama >/dev/null 2>&1 || [[ "$WITH_OLLAMA" -eq 1 ]]; then
-  DROP_IN=/etc/systemd/system/ollama.service.d/context.conf
+  DROP_IN=/etc/systemd/system/ollama.service.d/local-agent.conf
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "+ write $DROP_IN with OLLAMA_CONTEXT_LENGTH=32768 and restart ollama"
+    echo "+ write $DROP_IN with OLLAMA_HOST, OLLAMA_IGPU_ENABLE=1, OLLAMA_VULKAN=1, OLLAMA_FLASH_ATTENTION=1, OLLAMA_KV_CACHE_TYPE=q8_0, OLLAMA_MAX_LOADED_MODELS=2 and restart ollama"
   else
     mkdir -p /etc/systemd/system/ollama.service.d
+    rm -f /etc/systemd/system/ollama.service.d/context.conf
     cat > "$DROP_IN" <<'EOF'
 [Service]
-Environment=OLLAMA_CONTEXT_LENGTH=32768
+Environment="OLLAMA_HOST=0.0.0.0:11434"
+Environment="OLLAMA_IGPU_ENABLE=1"
+Environment="OLLAMA_VULKAN=1"
+Environment="GGML_VK_VISIBLE_DEVICES=0"
+Environment="OLLAMA_FLASH_ATTENTION=1"
+Environment="OLLAMA_KV_CACHE_TYPE=q8_0"
+Environment="OLLAMA_CONTEXT_LENGTH=32768"
 EOF
+    # Residency limits. With llama-server installed, limits.conf (1 model, 5m) from
+    # deploy/install-llama-server.sh owns them; otherwise keep 2 resident models.
+    if [[ ! -f /etc/systemd/system/ollama.service.d/limits.conf ]]; then
+      printf 'Environment="OLLAMA_MAX_LOADED_MODELS=2"\nEnvironment="OLLAMA_KEEP_ALIVE=15m"\n' >> "$DROP_IN"
+    fi
+    getent group render >/dev/null && usermod -aG render,video ollama || true
     systemctl daemon-reload || true
     systemctl try-restart ollama || true
   fi
@@ -274,7 +338,7 @@ fi
 # Filesystem, fetch, git, memory, time, sequential thinking, SQLite and the browser run inside the app (no download).
 if command -v docker >/dev/null 2>&1; then
   run docker pull docker.io/searxng/searxng:latest || echo "SearXNG image not pulled; web search starts once the network is up."
-  run docker pull returntocorp/semgrep:latest || echo "Semgrep image not pulled; code scanning will require network access on first run."
+  run docker pull semgrep/semgrep:latest || echo "Semgrep image not pulled; pre-commit code scanning will require network access on first run."
 fi
 if ! command -v google-chrome >/dev/null 2>&1 && ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1; then
   echo "Note: no Chrome/Chromium found. The Browser connector falls back to plain fetch until one is installed."

@@ -95,6 +95,24 @@ export const MODEL_REGISTRY: ModelProfile[] = [
     providerKind: 'openai_compat',
   },
   {
+    id: 'gpt-oss-20b',
+    match: /gpt[-_. ]?oss[-_: ]?20b/i,
+    displayName: 'GPT-OSS 20B',
+    apiName: 'gpt-oss:20b',
+    family: 'gpt-oss',
+    tokenizer: 'approx',
+    contextWindow: 131_072,
+    practicalBudget: 32_768,
+    strategy: 'hierarchical',
+    modalities: ['text'],
+    sizeClass: 'large',
+    local: true,
+    typicalQ4GiB: 13.8,
+    strengths: ['code', 'hard-reasoning', 'chat', 'long-context'],
+    notes: 'Default non-Qwen local coder (~13.8 GB Q4). 128K context window; uses 32K by default and expands to 64K-128K on repository tasks.',
+    providerKind: 'openai_compat',
+  },
+  {
     id: 'qwen3.6-35b-a3b',
     match: /qwen3\.?6.*35b|qwen3\.?6.*a3b/i,
     displayName: 'Qwen3.6 35B-A3B',
@@ -382,4 +400,26 @@ export function resolveProfile(name: string, hints?: { parameterSize?: string; c
 
 export function catalogProfiles(): ResolvedProfile[] {
   return MODEL_REGISTRY.map((profile) => ({ ...publicProfile(profile), known: true }));
+}
+
+/**
+ * Per-role context budget for local models:
+ * - Default roles: 16K–32K (fast/voice 16K, main/researcher/planner/thinking 24K–32K).
+ * - Coder on repository tasks: 64K–128K (capped to the model's contextWindow).
+ */
+export function roleContextBudget(
+  role: string | undefined,
+  model: { local: boolean; contextWindow: number; practicalBudget: number; sizeClass?: SizeClass },
+  opts: { repoTask?: boolean; extended?: boolean } = {},
+): number {
+  if (!model.local) return Math.min(model.contextWindow, model.practicalBudget);
+  const r = (role || 'main').toLowerCase();
+  if (r === 'coder' && opts.repoTask) {
+    const target = opts.extended ? 131_072 : 65_536;
+    return Math.min(model.contextWindow, Math.max(model.practicalBudget, target));
+  }
+  if (r === 'fast' || r === 'voice' || model.sizeClass === 'small') {
+    return Math.min(model.contextWindow, Math.min(model.practicalBudget, 16_384));
+  }
+  return Math.min(model.contextWindow, Math.max(16_384, Math.min(model.practicalBudget, 32_768)));
 }

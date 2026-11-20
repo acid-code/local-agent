@@ -1,0 +1,29 @@
+[Unit]
+Description=llama-server (exp-coalesced-dflash: Qwen3.6-35B-A3B + DFlash2, ROCm HIP)
+After=network-online.target docker.service ollama.service
+Wants=network-online.target
+# Keep retrying while the memory guard refuses to start (e.g. Ollama still holds a big model).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=acid
+Group=acid
+WorkingDirectory=/opt/llama-server
+Environment=LD_LIBRARY_PATH=/opt/llama-server/bin
+Environment=HSA_OVERRIDE_GFX_VERSION=11.0.0
+Environment=HIP_VISIBLE_DEVICES=0
+EnvironmentFile=-/etc/default/llama-server
+# Refuse to start (instead of freezing the host) if MemAvailable < 26 GiB or another process holds > 14 GiB GTT.
+ExecStartPre=/opt/llama-server/guard.sh
+# Root-only (+): drop port 8080 on LAN/Tailscale in the raw table. Docker bridges and loopback stay open.
+ExecStartPre=+/opt/llama-server/netguard.sh
+ExecStart=/opt/llama-server/run.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=300
+LimitMEMLOCK=infinity
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

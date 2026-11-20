@@ -7,15 +7,65 @@ import type { Settings } from './settings.js';
 
 export interface BackupInfo { id: string; file: string; bytes: number; createdAt: string }
 
-export async function createBackup(dataDir: string): Promise<BackupInfo> {
+export async function createBackup(dataDir: string, prefix = ''): Promise<BackupInfo> {
   fs.mkdirSync(path.join(dataDir, 'backups'), { recursive: true });
-  const id = new Date().toISOString().replace(/[:.]/g, '-');
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const id = prefix ? `${prefix}-${stamp}` : stamp;
   const file = path.join(dataDir, 'backups', `${id}.tar`);
-  const include = ['local-agent.db', 'local-agent.db-wal', 'local-agent.db-shm', 'master.key', 'secrets.env', 'workspaces'].filter((name) => fs.existsSync(path.join(dataDir, name)));
+  const include = ['local-agent.db', 'local-agent.db-wal', 'local-agent.db-shm', 'master.key', 'cookie.secret', 'secrets.env', 'workspaces'].filter((name) => fs.existsSync(path.join(dataDir, name)));
   if (!include.length) throw new Error('Nothing to back up yet.');
   await run('tar', ['-C', dataDir, '-cf', file, ...include]);
   const stat = fs.statSync(file);
   return { id, file, bytes: stat.size, createdAt: new Date().toISOString() };
+}
+
+let lastPreChangeBackupAt = 0;
+
+/** Best-effort automatic backup before a container change or update (throttled to at most once per minute). */
+export async function preChangeBackup(dataDir: string, reason = 'pre-change'): Promise<BackupInfo | null> {
+  if (!fs.existsSync(path.join(dataDir, 'local-agent.db'))) return null;
+  if (Date.now() - lastPreChangeBackupAt < 60_000) return null;
+  lastPreChangeBackupAt = Date.now();
+  try {
+    return await createBackup(dataDir, reason.replace(/[^a-z0-9_-]+/gi, '-'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Refuse to start on an empty data folder when an existing live install is found elsewhere.
+ * Prevents accidentally creating a blank database if DATA_DIR or a Docker volume mount is misconfigured.
+ */
+export async function guardEmptyDataDir(dataDir: string, docker?: DockerCtl): Promise<void> {
+  if (process.env.LA_ALLOW_EMPTY_DATA === '1' || process.env.NODE_ENV === 'test') return;
+  const targetDb = path.join(dataDir, 'local-agent.db');
+  if (fs.existsSync(targetDb)) return;
+  const resolvedTarget = path.resolve(dataDir);
+  const candidates = new Set<string>([
+    '/opt/local-agent/data',
+    ...(process.env.LA_EXISTING_DATA_DIRS ? process.env.LA_EXISTING_DATA_DIRS.split(':').filter(Boolean) : []),
+  ]);
+  for (const dir of candidates) {
+    if (path.resolve(dir) === resolvedTarget) continue;
+    if (fs.existsSync(path.join(dir, 'local-agent.db'))) {
+      throw new Error(
+        `Refusing to start on empty data folder (${resolvedTarget}): found an existing local-agent database at ${path.join(dir, 'local-agent.db')}. ` +
+        `Point DATA_DIR to ${dir}, or set LA_ALLOW_EMPTY_DATA=1 to intentionally start a fresh empty instance.`,
+      );
+    }
+  }
+  if (docker?.available()) {
+    const others = await docker.findExistingDataMounts();
+    const hostSelf = process.env.LA_HOST_DATA_DIR ? path.resolve(process.env.LA_HOST_DATA_DIR) : resolvedTarget;
+    const conflict = others.find((item) => path.resolve(item.source) !== hostSelf);
+    if (conflict) {
+      throw new Error(
+        `Refusing to start on empty data folder (${resolvedTarget}): another local-agent container (${conflict.container}, project ${conflict.project}) already uses data at ${conflict.source}. ` +
+        `Reuse that install's data directory, or set LA_ALLOW_EMPTY_DATA=1 to intentionally start a fresh empty instance.`,
+      );
+    }
+  }
 }
 
 export function listBackups(dataDir: string): BackupInfo[] {

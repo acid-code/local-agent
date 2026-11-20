@@ -8,7 +8,25 @@ import { falseSuccess } from './monitor.js';
  */
 export const MAX_RECOVERY_ROUNDS = 2;
 
-export const HONESTY_RULE = '\n\nTool errors: if a tool returns an error, that step did not happen. Fix the cause and retry once, try another tool, or tell the user plainly what failed and what they can do. Never say a step succeeded unless a tool result shows it.';
+export const HONESTY_RULE = '\n\nTool errors & self-check: if a tool returns an error, that step did not happen — fix the cause and retry, try another tool, or report plainly what failed. Never claim you cannot do something when you have a tool for it (such as make_slides for .pptx, read_image_text for OCR, generate_image for images, web_search for web lookup, or propose_skill/run_skill_script for reusable skills & tools). Before finalizing any non-trivial answer, double-check your own work, verify outputs, and loop to fix any gaps.';
+
+const CAPABILITY_CHECKS: { tool: string; label: string; deny: RegExp }[] = [
+  { tool: 'make_slides', label: 'make_slides (creates real .pptx files with optional generated images)', deny: /(?:can(?:'t|not)|unable to|❌[^.\n]*)\s*(?:directly\s+)?(?:create|generate|make|build|export|produce)\s+(?:a\s+)?(?:\.pptx|pptx|powerpoint|slide\s*deck)/i },
+  { tool: 'read_image_text', label: 'read_image_text (runs OCR on images)', deny: /(?:can(?:'t|not)|unable to|❌[^.\n]*)\s*(?:run\s+ocr|read\s+text\s+from\s+images|extract\s+text\s+from\s+images|perform\s+ocr)/i },
+  { tool: 'understand_image', label: 'understand_image (analyzes scenes, colors/shades/hexes, charts/numbers, and visual details in images)', deny: /(?:can(?:'t|not)|unable to|❌[^.\n]*)\s*(?:see|view|inspect|analyze|describe|understand)\s+(?:the\s+)?(?:images?|photos?|pictures?|screenshots?)/i },
+  { tool: 'generate_image', label: 'generate_image (generates images locally)', deny: /(?:can(?:'t|not)|unable to|❌[^.\n]*)\s*(?:directly\s+)?(?:create|generate|make|render)\s+(?:an?\s+)?images?\b/i },
+  { tool: 'web_search', label: 'web_search (searches the web via SearXNG)', deny: /(?:can(?:'t|not)|unable to|do not have access to|❌[^.\n]*)\s*(?:browse|search)\s+the\s+(?:web|internet)/i },
+];
+
+/** Catches drafts where the model falsely claims it lacks a built-in tool that is actively attached right now. */
+export function falseInability(reply: string, availableTools: string[]): { tool: string; label: string } | null {
+  if (!availableTools.length || !reply.trim()) return null;
+  const set = new Set(availableTools);
+  for (const check of CAPABILITY_CHECKS) {
+    if (set.has(check.tool) && check.deny.test(reply)) return { tool: check.tool, label: check.label };
+  }
+  return null;
+}
 
 /** A short, error-specific route the model can take next. Appended to the tool's error result. */
 export function recoveryHint(tool: string, error: string): string {
@@ -25,7 +43,15 @@ export function recoveryHint(tool: string, error: string): string {
 }
 
 /** Checks a final reply. `retry` means send it back to the model with `note`; `footer` means append it to the reply. */
-export function checkFinalReply(steps: StepRow[], reply: string, rounds: number, turnsLeft: number, hebrew = false): { action: 'ok' } | { action: 'retry'; note: string; reason: string } | { action: 'footer'; footer: string; reason: string } {
+export function checkFinalReply(steps: StepRow[], reply: string, rounds: number, turnsLeft: number, hebrew = false, availableTools: string[] = []): { action: 'ok' } | { action: 'retry'; note: string; reason: string } | { action: 'footer'; footer: string; reason: string } {
+  const missed = falseInability(reply, availableTools);
+  if (missed && rounds < MAX_RECOVERY_ROUNDS && turnsLeft > 1) {
+    return {
+      action: 'retry',
+      reason: `Claimed inability despite having ${missed.tool}`,
+      note: `\n\nCAPABILITY SELF-CHECK: Your last draft claimed you cannot do this, but you DO have the tool ${missed.label} available right now! Call ${missed.tool} immediately and deliver the real result instead of refusing.`,
+    };
+  }
   const verdict = falseSuccess(steps, reply, 'completed');
   if (!verdict.flagged) return { action: 'ok' };
   const failed = steps.filter((step) => verdict.failedTools.includes(step.name) && (step.status === 'failed' || step.error));

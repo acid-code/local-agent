@@ -10,12 +10,14 @@ import {
   likelyNeedsTools,
   nextAutoTier,
   planContext,
+  roleContextBudget,
   shrinkBudget,
   quotaAvailability,
   readChatCommand,
   summaryTriggerFor,
   type AutoCandidate,
   type ChatMessage,
+  type ContextBreakdown,
   type RouteCandidate,
   type RouteDecision,
   type RunCursor,
@@ -36,17 +38,17 @@ import { formatCitations, searchKnowledge } from './kb.js';
 import { kbSearchTool, loadSkillTool, toolsFor, type Tool, type ToolContext } from './tools.js';
 import { runSkillScript, skillCatalog } from './skills.js';
 import { getWorkshop, workshopBrief } from './workshops.js';
-import { chatWorkspaceBrief, chatWorkspacePaths } from './chat-workspaces.js';
+import { chatWorkspaceBrief, chatWorkspacePaths, getChatWorkspaces, setChatWorkspaces } from './chat-workspaces.js';
 import { checkOrRepair, contractForAgent, pickAutoRole, toolArgumentsSchema, toolParameters } from './contracts.js';
 import { addProjectNote, changesSince, ensureTaskBranch, isSmallEdit, listSharedRepos, matchRepos, refreshRepo, releaseRepoLocks, repoSyncTool, sharedRepoBrief, taskBranchName, tryLockRepo, type GitIdentity } from './repos.js';
-import { isMissingModelError, isToolUnsupportedError, ollamaCapabilities } from './ollama.js';
+import { isMissingModelError, isToolUnsupportedError, ollamaCapabilities, ollamaRoot } from './ollama.js';
 import { scanMachine } from './discovery.js';
 import { CrashError, InterruptedToolError, StopError, clampText, now } from './util.js';
 import type { Vault } from './vault.js';
 import { cleanupHebrew } from './hebrew-cleanup.js';
 import { LONG_TASK_STEPS, MAX_TASK_ROUNDS, TASKS_HINT, openTasks, tasksNote, tasksTool } from './tasks.js';
 import { HONESTY_RULE, checkFinalReply, recoveryHint } from './recovery.js';
-import { ocrTool, type OcrMode, type OcrResult } from './ocr.js';
+import { ocrTool, understandImageTool, type ImageAnalysisResult, type OcrMode, type OcrResult } from './ocr.js';
 import { getLanguage, languageHint, replyLanguage, wantsCleanup } from './language.js';
 import { CITE_HINT, findContextTool, shareFileTool } from './files.js';
 import { generateImage, imageTool, localStatus } from './images.js';
@@ -60,9 +62,12 @@ import { GALLERY } from './gallery.js';
 import { disabledRules } from './rules.js';
 import { CONNECTOR_TOOLS, disabledConnectorTools } from './connectors.js';
 import { memoryBrief, memoryFileTool, projectRules, proposeSkillTool, searchChatsTool, skillNudge } from './learning.js';
+import { LlamaWatch, isLlamaServerProvider, isOllamaProvider } from './coexist.js';
 
 export class Engine {
   private readonly inflight = new Map<string, { abort: AbortController; paused: boolean; resumePause: () => void }>();
+  private readonly liveStreams = new Map<string, { text: string; thinking: string; status: string; detail?: string; waitInfo?: unknown }>();
+  private readonly lastContext = new Map<string, ContextBreakdown>();
   private readonly approvalWaiters = new Map<string, (status: 'approved' | 'denied') => void>();
   private readonly secretWaiters = new Map<string, (status: 'provided' | 'denied') => void>();
   private readonly heldLarge = new Map<string, string>();
@@ -71,6 +76,8 @@ export class Engine {
   extraTools: Tool[] = [];
   /** Set by the routes once OCR is wired: reads an image file for the read_image_text tool. */
   ocrReader: ((fileId: string, mode: OcrMode, ownerId: string) => Promise<OcrResult>) | null = null;
+  /** Set by the routes once OCR/Vision is wired: full scene/color/chart/text understanding for understand_image. */
+  imageAnalyzer: ((fileId: string, question: string | undefined, ownerId: string) => Promise<ImageAnalysisResult>) | null = null;
   /** Tools from installed MCP servers (owner personas only). */
   mcpTools: () => McpAgentTool[] = () => [];
   libraryDir = '';
@@ -88,7 +95,10 @@ export class Engine {
     private readonly providerOverride?: (model: ModelRow) => ModelProvider,
   ) {
     this.autonomy = new Autonomy(store, bus, vault, (input) => this.startTurn(input), (runId) => this.stop(runId), () => this.libraryDir);
+    this.llama = new LlamaWatch(store, fetchImpl);
   }
+  /** llama-server ↔ Ollama GPU coexistence (see coexist.ts). */
+  readonly llama: LlamaWatch;
   /** Timers/triggers an agent manages itself, and background helpers. */
   readonly autonomy: Autonomy;
 
@@ -191,6 +201,7 @@ export class Engine {
       this.inflight.delete(runId);
       // The store can already be closed when the app shuts down mid-run.
       try {
+        this.liveStreams.delete(runId);
         releaseRepoLocks(this.store, runId);
         const ended = this.store.getRun(runId);
         this.bus.publish({ type: 'done', runId, run: ended });
@@ -198,6 +209,185 @@ export class Engine {
         if (ended?.cursor.helperId && ['completed', 'failed', 'stopped', 'interrupted', 'cancelled'].includes(ended.status)) this.autonomy.deliver(ended);
       } catch { /* shutting down */ }
     }
+  }
+
+  /** Current in-progress streaming text/thinking/status for a live run (used when switching chats or reconnecting SSE). */
+  getLiveStream(runId: string) {
+    return this.liveStreams.get(runId) ?? null;
+  }
+
+  /** Force a run waiting on the RAM admission queue to proceed immediately. */
+  forceRun(runId: string) {
+    const forced = this.memory ? this.memory.forceAdmit(runId) : false;
+    if (forced) {
+      const live = this.liveStreams.get(runId);
+      if (live) { live.status = 'running'; live.detail = undefined; live.waitInfo = undefined; }
+      this.bus.publish({ type: 'status', runId, status: 'running' });
+    }
+    return { forced, run: this.store.getRun(runId) };
+  }
+
+  /** Latest context breakdown for a session, or a quick live estimate when opening an idle chat. */
+  getSessionContextBreakdown(sessionId: string): ContextBreakdown | null {
+    const cached = this.lastContext.get(sessionId);
+    if (cached) return cached;
+    const session = this.store.getSession(sessionId);
+    if (!session) return null;
+    const agent = session.agentId ? this.store.getAgent(session.agentId) : null;
+    const settings = this.store.getSettings();
+    const model = (session.modelPin && this.store.getModel(session.modelPin))
+      || (session.activeModelId && this.store.getModel(session.activeModelId))
+      || (agent?.modelId && this.store.getModel(agent.modelId))
+      || (this.llama.isActive() ? this.llama.model() : undefined)
+      || this.store.listModels().find((m) => m.enabled && m.local && m.sizeClass === 'large' && m.providerId !== 'prov_rehearsal')
+      || this.store.listModels().find((m) => m.enabled && m.local && m.providerId !== 'prov_rehearsal')
+      || this.store.listModels().find((m) => m.enabled);
+    if (!model) return null;
+    const role = agent ? (contractForAgent(agent.name)?.modelRole || 'main') : 'main';
+    const repoTask = session.mode === 'code' || Boolean(session.workshopId);
+    const budget = roleContextBudget(role, model, { repoTask });
+    const messages = this.store.listMessages(sessionId);
+    const notes = agent?.memoryEnabled ? this.store.listNotes(agent.id) : [];
+    const memoryNote = agent?.memoryEnabled ? memoryBrief(this.store, agent.id) : '';
+    const summaries = this.store.listSummaries(sessionId).map((s) => ({ id: s.id, level: s.level, content: s.content, covers: s.covers, foldedInto: s.foldedInto }));
+    const tools = agent ? this.tools(agent, session.mode, undefined, undefined, false) : [];
+    const tok = (model.tokenizer || 'approx') as 'gemma4';
+    const toolToks = tools.length ? estimateTokens(JSON.stringify(tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }))), tok) : 0;
+    const baseSys = agent?.systemPrompt || '';
+    const plan = planContext({
+      strategy: agent?.strategy || model.strategy,
+      contextWindow: model.contextWindow,
+      practicalBudget: budget,
+      outputReserve: settings.outputReserveTokens,
+      system: `${baseSys}${memoryNote}`,
+      pinned: notes.filter((n) => n.pinned).map((n) => n.content),
+      summaries,
+      retrieved: [],
+      tokenizer: tok,
+      messages: this.uncoveredMessages(messages, summaries).map((m) => ({ id: m.id, role: m.role as 'user', content: m.content })),
+      breakdownHints: {
+        systemPrompt: estimateTokens(baseSys, tok),
+        personaAndTools: toolToks,
+        memory: estimateTokens(memoryNote, tok),
+        files: 0,
+      },
+    });
+    return plan.breakdown;
+  }
+
+  /** Skip older messages already covered by an active Level-2 summary (always keeping the latest 4 messages). */
+  private uncoveredMessages<T extends { id: string }>(messages: T[], summaries: { level: number; covers: string[]; foldedInto: string | null }[]): T[] {
+    const activeCovers = new Set(summaries.filter((s) => s.level === 2 && !s.foldedInto).flatMap((s) => s.covers));
+    if (!activeCovers.size || messages.length <= 4) return messages;
+    const tailStart = Math.max(0, messages.length - 4);
+    return messages.filter((m, idx) => idx >= tailStart || !activeCovers.has(m.id));
+  }
+
+  /**
+   * Compact older turns in a chat into a single structured summary right away.
+   * Frees context without starting a new chat and falls back deterministically if the model is busy.
+   */
+  async compactSession(sessionId: string): Promise<{ summary: string; compactedMessages: number; breakdown: ContextBreakdown | null }> {
+    const session = this.store.getSession(sessionId);
+    if (!session) throw new Error('Chat not found.');
+    const messages = this.store.listMessages(sessionId);
+    const keepTail = 4;
+    const older = messages.length > keepTail ? messages.slice(0, messages.length - keepTail) : messages;
+    if (!older.length) {
+      return { summary: '', compactedMessages: 0, breakdown: this.getSessionContextBreakdown(sessionId) };
+    }
+    const existing = this.store.listSummaries(sessionId);
+    const model = (session.activeModelId && this.store.getModel(session.activeModelId))
+      || (this.llama.isActive() ? this.llama.model() : undefined)
+      || this.store.listModels().find((m) => m.enabled && m.local && m.providerId !== 'prov_rehearsal')
+      || this.store.listModels().find((m) => m.enabled);
+    const prevRoot = [...existing].reverse().find((s) => s.level === 2)?.content || '';
+    const transcript = older
+      .map((m) => `${m.role}${m.toolName ? `(${m.toolName})` : ''}: ${m.content.replace(/\s+/g, ' ').slice(0, 600)}`)
+      .join('\n')
+      .slice(-14_000);
+    const prompt = `Compact this conversation into a dense handoff summary (under 250 words) with bullet sections: Goal, Decisions, Files & Repos, Open Next Steps.\n\n${prevRoot ? `Previous summary:\n${prevRoot}\n\n` : ''}Transcript:\n${transcript}`;
+    const generated = model ? await this.trySummarize(model, prompt) : null;
+    const summary = generated || this.fallbackSummary(older, prevRoot);
+    const version = Math.max(0, ...existing.map((s) => s.version)) + 1;
+    const created = this.store.addSummary({
+      sessionId,
+      level: 2,
+      version,
+      content: summary,
+      covers: older.map((m) => m.id),
+      foldedInto: null,
+      tokenEstimate: estimateTokens(summary, (model?.tokenizer as 'approx') || 'approx'),
+    });
+    const open = existing.filter((s) => !s.foldedInto).map((s) => s.id);
+    if (open.length) this.store.markSummariesFolded(open, created.id);
+    this.lastContext.delete(sessionId);
+    const breakdown = this.getSessionContextBreakdown(sessionId);
+    return { summary, compactedMessages: older.length, breakdown };
+  }
+
+  /**
+   * Hand off a full chat into a brand-new chat with the same persona, mode, and attached workspaces,
+   * seeded with a concise structured brief so work continues smoothly at ~5% context.
+   */
+  async handoffSession(sessionId: string): Promise<{ session: ReturnType<Store['createSession']>; summary: string }> {
+    const source = this.store.getSession(sessionId);
+    if (!source) throw new Error('Chat not found.');
+    const messages = this.store.listMessages(sessionId);
+    const existing = this.store.listSummaries(sessionId);
+    const prevRoot = [...existing].reverse().find((s) => s.level === 2)?.content || '';
+    const model = (source.activeModelId && this.store.getModel(source.activeModelId))
+      || (this.llama.isActive() ? this.llama.model() : undefined)
+      || this.store.listModels().find((m) => m.enabled && m.local && m.providerId !== 'prov_rehearsal')
+      || this.store.listModels().find((m) => m.enabled);
+    const transcript = messages
+      .map((m) => `${m.role}${m.toolName ? `(${m.toolName})` : ''}: ${m.content.replace(/\s+/g, ' ').slice(0, 700)}`)
+      .join('\n')
+      .slice(-16_000);
+    const prompt = `Write a concise continuation brief (under 300 words) so a fresh chat can pick up this work immediately without losing context. Use sections: **Goal**, **Completed**, **Files & Repos**, **Key Decisions**, **Next Steps**.\n\n${prevRoot ? `Earlier summary:\n${prevRoot}\n\n` : ''}Recent messages:\n${transcript}`;
+    const generated = model && messages.length ? await this.trySummarize(model, prompt) : null;
+    const summary = generated || this.fallbackSummary(messages, prevRoot);
+    const baseTitle = (source.title || 'Chat').replace(/\s*\(cont\.\d*\)$/i, '').slice(0, 60);
+    const fresh = this.store.createSession({
+      agentId: source.agentId,
+      roomId: source.roomId,
+      title: `${baseTitle} (cont.)`,
+      ownerId: source.ownerId,
+    });
+    this.store.updateSession(fresh.id, {
+      mode: source.mode,
+      workshopId: source.workshopId,
+      modelPin: source.modelPin,
+      activeModelId: source.activeModelId,
+    });
+    const workspaces = getChatWorkspaces(this.store, source.id);
+    if (workspaces.length) setChatWorkspaces(this.store, fresh.id, workspaces);
+    if (summary) {
+      this.store.insertMessage({
+        sessionId: fresh.id,
+        role: 'assistant',
+        content: `### Continued from previous chat\n\n${summary}\n\nReady to continue whenever you are.`,
+        toolCalls: null,
+        agentId: source.agentId,
+        runId: null,
+        toolCallId: null,
+        toolName: null,
+        imageUrl: null,
+        routingNote: 'Context handoff',
+      });
+    }
+    return { session: this.store.getSession(fresh.id)!, summary };
+  }
+
+  private fallbackSummary(messages: { role: string; content: string; toolName?: string | null }[], prevRoot: string): string {
+    const userLines = messages.filter((m) => m.role === 'user').slice(-6).map((m) => `- ${m.content.replace(/\s+/g, ' ').trim().slice(0, 160)}`);
+    const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant' && m.content.trim());
+    const parts = [
+      prevRoot ? prevRoot.slice(0, 900) : '',
+      userLines.length ? `**Recent requests:**\n${userLines.join('\n')}` : '',
+      lastAssistant ? `**Last status:** ${lastAssistant.content.replace(/\s+/g, ' ').trim().slice(0, 320)}` : '',
+    ].filter(Boolean);
+    return parts.join('\n\n') || 'Previous conversation compacted.';
   }
 
   /** True while a run on this chat is in flight in this process. */
@@ -392,10 +582,14 @@ export class Engine {
     this.checkpoint(run.id, cursor, 'Context ready');
   }
 
-  /** Model turns allowed: more for code, staged work and long tasks with a task list; helpers keep their own lower cap. */
+  /** Model turns allowed: generous locally so agents can loop, test, and double-check their own work. */
   private stepCap(cursor: RunCursor, sessionMode?: string) {
     const settings = this.store.getSettings();
-    const base = cursor.longTask ? Math.max(settings.maxSteps, LONG_TASK_STEPS) : sessionMode === 'code' || cursor.stage ? Math.max(settings.maxSteps, 24) : settings.maxSteps;
+    const base = cursor.longTask
+      ? Math.max(settings.maxSteps, LONG_TASK_STEPS, 36)
+      : sessionMode === 'code' || cursor.stage
+        ? Math.max(settings.maxSteps, 32)
+        : Math.max(settings.maxSteps, 24);
     return cursor.maxSteps ? Math.min(cursor.maxSteps, base) : base;
   }
 
@@ -440,11 +634,24 @@ export class Engine {
       built = await this.buildMessages(current, agent, model);
       this.bus.publish({ type: 'quota', runId: run.id, exhausted: true });
     }
+    const coexist = this.llama.blocks(model, this.store.getProvider(model.providerId) ?? undefined) ? this.llama.model() : undefined;
+    if (coexist) {
+      const reason = `Using ${coexist.name} on llama-server: ${model.name} is too big to load in Ollama while llama-server holds the GPU.`;
+      this.store.addLog('warn', reason, undefined, 'router');
+      this.store.updateRun(run.id, { cursor: { ...current.cursor, modelId: coexist.id, phase: 'model', switched: true, routingReason: reason }, modelId: coexist.id, switched: true, routingNote: reason });
+      return;
+    }
     const provider = this.provider(model);
     const toolless = Boolean(current.cursor.noTools) || this.toolSupportOf(model) === false;
     const tools = toolless ? [] : this.tools(agent, this.store.getSession(run.sessionId)?.mode, current.cursor.stage, current.cursor.toolSubset, Boolean(current.cursor.helperId)).map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
-    let numCtx = model.local ? ollamaNumCtx(current.cursor.budgetOverride || model.practicalBudget, settings.outputReserveTokens, model.contextWindow) : undefined;
-    const admitted = model.local && numCtx ? await this.admitLocal(current, model, numCtx, signal) : { lease: null, numCtx };
+    const sessionForCtx = this.store.getSession(run.sessionId);
+    const repoTask = Boolean(sessionForCtx?.mode === 'code' || sessionForCtx?.workshopId || current.cursor.stage || turnRoots(this.store, current, this.libraryDir).length > 0);
+    const roleForCtx = current.cursor.autoRole || contractForAgent(agent.name)?.modelRole || 'main';
+    const roleBudget = roleContextBudget(roleForCtx, model, { repoTask });
+    let numCtx = model.local ? ollamaNumCtx(current.cursor.budgetOverride || roleBudget, settings.outputReserveTokens, model.contextWindow) : undefined;
+    // llama-server and other external servers keep their model loaded themselves: no RAM admission, no Ollama load.
+    const viaOllama = this.viaOllama(model);
+    const admitted = model.local && numCtx && viaOllama ? await this.admitLocal(current, model, numCtx, signal) : { lease: null, numCtx };
     if ('switchTo' in admitted) {
       this.store.addLog('warn', admitted.reason, undefined, 'router');
       this.store.updateRun(run.id, { cursor: { ...current.cursor, modelId: admitted.switchTo.id, phase: 'model', switched: true, routingReason: admitted.reason }, modelId: admitted.switchTo.id, switched: true, routingNote: admitted.reason });
@@ -452,20 +659,27 @@ export class Engine {
     }
     const lease = admitted.lease;
     numCtx = admitted.numCtx;
-    if (model.local && model.sizeClass === 'large') {
+    if (model.local && model.sizeClass === 'large' && viaOllama) {
       await this.waitForLarge(run.id, model.name);
       await this.loadLarge(run.id, model);
+    } else if (model.local && model.sizeClass === 'large' && this.residentLarge.length) {
+      // Switching to llama-server: free whatever big model Ollama still holds.
+      const others = this.residentLarge.filter((name) => name !== model.name && name !== model.apiName);
+      if (others.length) await this.unload(others);
+      this.residentLarge = [];
     }
     const step = this.store.addStep({
-      runId: run.id, kind: 'model', name: model.name, status: 'running', input: { turn: current.cursor.turn, budget: built.plan.budgetTokens, estimated: built.plan.estimatedTokens, notes: built.plan.notes },
+      runId: run.id, kind: 'model', name: model.name, status: 'running', input: { turn: current.cursor.turn, budget: built.plan.budgetTokens, estimated: built.plan.estimatedTokens, notes: built.plan.notes, breakdown: built.plan.breakdown },
       output: null, toolCallId: null, turn: current.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now(),
     });
     this.bus.publish({ type: 'step', runId: run.id, step });
     const started = Date.now();
     let text = '';
     let reasoningText = '';
+    this.liveStreams.set(run.id, { text: '', thinking: '', status: 'running' });
     let toolCalls: ToolCall[] | undefined;
     let usage = { inputTokens: built.plan.estimatedTokens, outputTokens: 0 };
+    let telemetry: import('./providers.js').Telemetry | undefined;
     try {
       for await (const event of provider.complete({
         model: model.apiName, messages: built.messages, tools, signal,
@@ -478,13 +692,18 @@ export class Engine {
         if (signal.aborted) throw new StopError();
         if (event.type === 'token') {
           text += event.text;
+          const live = this.liveStreams.get(run.id);
+          if (live) live.text = text;
           this.bus.publish({ type: 'token', runId: run.id, text: event.text });
         } else if (event.type === 'thinking') {
           reasoningText += event.text;
+          const live = this.liveStreams.get(run.id);
+          if (live) live.thinking = reasoningText;
           this.bus.publish({ type: 'thinking', runId: run.id, text: event.text });
         } else {
           toolCalls = event.toolCalls;
           if (event.usage) usage = event.usage;
+          if (event.telemetry) telemetry = event.telemetry;
         }
       }
       if (lease) await this.calibrateLease(lease, model.apiName, numCtx);
@@ -524,8 +743,9 @@ export class Engine {
       }
       if (isContextOverflowError(message) && !current.cursor.budgetOverride) {
         const shrunk = shrinkBudget(model.practicalBudget);
-        this.store.addLog('warn', `Context overflow from ${model.name}. Retrying at ${shrunk} tokens.`, undefined, 'context');
+        this.store.addLog('warn', `Context overflow from ${model.name}. Compacting chat and retrying at ${shrunk} tokens.`, undefined, 'context');
         this.store.updateStep(step.id, { status: 'failed', error: message, endedAt: now(), latencyMs: Date.now() - started });
+        await this.compactSession(run.sessionId).catch(() => null);
         current = this.store.updateRun(run.id, { cursor: { ...current.cursor, budgetOverride: shrunk, phase: 'model' } })!;
         return;
       }
@@ -569,9 +789,38 @@ export class Engine {
     const cost = ((usage.inputTokens * (model.priceIn ?? 0)) + (usage.outputTokens * (model.priceOut ?? 0))) / 1_000_000;
     const note = [current.cursor.switched ? current.cursor.routingReason : '', built.cutNote].filter(Boolean).join(' ') || null;
     text = this.vault.redact(text);
+    // Researcher persona: automatically enforce web_search on turn 0 when answering a substantive question without having searched yet.
+    const speakerContract = contractForAgent(agent.name);
+    const isResearcher = speakerContract?.slug === 'researcher' || agent.templateId === 'researcher';
+    if (!toolCalls?.length && text.trim() && isResearcher && !current.cursor.researchRetried && tools.some((t) => t.name === 'web_search')) {
+      const userPrompt = this.userText(run).trim();
+      const trivial = userPrompt.length < 12 || /^(hi|hello|hey|thanks|thank you|ok|okay|שלום|היי|תודה)[!.\s?]*$/i.test(userPrompt);
+      const alreadySearched = this.store.listSteps(run.id).some((s) => s.kind === 'tool' && (s.name === 'web_search' || s.name === 'web_fetch' || s.name === 'browse' || s.name === 'kb_search'));
+      if (!trivial && !alreadySearched && maxSteps - current.cursor.turn > 1) {
+        this.store.updateStep(step.id, { status: 'completed', output: { text, discarded: 'researcher must search first' }, tokensIn: usage.inputTokens, tokensOut: usage.outputTokens, costUsd: cost, latencyMs: Date.now() - started, endedAt: now() });
+        this.store.addStep({ runId: run.id, kind: 'contract', name: 'auto-search', status: 'completed', input: { turn: current.cursor.turn }, output: 'Prompted Researcher to call web_search before answering.', toolCallId: null, turn: current.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now() });
+        const fresh = this.store.getRun(run.id)!;
+        this.store.updateRun(run.id, {
+          cursor: {
+            ...current.cursor,
+            phase: 'model',
+            turn: current.cursor.turn + 1,
+            researchRetried: true,
+            recovery: {
+              rounds: current.cursor.recovery?.rounds ?? 0,
+              note: '\n\nRESEARCHER REQUIREMENT: You answered without calling web_search. Call web_search right now with a focused query to verify current facts and gather sources before writing your final answer.',
+            },
+          },
+          inputTokens: fresh.inputTokens + usage.inputTokens,
+          outputTokens: fresh.outputTokens + usage.outputTokens,
+          costUsd: fresh.costUsd + cost,
+        });
+        return;
+      }
+    }
     if (!toolCalls?.length && text.trim()) {
       const rounds = current.cursor.recovery?.rounds ?? 0;
-      const check = checkFinalReply(this.store.listSteps(run.id), text, rounds, maxSteps - current.cursor.turn, this.replyLang(agent, this.userText(run)) === 'he');
+      const check = checkFinalReply(this.store.listSteps(run.id), text, rounds, maxSteps - current.cursor.turn, this.replyLang(agent, this.userText(run)) === 'he', tools.map((t) => t.name));
       if (check.action === 'retry') {
         this.store.updateStep(step.id, { status: 'completed', output: { text, discarded: check.reason }, tokensIn: usage.inputTokens, tokensOut: usage.outputTokens, costUsd: cost, latencyMs: Date.now() - started, endedAt: now() });
         this.store.addStep({ runId: run.id, kind: 'contract', name: 'verify', status: 'completed', input: { round: rounds + 1 }, output: `Sent back: ${check.reason}`, toolCallId: null, turn: current.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now() });
@@ -596,14 +845,26 @@ export class Engine {
       }
       text = await this.polishHebrew(run, agent, model, text);
     }
+    const elapsedSec = Math.max(0.1, (Date.now() - started) / 1000);
+    if (!telemetry && usage.outputTokens > 0 && model.local && model.profileId !== 'rehearsal') {
+      telemetry = { tokPerSec: Math.round((usage.outputTokens / elapsedSec) * 10) / 10 };
+    }
+    const perfParts: string[] = [];
+    if (telemetry?.tokPerSec) perfParts.push(`${telemetry.tokPerSec} tok/s`);
+    if (typeof telemetry?.cacheHitPct === 'number') perfParts.push(`${telemetry.cacheHitPct}% cache`);
+    const perfTag = !toolCalls?.length && perfParts.length ? perfParts.join(' · ') : '';
+    const finalNote = [note, perfTag].filter(Boolean).join(' · ') || null;
     const assistant = this.store.insertMessage({
       sessionId: run.sessionId, role: 'assistant', content: text, toolCalls: toolCalls?.length ? toolCalls : null,
-      agentId: agent.id, runId: run.id, toolCallId: null, toolName: null, imageUrl: null, routingNote: note,
+      agentId: agent.id, runId: run.id, toolCallId: null, toolName: null, imageUrl: null, routingNote: finalNote,
+      thinking: reasoningText.trim() || null,
     });
+    const live = this.liveStreams.get(run.id);
+    if (live) { live.text = ''; live.thinking = ''; }
     const cursor: RunCursor = toolCalls?.length
       ? { ...current.cursor, phase: 'tools', toolCalls, completedToolIds: [], approvalId: undefined }
       : { ...current.cursor, phase: 'summarize', toolCalls: undefined };
-    this.store.updateStep(step.id, { status: 'completed', output: { text, toolCalls, ...(reasoningText ? { reasoning: reasoningText.slice(0, 4000) } : {}) }, tokensIn: usage.inputTokens, tokensOut: usage.outputTokens, costUsd: cost, latencyMs: Date.now() - started, endedAt: now() });
+    this.store.updateStep(step.id, { status: 'completed', output: { text, toolCalls, ...(telemetry ? { telemetry } : {}), ...(reasoningText ? { reasoning: reasoningText.slice(0, 4000) } : {}) }, tokensIn: usage.inputTokens, tokensOut: usage.outputTokens, costUsd: cost, latencyMs: Date.now() - started, endedAt: now() });
     const fresh = this.store.getRun(run.id)!;
     this.store.updateRun(run.id, {
       cursor,
@@ -612,7 +873,7 @@ export class Engine {
       costUsd: fresh.costUsd + cost,
     });
     this.checkpoint(run.id, cursor, toolCalls?.length ? 'Model requested tools' : 'Model answered');
-    this.bus.publish({ type: 'message', runId: run.id, message: assistant });
+    this.bus.publish({ type: 'message', runId: run.id, message: assistant, ...(telemetry ? { telemetry } : {}) });
   }
 
   private async stepTools(run: RunRow, signal: AbortSignal) {
@@ -880,6 +1141,8 @@ export class Engine {
       const provider = providers.get(model.providerId);
       if (!provider?.enabled) return [];
       if (localOnly && !model.local) return [];
+      // While llama-server holds ~22 GiB of GTT, big Ollama models are off the table (host freeze otherwise).
+      if (this.llama.blocks(model, provider)) return [];
       // Gemini without a key is off, not out of quota.
       if (provider.kind === 'gemini' && !this.providerOverride && !process.env[provider.apiKeyEnv || 'GEMINI_API_KEY']) return [];
       let quotaOpen: boolean | undefined;
@@ -923,8 +1186,10 @@ export class Engine {
     const user = (run.cursor.userMessageId && messages.find((message) => message.id === run.cursor.userMessageId))
       || [...messages].reverse().find((message) => message.role === 'user');
     const retrieved = strategy === 'retrieval' || strategy === 'hierarchical+retrieval' ? retrieve(this.store, this.vectors, run.sessionId, user?.content ?? '', 4) : [];
-    let budget = Math.min(model.contextWindow, model.practicalBudget);
     const session = this.store.getSession(run.sessionId);
+    const repoTask = Boolean(session?.mode === 'code' || session?.workshopId || run.cursor.stage || turnRoots(this.store, run, this.libraryDir).length > 0);
+    const roleForBudget = run.cursor.autoRole || contractForAgent(agent.name)?.modelRole || 'main';
+    let budget = roleContextBudget(roleForBudget, model, { repoTask });
     const workshopNote = session?.workshopId ? workshopBrief(this.store, session.workshopId) : '';
     // Exactly this chat's attached workspaces: names, paths, branch, recent changes.
     const chatWorkspaces = session ? await chatWorkspaceBrief(this.store, run.sessionId, session.ownerId || OWNER_ID).catch(() => '') : '';
@@ -941,11 +1206,44 @@ export class Engine {
     // Hermes-style context: capped memory files, the project's own rule files, and a nudge to save a skill after hard tasks.
     const memoryNote = agent.memoryEnabled ? memoryBrief(this.store, agent.id) : '';
     const rulesNote = session ? projectRules(chatWorkspacePaths(this.store, run.sessionId, session.ownerId || OWNER_ID), disabledRules(this.store, run.sessionId)) : '';
-    const toolNames = this.tools(agent, session?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId)).map((tool) => tool.name);
+    const offeredTools = this.tools(agent, session?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId));
+    const toolNames = offeredTools.map((tool) => tool.name);
     const nudge = run.cursor.helperId ? '' : skillNudge(run.cursor.turn, toolNames);
     const languageNote = languageHint(this.replyLang(agent, user?.content ?? ''));
     const recoveryNote = run.cursor.recovery?.note ?? '';
-    const system = `${agent.systemPrompt}${sharedRepoBrief(this.store)}${chatWorkspaces}${rulesNote}${memoryNote}${stageNote}${roleNote}${kbHint}${CITE_HINT}${HONESTY_RULE}${run.cursor.helperId ? '' : TASKS_HINT}${nudge}${languageNote}${recoveryNote}`;
+    // Persona awareness: let each persona know what teammates exist for consult_agent / spawn_agent.
+    const teammates = this.store.listAgents(agent.ownerId || OWNER_ID).filter((a) => a.id !== agent.id && !a.hidden);
+    const teamNote = [
+      teammates.length && (toolNames.includes('consult_agent') || toolNames.includes('spawn_agent'))
+        ? `\n\nAvailable teammates you can consult or delegate to: ${teammates.slice(0, 12).map((t) => `${t.name}${t.title ? ` (${t.title})` : ''}`).join(', ')}.`
+        : '',
+      toolNames.includes('spawn_agent') && !run.cursor.helperId
+        ? '\n\nMini-agents: for smaller side missions on the same workspace (scanning files, checking logs, summarizing code, running quick checks), call spawn_agent (defaults to tier="fast" on a lightweight parallel model so it runs concurrently without blocking you) and collect results with helpers({action:"wait"}).'
+        : '',
+      (() => {
+        const caps: string[] = [];
+        if (toolNames.includes('make_slides')) caps.push('make_slides (generate real .pptx PowerPoint files, with optional generated images)');
+        if (toolNames.includes('read_slides')) caps.push('read_slides (inspect .pptx decks)');
+        if (toolNames.includes('read_image_text')) caps.push('read_image_text (run local OCR on images/screenshots)');
+        if (toolNames.includes('understand_image')) caps.push('understand_image (full multimodal vision analysis: scene description, colors/shades/hex codes, charts/numbers, layout, and text)');
+        if (toolNames.includes('browse')) caps.push('browse (open public web pages in headless Chromium, capture screenshots as [file:<id>] to inspect visuals with understand_image, and interact via click/fill/press/scroll)');
+        if (toolNames.includes('generate_image')) caps.push('generate_image (create images locally)');
+        if (toolNames.includes('propose_skill')) caps.push('propose_skill + run_skill_script (create reusable skills and custom scripts shared across all personas)');
+        return caps.length
+          ? `\n\nActive built-in tools you can use right now regardless of persona: ${caps.join('; ')}. Never tell the user you cannot do these — call the tool directly. Take time to think deeply, verify your outputs, and loop to fix any mistake before giving your final answer.`
+          : '';
+      })(),
+    ].join('');
+    const searchFirstNote = toolNames.includes('web_search')
+      ? '\n\nWeb lookup rule: always call web_search (SearXNG) first before calling web_fetch or browse; never invent URLs.'
+      : '';
+    const sharedRepoNote = sharedRepoBrief(this.store);
+    // llama-server reuses the longest cached prompt prefix. Keep the system prompt identical across turns and
+    // carry the per-turn parts (workspace changes, stage, nudges, KB passages, skills) on the newest user message.
+    const cacheFriendly = this.cacheFriendly(model);
+    const system = cacheFriendly
+      ? `${agent.systemPrompt}${sharedRepoNote}${rulesNote}${memoryNote}${teamNote}${searchFirstNote}${kbHint}${CITE_HINT}${HONESTY_RULE}${run.cursor.helperId ? '' : TASKS_HINT}${languageNote}`
+      : `${agent.systemPrompt}${sharedRepoNote}${chatWorkspaces}${rulesNote}${memoryNote}${teamNote}${searchFirstNote}${stageNote}${roleNote}${kbHint}${CITE_HINT}${HONESTY_RULE}${run.cursor.helperId ? '' : TASKS_HINT}${nudge}${languageNote}${recoveryNote}`;
     const preambleGuess = `${system}\n${notes.map((note) => note.content).join('\n')}`;
     if (model.providerId === 'prov_gemini' && estimateTokens(preambleGuess, 'gemini') > budget * 0.75) {
       const key = process.env.GEMINI_API_KEY;
@@ -954,12 +1252,31 @@ export class Engine {
         if (counted && counted > budget) budget = Math.min(model.contextWindow, counted + settings.outputReserveTokens);
       }
     }
+    const tok = model.tokenizer as 'gemma4';
+    const toolSchemaTokens = offeredTools.length
+      ? estimateTokens(JSON.stringify(offeredTools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }))), tok)
+      : 0;
+    const optionalParts = [{ label: 'knowledge base passages', text: kbNote }, { label: 'workshop brief', text: workshopNote }, { label: 'skills catalog', text: skillNote }].filter((part) => part.text.trim());
+    let turnContext = '';
+    if (cacheFriendly) {
+      const parts = [`${chatWorkspaces}${stageNote}${roleNote}${nudge}${recoveryNote}`.trim(), ...optionalParts.map((part) => part.text.trim())];
+      const cap = (run.cursor.budgetOverride || budget) * 0.4;
+      while (parts.length > 1 && estimateTokens(parts.join('\n\n'), tok) > cap) parts.pop();
+      turnContext = parts.filter(Boolean).join('\n\n');
+    }
+    const turnContextTokens = turnContext ? estimateTokens(turnContext, tok) + 16 : 0;
     const plan = planContext({
-      strategy, contextWindow: model.contextWindow, practicalBudget: run.cursor.budgetOverride || budget, outputReserve: settings.outputReserveTokens,
-      system, optional: [{ label: 'knowledge base passages', text: kbNote }, { label: 'workshop brief', text: workshopNote }, { label: 'skills catalog', text: skillNote }].filter((part) => part.text.trim()),
+      strategy, contextWindow: model.contextWindow, practicalBudget: (run.cursor.budgetOverride || budget) - turnContextTokens, outputReserve: settings.outputReserveTokens,
+      system, optional: cacheFriendly ? [] : optionalParts,
       pinned: notes.filter((note) => note.pinned).map((note) => note.content),
-      summaries, retrieved, tokenizer: model.tokenizer as 'gemma4',
-      messages: messages.map((message) => ({ id: message.id, role: message.role as 'user', content: message.content })),
+      summaries, retrieved, tokenizer: tok,
+      messages: this.uncoveredMessages(messages, summaries).map((message) => ({ id: message.id, role: message.role as 'user', content: message.content })),
+      breakdownHints: {
+        systemPrompt: estimateTokens(`${CITE_HINT}${HONESTY_RULE}${TASKS_HINT}${searchFirstNote}${languageNote}${stageNote}${roleNote}${recoveryNote}`, tok),
+        personaAndTools: estimateTokens(`${agent.systemPrompt}${teamNote}${skillNote}`, tok) + toolSchemaTokens,
+        memory: estimateTokens(`${memoryNote}${kbHint}${kbNote}`, tok),
+        files: estimateTokens(`${sharedRepoNote}${chatWorkspaces}${rulesNote}${workshopNote}`, tok),
+      },
     });
     if (plan.trimmed.length) {
       this.store.addStep({
@@ -981,7 +1298,8 @@ export class Engine {
         output: cutNote, toolCallId: null, turn: run.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now(),
       });
     }
-    this.bus.publish({ type: 'context', runId: run.id, used: plan.estimatedTokens, budget: plan.budgetTokens });
+    this.lastContext.set(run.sessionId, plan.breakdown);
+    this.bus.publish({ type: 'context', runId: run.id, used: plan.breakdown.used, budget: plan.breakdown.budget, breakdown: plan.breakdown });
     const recent = new Map(messages.map((message) => [message.id, message]));
     const chat: ChatMessage[] = [{ role: 'system', content: plan.preamble }];
     for (const item of plan.recent) {
@@ -993,7 +1311,23 @@ export class Engine {
         name: message.toolName ?? undefined, toolCalls: (message.toolCalls as ToolCall[] | null) ?? undefined, imageUrl: message.imageUrl ?? undefined,
       });
     }
+    if (turnContext) {
+      const lastUser = chat.map((message) => message.role).lastIndexOf('user');
+      if (lastUser > 0) {
+        const target = chat[lastUser]!;
+        chat[lastUser] = { ...target, content: `<turn_context>\n${turnContext}\n</turn_context>\n\n${target.content}` };
+      } else {
+        chat[0] = { ...chat[0]!, content: `${chat[0]!.content}\n\n${turnContext}` };
+      }
+    }
     return { plan, messages: chat, cutNote };
+  }
+
+  /** Models served by llama-server get a turn-stable system prompt so its prompt cache hits. */
+  private cacheFriendly(model: ModelRow): boolean {
+    if (this.providerOverride) return false;
+    const provider = this.store.getProvider(model.providerId);
+    return Boolean(provider && isLlamaServerProvider(provider));
   }
 
   private async maybeFold(sessionId: string, agent: Agent, model: ModelRow) {
@@ -1070,7 +1404,7 @@ export class Engine {
     try {
       const provider = this.provider(model);
       let text = '';
-      const timer = AbortSignal.timeout(20_000);
+      const timer = AbortSignal.timeout(120_000);
       for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, signal: timer })) {
         if (event.type === 'token') text += event.text;
       }
@@ -1189,8 +1523,11 @@ export class Engine {
     names.add('repo_sync');
     names.add('find_context');
     names.add('share_file');
+    names.add('make_slides');
     names.add('read_slides');
+    names.add('browse');
     if (this.ocrReader) names.add('read_image_text');
+    if (this.imageAnalyzer) names.add('understand_image');
     for (const name of ['tasks', 'manage_timer', 'manage_trigger', 'spawn_agent', 'helpers', 'memory_file', 'search_chats', 'propose_skill', 'run_tool_script', 'time_now', 'think']) names.add(name);
     if (this.store.getSettings().imageGen.mode !== 'off') names.add('generate_image');
     if (stage === 'plan') {
@@ -1210,7 +1547,7 @@ export class Engine {
     if (helper) for (const name of HELPER_DENIED) names.delete(name);
     // Built-in connectors the owner switched off take their tools with them.
     for (const name of disabledConnectorTools(this.store)) names.delete(name);
-    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), ...slidesTools({ dataDir: this.libraryDir, image: async (prompt, ctx) => ({ fileId: (await generateImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }, { prompt, ownerId: ctx.ownerId, shape: 'landscape', sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal })).file.id }) }), ...this.autonomy.tools(), tasksTool(), memoryFileTool(), searchChatsTool(), proposeSkillTool(), ...CONNECTOR_TOOLS(), ...(this.ocrReader ? [ocrTool(this.ocrReader)] : []), ...this.extraTools, ...mcp.map((row) => row.tool)];
+    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), ...slidesTools({ dataDir: this.libraryDir, image: async (prompt, ctx) => ({ fileId: (await generateImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }, { prompt, ownerId: ctx.ownerId, shape: 'landscape', sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal })).file.id }) }), ...this.autonomy.tools(), tasksTool(), memoryFileTool(), searchChatsTool(), proposeSkillTool(), ...CONNECTOR_TOOLS(), ...(this.ocrReader ? [ocrTool(this.ocrReader)] : []), ...(this.imageAnalyzer ? [understandImageTool(this.imageAnalyzer)] : []), ...this.extraTools, ...mcp.map((row) => row.tool)];
     const seen = new Set<string>();
     const chosen = catalog.filter((tool) => {
       if (!names.has(tool.name) || seen.has(tool.name)) return false;
@@ -1250,6 +1587,12 @@ export class Engine {
     const childRun = await this.startTurn({ sessionId: child.id, agentId: other.id, content: question, parentRunId: run.id, depth: 1, wait: true });
     const answer = [...this.store.listMessages(child.id)].reverse().find((message) => message.role === 'assistant');
     return answer?.content || childRun.error || 'No answer.';
+  }
+
+  private viaOllama(model: ModelRow): boolean {
+    if (this.providerOverride) return true;
+    const provider = this.store.getProvider(model.providerId);
+    return !provider || isOllamaProvider(provider);
   }
 
   private provider(model: ModelRow) {
@@ -1357,13 +1700,23 @@ export class Engine {
     const memory = this.memory;
     if (!memory) return { lease: null, numCtx };
     const kind = run.cursor.background ? 'background' : 'chat';
-    const onWait = (ahead: number) => this.bus.publish({ type: 'status', runId: run.id, status: 'waiting', detail: ahead ? `Waiting for memory, ${ahead} ahead` : 'Waiting for memory to free up' });
+    const onWait = (ahead: number, info?: import('./memory.js').WaitInfo) => {
+      const detail = info?.reason || (ahead ? `Waiting for memory, ${ahead} ahead` : 'Waiting for memory to free up');
+      const live = this.liveStreams.get(run.id) ?? { text: '', thinking: '', status: 'waiting' };
+      live.status = 'waiting';
+      live.detail = detail;
+      live.waitInfo = info;
+      this.liveStreams.set(run.id, live);
+      this.bus.publish({ type: 'status', runId: run.id, status: 'waiting', detail, waitInfo: info });
+    };
     let last: unknown = null;
     for (const ctx of [...new Set([numCtx, Math.min(numCtx, 8192)])]) {
       const bytes = await memory.estimateModel(model.apiName, ctx);
       if (!bytes) return { lease: null, numCtx };
       try {
-        const lease = await memory.admit({ kind, label: model.name, model: model.apiName, bytes, onWait, signal });
+        const lease = await memory.admit({ kind, runId: run.id, label: model.name, model: model.apiName, bytes, onWait, signal });
+        const live = this.liveStreams.get(run.id);
+        if (live) { live.status = 'running'; live.detail = undefined; live.waitInfo = undefined; }
         this.bus.publish({ type: 'status', runId: run.id, status: 'running' });
         if (ctx !== numCtx) this.store.addLog('warn', `Using ${model.name} with a ${ctx}-token context so it fits the RAM budget.`, undefined, 'router');
         return { lease, numCtx: ctx };
@@ -1400,7 +1753,7 @@ export class Engine {
   }
 
   private async unload(names: string[]) {
-    const base = (process.env.OLLAMA_HOST || 'http://127.0.0.1:11434').replace(/\/$/, '');
+    const base = ollamaRoot();
     for (const name of names) {
       try {
         await this.fetchImpl(`${base}/api/generate`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: name, keep_alive: 0 }) });
@@ -1741,8 +2094,13 @@ function quotaDay(date = new Date()) {
 }
 
 /** Resident size from the tag (Q4 weights ≈ 0.6 GB per billion parameters plus runtime); unknown sizes count as small. */
-/** Personal tools every persona keeps whatever its contract lists (they still go through approval tiers): reminders, time, task list, memory. */
-const CONTRACT_ALWAYS = new Set(['request_secret', 'kb_search', 'load_skill', 'manage_timer', 'time_now', 'tasks', 'think', 'memory_file', 'search_chats']);
+/** Personal and platform tools every persona keeps whatever its contract lists (they still go through approval tiers and member restrictions): reminders, triggers, time, task list, memory, skills, helpers. */
+const CONTRACT_ALWAYS = new Set([
+  'request_secret', 'kb_search', 'load_skill', 'manage_timer', 'manage_trigger',
+  'time_now', 'tasks', 'think', 'memory_file', 'search_chats',
+  'spawn_agent', 'helpers', 'propose_skill', 'read_output', 'run_skill_script',
+  'find_context', 'share_file', 'make_slides', 'read_slides', 'browse', 'read_image_text', 'understand_image', 'generate_image', 'repo_sync',
+]);
 
 export function roughModelGiB(apiName: string): number {
   const size = Number(apiName.toLowerCase().match(/(\d+(?:\.\d+)?)b\b/)?.[1] ?? 4);

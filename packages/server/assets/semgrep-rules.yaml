@@ -1,0 +1,81 @@
+rules:
+  - id: la.security.hardcoded-secret
+    patterns:
+      - pattern-regex: (?i)(api[_-]?key|secret[_-]?key|access[_-]?token|private[_-]?key|password)\s*[:=]\s*["'][A-Za-z0-9_/\-+]{20,}["']
+    message: Possible hardcoded secret or API key committed in source code. Load secrets from environment variables or the vault instead.
+    languages: [generic]
+    severity: ERROR
+
+  - id: la.security.private-key-block
+    pattern-regex: -----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----
+    message: Private key material detected in source file. Never commit private keys.
+    languages: [generic]
+    severity: ERROR
+
+  - id: la.security.js-eval
+    pattern-either:
+      - pattern: eval($X)
+      - pattern: new Function(...)
+    message: Dynamic code evaluation (eval / new Function) can lead to code injection.
+    languages: [javascript, typescript]
+    severity: ERROR
+
+  - id: la.security.js-child-process-shell
+    pattern-either:
+      - pattern: child_process.exec($CMD, ...)
+      - pattern: exec($CMD, ...)
+    metavariable-pattern:
+      metavariable: $CMD
+      pattern-not: '"..."'
+    message: Avoid passing dynamic strings to shell exec(); use execFile/spawn with an argument array to prevent command injection.
+    languages: [javascript, typescript]
+    severity: WARNING
+
+  - id: la.security.js-innerhtml
+    pattern-either:
+      - pattern: $EL.innerHTML = $VAL
+      - pattern: dangerouslySetInnerHTML={{ __html: $VAL }}
+    message: Unsanitized HTML injection can introduce XSS vulnerabilities.
+    languages: [javascript, typescript]
+    severity: WARNING
+
+  - id: la.security.js-tls-reject-disabled
+    pattern-regex: rejectUnauthorized\s*:\s*false|NODE_TLS_REJECT_UNAUTHORIZED\s*=\s*["']?0
+    message: TLS certificate verification is disabled, enabling MITM attacks.
+    languages: [javascript, typescript]
+    severity: ERROR
+
+  - id: la.security.py-exec-eval
+    pattern-either:
+      - pattern: eval($X)
+      - pattern: exec($X)
+    message: Dynamic eval/exec in Python risks arbitrary code execution.
+    languages: [python]
+    severity: ERROR
+
+  - id: la.security.py-subprocess-shell
+    pattern: subprocess.$FN(..., shell=True, ...)
+    message: subprocess with shell=True enables shell injection; pass an argument list instead.
+    languages: [python]
+    severity: ERROR
+
+  - id: la.security.py-pickle-yaml
+    pattern-either:
+      - pattern: pickle.loads(...)
+      - pattern: pickle.load(...)
+      - pattern: yaml.load($X)
+    message: Unsafe deserialization (pickle / yaml.load without SafeLoader) allows arbitrary code execution.
+    languages: [python]
+    severity: ERROR
+
+  - id: la.security.sql-concat
+    pattern-regex: (?i)(SELECT|INSERT|UPDATE|DELETE)\s+.{0,80}\$\{[^}]+\}
+    message: Possible SQL injection via template string interpolation. Use parameterized queries instead.
+    languages: [javascript, typescript]
+    severity: WARNING
+
+  - id: la.security.shell-curl-pipe-sh
+    pattern-regex: curl\s+[^\n|]*\|\s*(ba)?sh
+    message: Piping remote curl output directly into a shell is unsafe without checksum verification.
+    languages: [bash]
+    severity: WARNING

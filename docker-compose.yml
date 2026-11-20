@@ -2,16 +2,23 @@ services:
   local-agent:
     build: .
     ports:
-      - "8787:8787"
+      - "${LA_PORT:-8787}:8787"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
       DATA_DIR: /data
       LA_HOST: 0.0.0.0
       LA_PORT: 8787
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      LLAMA_SERVER_URL: ${LLAMA_SERVER_URL:-http://host.docker.internal:8080/v1}
+      LA_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-local-agent}
+      LA_HOST_DATA_DIR: ${DATA_DIR:-/opt/local-agent/data}
+      LA_PROJECTS_DIR: /projects
+      LA_HOST_PROJECTS_DIR: ${LA_HOST_PROJECTS_DIR:-/home/acid/projects}
       LA_DISABLE_SETUP: "1"
     volumes:
       - ./data:/data
+      - ${LA_HOST_PROJECTS_DIR:-/home/acid/projects}:/projects
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
     # Uncomment on the mini PC so the container can see the Radeon iGPU.
@@ -28,6 +35,8 @@ services:
       DATA_DIR: /data
       LA_SETUP_ONLY: "1"
       LA_SETUP_PORT: "8788"
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://127.0.0.1:11434}
+      LA_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-local-agent}
     volumes:
       - ./data:/data
       - /var/run/docker.sock:/var/run/docker.sock

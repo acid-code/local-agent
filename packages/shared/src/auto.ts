@@ -12,9 +12,9 @@ export interface AutoMap {
 }
 
 export const DEFAULT_AUTO_MAP: AutoMap = {
-  fast: 'qwen3:4b',
+  fast: 'gemma3:4b',
   main: '',
-  coder: 'qwen3-coder:30b',
+  coder: 'gpt-oss:20b',
   thinking: '',
   cloud: '',
   embed: 'nomic-embed-text',
@@ -79,9 +79,12 @@ export function readChatCommand(text: string): ChatCommand {
 export function matchAutoModel(models: AutoCandidate[], wanted: string): AutoCandidate | undefined {
   const needle = wanted.trim().toLowerCase();
   if (!needle) return undefined;
+  const norm = (value: string) => value.toLowerCase().replace(/[:_.\-\s]+/g, '-');
+  const normNeedle = norm(needle);
   const pool = models.filter((model) => model.enabled);
   return pool.find((model) => model.apiName.toLowerCase() === needle || model.name.toLowerCase() === needle)
-    ?? pool.find((model) => model.apiName.toLowerCase().startsWith(needle) || model.name.toLowerCase().startsWith(needle));
+    ?? pool.find((model) => model.apiName.toLowerCase().startsWith(needle) || model.name.toLowerCase().startsWith(needle))
+    ?? pool.find((model) => norm(model.apiName).includes(normNeedle) || norm(model.name).includes(normNeedle));
 }
 
 function chatLocals(models: AutoCandidate[]) {
@@ -111,7 +114,10 @@ function resolveRole(role: AutoRole, map: AutoMap, models: AutoCandidate[]): { m
     return { model: named ?? small ?? main, reasoning: false, quotaFallback: false };
   }
   if (role === 'coder') {
-    const named = matchAutoModel(models, map.coder) ?? chatLocals(models).find((model) => /coder/i.test(`${model.apiName} ${model.name}`));
+    const named = matchAutoModel(models, map.coder)
+      ?? chatLocals(models).find((model) => /gpt[-_.: ]?oss|devstral|codestral|deepseek[-_.: ]?coder/i.test(`${model.apiName} ${model.name}`))
+      ?? chatLocals(models).find((model) => /coder/i.test(`${model.apiName} ${model.name}`) && !/qwen/i.test(`${model.apiName} ${model.name}`))
+      ?? chatLocals(models).find((model) => /coder/i.test(`${model.apiName} ${model.name}`));
     return { model: named ?? main, reasoning: false, quotaFallback: false };
   }
   if (role === 'thinking') {

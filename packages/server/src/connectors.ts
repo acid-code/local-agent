@@ -5,6 +5,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { isBlockedUrl } from '@local-agent/shared';
 import type { Store } from './db.js';
+import { saveFile } from './files.js';
 import type { Tool, ToolContext } from './tools.js';
 import { fetchPublicText } from './tools.js';
 import { locatePath } from './workshops.js';
@@ -199,33 +200,216 @@ export function sqliteTool(): Tool {
   };
 }
 
-/** Headless Chrome with a throwaway profile and its own sandbox (never --no-sandbox unless running as root); fetch fallback. */
+interface BrowseAction {
+  type: 'click' | 'fill' | 'press' | 'scroll' | 'wait';
+  selector?: string;
+  text?: string;
+  value?: string;
+  key?: string;
+  y?: number;
+  ms?: number;
+}
+
+/** Minimal Chrome DevTools Protocol client over Node 22 built-in WebSocket (zero external deps). */
+async function runCdpSession(chrome: string, url: string, actions: BrowseAction[], wantScreenshot: boolean, signal: AbortSignal) {
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'la-cdp-'));
+  const port = 9222 + Math.floor(Math.random() * 1000);
+  const flags = [
+    '--headless=new', '--disable-gpu', '--disable-extensions', '--no-first-run', '--disable-sync', '--mute-audio',
+    '--window-size=1280,900', `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, 'about:blank',
+  ];
+  if (process.getuid?.() === 0) flags.unshift('--no-sandbox');
+  const child = spawn(chrome, flags, { stdio: ['ignore', 'ignore', 'ignore'] });
+  const killChild = () => { try { child.kill('SIGKILL'); } catch { /* ignore */ } };
+  signal.addEventListener('abort', killChild, { once: true });
+  try {
+    let wsUrl = '';
+    for (let i = 0; i < 30; i += 1) {
+      if (signal.aborted) throw new Error('Aborted.');
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(1000) });
+        if (res.ok) {
+          const targets = await res.json() as { type?: string; webSocketDebuggerUrl?: string }[];
+          const page = targets.find((t) => t.type === 'page' && t.webSocketDebuggerUrl);
+          if (page?.webSocketDebuggerUrl) { wsUrl = page.webSocketDebuggerUrl; break; }
+        }
+      } catch { /* starting */ }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    if (!wsUrl) throw new Error('Headless Chromium did not open a debugging socket.');
+
+    const ws = new WebSocket(wsUrl);
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('CDP connect timeout')), 5000);
+      ws.addEventListener('open', () => { clearTimeout(t); resolve(); }, { once: true });
+      ws.addEventListener('error', () => { clearTimeout(t); reject(new Error('CDP socket error')); }, { once: true });
+    });
+
+    let seq = 0;
+    const pending = new Map<number, { resolve: (v: Record<string, unknown>) => void; reject: (e: Error) => void }>();
+    ws.addEventListener('message', (ev) => {
+      try {
+        const msg = JSON.parse(String(ev.data)) as { id?: number; result?: Record<string, unknown>; error?: { message?: string } };
+        if (msg.id && pending.has(msg.id)) {
+          const p = pending.get(msg.id)!;
+          pending.delete(msg.id);
+          if (msg.error) p.reject(new Error(msg.error.message || 'CDP error'));
+          else p.resolve(msg.result || {});
+        }
+      } catch { /* ignore */ }
+    });
+    const send = (method: string, params: Record<string, unknown> = {}) => new Promise<Record<string, unknown>>((resolve, reject) => {
+      const id = ++seq;
+      const timer = setTimeout(() => { pending.delete(id); reject(new Error(`CDP ${method} timed out`)); }, 20_000);
+      pending.set(id, {
+        resolve: (v) => { clearTimeout(timer); resolve(v); },
+        reject: (e) => { clearTimeout(timer); reject(e); },
+      });
+      ws.send(JSON.stringify({ id, method, params }));
+    });
+    const evalJs = async <T>(expression: string): Promise<T> => {
+      const res = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+      return (res.result as { value?: T } | undefined)?.value as T;
+    };
+
+    try {
+      await send('Page.enable');
+      await send('Runtime.enable');
+      await send('Page.navigate', { url });
+      await new Promise((r) => setTimeout(r, 2500));
+
+      const log: string[] = [];
+      for (const act of actions.slice(0, 12)) {
+        if (signal.aborted) throw new Error('Aborted.');
+        if (act.type === 'wait') {
+          const ms = Math.min(8000, Math.max(200, Number(act.ms || 1000)));
+          await new Promise((r) => setTimeout(r, ms));
+          log.push(`waited ${ms}ms`);
+        } else if (act.type === 'scroll') {
+          const y = Number(act.y || 600);
+          await evalJs(`window.scrollBy(0, ${y})`);
+          await new Promise((r) => setTimeout(r, 400));
+          log.push(`scrolled ${y}px`);
+        } else if (act.type === 'click') {
+          const sel = JSON.stringify(act.selector || '');
+          const txt = JSON.stringify(act.text || '');
+          const ok = await evalJs<boolean>(`(() => {
+            const s = ${sel}, t = ${txt}.toLowerCase();
+            let el = s ? document.querySelector(s) : null;
+            if (!el && t) el = [...document.querySelectorAll('a,button,[role="button"],input[type="submit"]')].find(e => (e.innerText || e.value || e.getAttribute('aria-label') || '').toLowerCase().includes(t));
+            if (!el) return false;
+            el.scrollIntoView({ block: 'center' });
+            el.click();
+            return true;
+          })()`);
+          await new Promise((r) => setTimeout(r, 1200));
+          log.push(ok ? `clicked ${act.selector || act.text}` : `click target not found: ${act.selector || act.text}`);
+        } else if (act.type === 'fill') {
+          const sel = JSON.stringify(act.selector || 'input,textarea');
+          const val = JSON.stringify(act.value ?? '');
+          const ok = await evalJs<boolean>(`(() => {
+            const el = document.querySelector(${sel});
+            if (!el) return false;
+            el.focus();
+            el.value = ${val};
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            return true;
+          })()`);
+          log.push(ok ? `filled ${act.selector}` : `fill target not found: ${act.selector}`);
+        } else if (act.type === 'press') {
+          const key = String(act.key || 'Enter');
+          await send('Input.dispatchKeyEvent', { type: 'keyDown', key, text: key === 'Enter' ? '\r' : undefined });
+          await send('Input.dispatchKeyEvent', { type: 'keyUp', key });
+          await new Promise((r) => setTimeout(r, 1200));
+          log.push(`pressed ${key}`);
+        }
+      }
+
+      const snap = await evalJs<{ title: string; href: string; text: string; elements: string[] }>(`(() => {
+        const els = [...document.querySelectorAll('a[href],button,input,textarea,select,[role="button"]')]
+          .filter(e => e.offsetParent !== null)
+          .slice(0, 30)
+          .map(e => {
+            const tag = e.tagName.toLowerCase();
+            const id = e.id ? '#' + e.id : '';
+            const name = e.getAttribute('name') ? '[name="' + e.getAttribute('name') + '"]' : '';
+            const label = (e.innerText || e.getAttribute('aria-label') || e.getAttribute('placeholder') || e.value || '').replace(/\\s+/g, ' ').trim().slice(0, 60);
+            return tag + (id || name) + (label ? ' — ' + label : '');
+          });
+        return {
+          title: document.title || '',
+          href: location.href || '',
+          text: (document.body?.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 10000),
+          elements: els,
+        };
+      })()`);
+
+      let png: Buffer | null = null;
+      if (wantScreenshot) {
+        const shot = await send('Page.captureScreenshot', { format: 'png' });
+        if (typeof shot.data === 'string' && shot.data) png = Buffer.from(shot.data, 'base64');
+      }
+      return { ...snap, log, png };
+    } finally {
+      try { ws.close(); } catch { /* ignore */ }
+    }
+  } finally {
+    killChild();
+    fs.rmSync(profile, { recursive: true, force: true });
+  }
+}
+
+/** Headless Chromium with throwaway profile: renders JS pages, captures screenshots ([file:<id>]), and executes interactive actions (click, fill, press, scroll). */
 export function browseTool(): Tool {
   return {
-    name: 'browse', description: 'Open a public web page in a headless browser (runs its JavaScript) and return the visible text. Use for pages where web_fetch returns little. Public http(s) only.',
-    parameters: obj({ url: { type: 'string' } }, ['url']), mutates: () => false, approval: () => null,
+    name: 'browse',
+    description: 'Open a public web page in headless Chromium, see its rendered look via screenshot (saved as [file:<id>] so you can inspect visuals with understand_image), inspect interactive buttons/inputs/links, and optionally interact with the page (click, fill, press, scroll, wait). Public http(s) only.',
+    parameters: obj({
+      url: { type: 'string', description: 'Public http(s) URL to open.' },
+      screenshot: { type: 'boolean', description: 'Capture a rendered PNG screenshot saved as [file:<id>] (pass to understand_image to see visual layout/colors).' },
+      actions: {
+        type: 'array',
+        description: 'Optional sequence of interactive steps: {type:"click"|"fill"|"press"|"scroll"|"wait", selector?, text?, value?, key?, y?, ms?}.',
+        items: { type: 'object' },
+      },
+    }, ['url']),
+    mutates: (args) => Array.isArray(args.actions) && args.actions.some((a) => {
+      const t = String((a as { type?: string })?.type || '');
+      return t === 'click' || t === 'fill' || t === 'press';
+    }),
+    approval: (args) => {
+      const actions = Array.isArray(args.actions) ? (args.actions as BrowseAction[]) : [];
+      const interactive = actions.filter((a) => a?.type === 'click' || a?.type === 'fill' || a?.type === 'press');
+      if (!interactive.length) return null;
+      return `Interact with web page ${String(args.url || '').slice(0, 120)} (${interactive.map((a) => `${a.type} ${a.selector || a.text || a.key || ''}`.trim()).join(', ').slice(0, 140)})`;
+    },
     async execute(args, ctx) {
       const url = String(args.url || '');
       const blocked = isBlockedUrl(url);
       if (blocked) throw new Error(blocked);
       const chrome = chromePath();
       if (!chrome) return `(no browser installed; plain fetch)\n${await fetchPublicText(url, ctx.fetchImpl, ctx.signal)}`;
-      const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'la-browse-'));
-      const flags = ['--headless=new', '--disable-gpu', '--disable-extensions', '--no-first-run', '--disable-sync', '--mute-audio', `--user-data-dir=${profile}`, '--virtual-time-budget=6000', '--dump-dom', url];
-      if (process.getuid?.() === 0) flags.unshift('--no-sandbox');
-      try {
-        const html = await new Promise<string>((resolve, reject) => {
-          const child = spawn(chrome, flags, { stdio: ['ignore', 'pipe', 'ignore'] });
-          let out = '';
-          const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('The page took too long.')); }, 25_000);
-          ctx.signal.addEventListener('abort', () => child.kill('SIGKILL'));
-          child.stdout.on('data', (chunk: Buffer) => { if (out.length < 2_000_000) out += chunk.toString('utf8'); });
-          child.on('close', () => { clearTimeout(timer); resolve(out); });
-          child.on('error', (error) => { clearTimeout(timer); reject(error); });
+      const actions = Array.isArray(args.actions) ? (args.actions as BrowseAction[]) : [];
+      const wantShot = Boolean(args.screenshot) || actions.length > 0;
+      const result = await runCdpSession(chrome, url, actions, wantShot, ctx.signal);
+      let fileRef = '';
+      if (result.png && ctx.libraryDir) {
+        const host = (() => { try { return new URL(result.href || url).hostname.replace(/[^a-z0-9.-]+/gi, '_'); } catch { return 'page'; } })();
+        const saved = saveFile(ctx.store, ctx.libraryDir, {
+          name: `page-${host}-${Date.now().toString(36)}.png`,
+          bytes: result.png,
+          sessionId: ctx.sessionId ?? null,
+          agentId: ctx.agent.id,
+          source: 'agent',
+          mime: 'image/png',
+          ownerId: ctx.agent.ownerId || 'owner',
         });
-        const text = html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
-        return text.slice(0, 12_000) || '(empty page)';
-      } finally { fs.rmSync(profile, { recursive: true, force: true }); }
+        fileRef = `Screenshot saved: [file:${saved.id}] (call understand_image with file_id="${saved.id}" to inspect its visual look, layout, and colors).\n`;
+      }
+      const actionSummary = result.log.length ? `Actions: ${result.log.join(' → ')}\n` : '';
+      const controls = result.elements.length ? `\nInteractive elements:\n${result.elements.join('\n')}` : '';
+      return `Title: ${result.title || '(untitled)'}\nURL: ${result.href || url}\n${fileRef}${actionSummary}\n${result.text || '(empty page)'}${controls}`;
     },
   };
 }

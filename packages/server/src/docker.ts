@@ -1,7 +1,12 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import { PassThrough } from 'node:stream';
 import Docker from 'dockerode';
+
+export function inDockerContainer(): boolean {
+  return fs.existsSync('/.dockerenv');
+}
 
 export interface ContainerSummary {
   id: string;
@@ -20,9 +25,9 @@ export const ROLE_LABEL = 'com.local-agent.role';
 export type ManagedRole = 'search' | 'mcp' | 'tool' | 'sandbox' | 'image' | 'app';
 const ROLES = new Set<ManagedRole>(['search', 'mcp', 'tool', 'sandbox', 'image', 'app']);
 /** Labels older versions used (local-agent.role=...). */
-const LEGACY_ROLE: Record<string, ManagedRole> = { searxng: 'search', mcp: 'mcp', sandbox: 'sandbox', shell: 'tool', 'agent-run': 'tool', whisper: 'tool', kokoro: 'tool', 'image-build': 'image' };
+const LEGACY_ROLE: Record<string, ManagedRole> = { searxng: 'search', mcp: 'mcp', sandbox: 'sandbox', shell: 'tool', 'agent-run': 'tool', whisper: 'tool', kokoro: 'tool', ocr: 'tool', piper: 'tool', 'image-build': 'image' };
 /** docker compose project names of this app (the repo folder name by default). */
-const COMPOSE_PROJECTS = () => new Set(['local-agent', ...(process.env.LA_COMPOSE_PROJECT ? [process.env.LA_COMPOSE_PROJECT] : [])]);
+const COMPOSE_PROJECTS = () => new Set(['local-agent', ...(process.env.LA_COMPOSE_PROJECT ? [process.env.LA_COMPOSE_PROJECT] : []), ...(process.env.COMPOSE_PROJECT_NAME ? [process.env.COMPOSE_PROJECT_NAME] : [])]);
 
 export function withManagedLabels(labels: Record<string, string> = {}): Record<string, string> {
   const legacy = labels['local-agent.role'] ?? labels['local-agent'];
@@ -47,7 +52,7 @@ export function managedRole(container: { name: string; labels: Record<string, st
   }
   const name = (container.name || '').replace(/^\//, '');
   if (name === 'local-agent-searxng') return 'search';
-  if (name === 'local-agent-whisper' || name === 'local-agent-kokoro') return 'tool';
+  if (name === 'local-agent-whisper' || name === 'local-agent-kokoro' || name === 'local-agent-ocr' || name === 'local-agent-piper') return 'tool';
   if (name.startsWith('la-mcp-')) return 'mcp';
   if (name.startsWith('la-sbx-')) return 'sandbox';
   return null;
@@ -159,7 +164,80 @@ export class DockerCtl {
     await this.api().getImage(id).remove();
   }
 
-  async startDetached(spec: RunSpec & { ExposedPorts?: Record<string, object>; files?: { dir: string; name: string; content: string | Buffer; mode?: number }[]; replace?: boolean }) {
+  private appNetworkCache: string | null | undefined = undefined;
+
+  /** Detect the bridge Docker network this app container is attached to (e.g. local-agent_default), or null if host/native. */
+  async detectAppNetwork(): Promise<string | null> {
+    if (this.appNetworkCache !== undefined) return this.appNetworkCache;
+    if (!inDockerContainer() || !this.available()) {
+      this.appNetworkCache = null;
+      return null;
+    }
+    try {
+      const info = await this.api().getContainer(os.hostname()).inspect();
+      const mode = info.HostConfig?.NetworkMode;
+      if (mode === 'host') {
+        this.appNetworkCache = null;
+        return null;
+      }
+      const nets = Object.keys(info.NetworkSettings?.Networks ?? {}).filter((n) => n !== 'host' && n !== 'none');
+      const preferred = nets.find((n) => n.endsWith('_default')) ?? nets[0] ?? null;
+      this.appNetworkCache = preferred;
+      return preferred;
+    } catch {
+      const project = process.env.LA_COMPOSE_PROJECT || process.env.COMPOSE_PROJECT_NAME || 'local-agent';
+      const fallback = `${project}_default`;
+      try {
+        await this.api().getNetwork(fallback).inspect();
+        this.appNetworkCache = fallback;
+        return fallback;
+      } catch {
+        this.appNetworkCache = null;
+        return null;
+      }
+    }
+  }
+
+  /** Attach an existing container to a Docker network (idempotent). */
+  async connectToNetwork(containerIdOrName: string, networkName: string): Promise<boolean> {
+    try {
+      await this.api().getNetwork(networkName).connect({ Container: containerIdOrName });
+      return true;
+    } catch (error) {
+      const status = (error as { statusCode?: number }).statusCode;
+      const msg = error instanceof Error ? error.message : String(error);
+      if (status === 409 || /already exists|already connected/i.test(msg)) return true;
+      return false;
+    }
+  }
+
+  /** Find other running/stopped local-agent app containers and their /data host mount paths. */
+  async findExistingDataMounts(): Promise<{ container: string; project: string; source: string }[]> {
+    if (!this.available()) return [];
+    try {
+      const rows = await this.api().listContainers({ all: true });
+      const selfHost = os.hostname();
+      const out: { container: string; project: string; source: string }[] = [];
+      for (const row of rows) {
+        if (row.Id.startsWith(selfHost) || selfHost.startsWith(row.Id.slice(0, 12))) continue;
+        const service = row.Labels?.['com.docker.compose.service'] || '';
+        if (service !== 'local-agent') continue;
+        const mount = (row.Mounts ?? []).find((m) => m.Destination === '/data' && m.Source);
+        if (mount?.Source) {
+          out.push({
+            container: (row.Names?.[0] || row.Id).replace(/^\//, ''),
+            project: row.Labels?.['com.docker.compose.project'] || 'unknown',
+            source: mount.Source,
+          });
+        }
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
+  async startDetached(spec: RunSpec & { ExposedPorts?: Record<string, object>; files?: { dir: string; name: string; content: string | Buffer; mode?: number }[]; replace?: boolean; network?: string | null }) {
     if (spec.replace && spec.name) {
       try {
         await this.api().getContainer(spec.name).remove({ force: true });
@@ -167,6 +245,9 @@ export class DockerCtl {
         if ((error as { statusCode?: number }).statusCode !== 404) throw error;
       }
     }
+    const net = spec.network !== undefined ? spec.network : await this.detectAppNetwork();
+    const hostConfig: Docker.HostConfig = { ...(spec.HostConfig ?? {}) };
+    if (net && !hostConfig.NetworkMode) hostConfig.NetworkMode = net;
     const container = await this.api().createContainer({
       Image: spec.Image,
       Cmd: spec.Cmd,
@@ -174,12 +255,13 @@ export class DockerCtl {
       Labels: withManagedLabels(spec.Labels),
       Env: spec.Env,
       ExposedPorts: spec.ExposedPorts,
-      HostConfig: spec.HostConfig,
+      HostConfig: hostConfig,
     });
     for (const file of spec.files ?? []) {
       await container.putArchive(tarFile(file.name, Buffer.isBuffer(file.content) ? file.content : Buffer.from(file.content), file.mode), { path: file.dir });
     }
     await container.start();
+    if (net) await this.connectToNetwork(container.id, net);
     return container.id;
   }
 

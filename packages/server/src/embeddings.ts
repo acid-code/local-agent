@@ -54,12 +54,40 @@ export function indexText(store: Store, index: VectorIndex, input: { sessionId: 
 export function retrieve(store: Store, index: VectorIndex, sessionId: string, query: string, k = 4) {
   const queryVector = hashEmbed(query);
   const chunks = store.listChunks(sessionId).filter((chunk) => chunk.embedder === 'hash' && chunk.embedding);
+  if (!chunks.length) return [];
+  // Hybrid retrieval: Reciprocal Rank Fusion over vector similarity and lexical BM25-like term overlap.
+  let vecRanked: ChunkRow[] = [];
   if (index.enabled) {
-    const hits = index.search(queryVector, k);
+    const hits = index.search(queryVector, Math.max(k * 3, 12));
     const byRow = new Map(chunks.map((chunk) => [chunk.rowid, chunk]));
-    const ranked = hits.map((hit) => byRow.get(hit.rowid)).filter((chunk): chunk is ChunkRow => Boolean(chunk));
-    if (ranked.length) return ranked.map((chunk) => ({ id: chunk.id, text: chunk.text, score: 1 }));
+    vecRanked = hits.map((hit) => byRow.get(hit.rowid)).filter((chunk): chunk is ChunkRow => Boolean(chunk));
   }
-  return topK(chunks, (chunk) => new Float32Array(chunk.embedding!.buffer, chunk.embedding!.byteOffset, chunk.dim), queryVector, k)
-    .map((hit) => ({ id: hit.item.id, text: hit.item.text, score: hit.score }));
+  if (!vecRanked.length) {
+    vecRanked = topK(chunks, (chunk) => new Float32Array(chunk.embedding!.buffer, chunk.embedding!.byteOffset, chunk.dim), queryVector, Math.max(k * 3, 12)).map((h) => h.item);
+  }
+  const qTerms = (query.toLowerCase().match(/[\p{L}\p{N}_]{2,}/gu) ?? []);
+  const lexRanked = qTerms.length
+    ? chunks.map((chunk) => {
+      const lower = chunk.text.toLowerCase();
+      let hits = 0;
+      for (const term of qTerms) if (lower.includes(term)) hits += 1;
+      return { chunk, score: hits / qTerms.length };
+    }).filter((r) => r.score > 0).sort((a, b) => b.score - a.score).slice(0, Math.max(k * 3, 12)).map((r) => r.chunk)
+    : [];
+  const scores = new Map<string, { chunk: ChunkRow; score: number }>();
+  const RRF_K = 60;
+  vecRanked.forEach((chunk, rank) => {
+    const cur = scores.get(chunk.id) ?? { chunk, score: 0 };
+    cur.score += 1 / (RRF_K + rank + 1);
+    scores.set(chunk.id, cur);
+  });
+  lexRanked.forEach((chunk, rank) => {
+    const cur = scores.get(chunk.id) ?? { chunk, score: 0 };
+    cur.score += 1 / (RRF_K + rank + 1);
+    scores.set(chunk.id, cur);
+  });
+  return [...scores.values()]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, k)
+    .map((entry) => ({ id: entry.chunk.id, text: entry.chunk.text, score: entry.score }));
 }

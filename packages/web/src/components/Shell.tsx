@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
-import { ChevronRight, LayoutGrid, Plus, Search, Star, Activity, Bell, BellOff, Info, MessageSquarePlus, Settings2, ArrowDown, ArrowUp, EyeOff, GitBranch, BookOpen, Box, CalendarClock, ChevronsUpDown, Cpu, Gauge, ListChecks, LogOut, Menu as MenuIcon, MessageSquare, MoreHorizontal, Palette, PanelLeftClose, PanelLeftOpen, Pin, PinOff, Radio, Settings, Sparkles, Users, Wrench, X, type LucideIcon } from 'lucide-react';
+import { LayoutGrid, Plus, Search, Star, Activity, Bell, BellOff, Info, MessageSquarePlus, Settings2, ArrowDown, ArrowUp, EyeOff, GitBranch, BookOpen, Box, CalendarClock, Gauge, LogOut, Menu as MenuIcon, MessageSquare, MoreHorizontal, Palette, PanelLeftClose, PanelLeftOpen, Pin, PinOff, Radio, Settings, Sparkles, Users, Wrench, X, type LucideIcon } from 'lucide-react';
 import { Menu } from './ui';
 import { Toaster } from './Toaster';
 import { api, post } from '../lib/api';
@@ -26,12 +27,10 @@ const GROUPS: { title: string; items: NavItem[] }[] = [
     { to: '/skills', label: t('Skills'), icon: Sparkles, hint: t('Reusable instructions') },
   ] },
   { title: t('System'), items: [
-    { to: '/models', label: t('Models'), icon: Cpu, hint: t('Local and cloud models') },
     { to: '/tools', label: t('Tools'), icon: Wrench, hint: t('MCP servers') },
     { to: '/containers', label: t('Containers'), icon: Box, hint: t('Sandboxes and services') },
     { to: '/resources', label: t('Resources'), icon: Gauge, hint: t('CPU, RAM and disk') },
-    { to: '/setup', label: t('Setup'), icon: ListChecks, hint: t('First-run checklist') },
-    { to: '/settings', label: t('Settings'), icon: Settings, hint: t('Appearance, vault, health') },
+    { to: '/settings', label: t('Settings'), icon: Settings, hint: t('Models, SearXNG, appearance, vault') },
   ] },
 ];
 
@@ -63,6 +62,28 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
   const [pagesOpen, setPagesOpen] = useState(() => localStorage.getItem('la-pages') === 'open');
   useEffect(() => { localStorage.setItem('la-pages', pagesOpen ? 'open' : 'closed'); }, [pagesOpen]);
   const [apps, setApps] = useState(false);
+  const [appsPos, setAppsPos] = useState<{ bottom: number; left: number } | null>(null);
+  const appsBtnRef = useRef<HTMLButtonElement>(null);
+  const appsPopRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (!apps || !appsBtnRef.current) return;
+    const rect = appsBtnRef.current.getBoundingClientRect();
+    const w = Math.min(340, window.innerWidth - 24);
+    const left = Math.max(12, Math.min(rect.left, window.innerWidth - w - 12));
+    const bottom = Math.max(12, window.innerHeight - rect.top + 8);
+    setAppsPos({ bottom, left });
+  }, [apps]);
+  useEffect(() => {
+    if (!apps) return;
+    const onDown = (event: MouseEvent | TouchEvent) => {
+      const target = event.target as Node;
+      if (appsPopRef.current?.contains(target) || appsBtnRef.current?.contains(target)) return;
+      setApps(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('touchstart', onDown);
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('touchstart', onDown); };
+  }, [apps]);
   useEffect(() => { localStorage.setItem('la-sidebar', collapsed ? 'collapsed' : 'open'); }, [collapsed]);
   const isWide = () => window.matchMedia('(min-width: 981px)').matches;
   const toggleSidebar = () => { if (isWide()) setCollapsed((value) => !value); else setOpen((value) => !value); };
@@ -152,10 +173,21 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
 
   return (
     <div className={`app${collapsed ? ' collapsed' : ''}${chatRoute ? ' route-chat' : ''}`}>
+      <div className="win-titlebar" aria-hidden="true">
+        <span className="win-titlebar-label">local-agent</span>
+      </div>
       {open && <div className="scrim drawer-scrim" onClick={() => setOpen(false)} />}
       <aside id="main-sidebar" className={open ? 'sidebar open' : 'sidebar'} aria-label={t('Main menu')}>
         <div className="side-top">
           <span className="sr-only">{t('local agent')}</span>
+          <button
+            className="icon-btn round sidebar-toggle"
+            aria-label={collapsed ? t('Expand') : t('Collapse')}
+            title={`${collapsed ? t('Expand') : t('Collapse')} (Ctrl+B)`}
+            onClick={toggleSidebar}
+          >
+            {collapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
+          </button>
           <span className="grow" />
           <button className="icon-btn round" aria-label={t('Search (Ctrl+K)')} title={t('Search or jump (Ctrl+K)')} onClick={() => setPalette(true)}><Search size={17} /></button>
           <Menu label={t('New')} icon={Plus} className="icon-btn round menu-trigger" items={[
@@ -208,9 +240,9 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
             <span className="avatar" aria-hidden>{initials || '?'}</span>
             <span className="who label"><span className="ellipsis">{username}</span></span>
           </span>
-          <button className="icon-btn round apps-btn" aria-label={t('All apps and pages')} title={t('All apps and pages')} aria-expanded={apps} aria-controls="apps-pop" onClick={() => setApps((value) => !value)}><LayoutGrid size={17} /></button>
-          {apps && (
-            <div className="apps-pop" id="apps-pop" role="dialog" aria-label={t('All apps and pages')} onKeyDown={(event) => { if (event.key === 'Escape') setApps(false); }}>
+          <button ref={appsBtnRef} className="icon-btn round apps-btn" aria-label={t('All apps and pages')} title={t('All apps and pages')} aria-expanded={apps} aria-controls="apps-pop" onClick={() => setApps((value) => !value)}><LayoutGrid size={17} /></button>
+          {apps && createPortal(
+            <div ref={appsPopRef} className="apps-pop portaled" id="apps-pop" role="dialog" aria-label={t('All apps and pages')} style={{ bottom: appsPos?.bottom ?? 64, left: appsPos?.left ?? 12 }} onKeyDown={(event) => { if (event.key === 'Escape') setApps(false); }}>
               <div className="apps-group">
                 <span className="nav-heading">{t('Personas')}</span>
                 <div className="apps-grid">
@@ -232,7 +264,8 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
                 <button className="btn ghost small collapse-toggle" onClick={() => { toggleSidebar(); setApps(false); }}>{collapsed ? <PanelLeftOpen size={14} aria-hidden /> : <PanelLeftClose size={14} aria-hidden />} {collapsed ? t('Expand') : t('Collapse')}</button>
                 <button className="btn ghost small danger" onClick={onLogout}><LogOut size={14} aria-hidden />{' '}{t('Sign out')}</button>
               </div>
-            </div>
+            </div>,
+            document.body,
           )}
         </div>
       </aside>
@@ -246,8 +279,8 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
         {children}
         <nav className="bottom-nav" aria-label={t('Quick navigation')}>
           <NavLink to="/" end><MessageSquare size={18} /><span>{t('Chat')}</span></NavLink>
-          <NavLink to="/runs"><Activity size={18} /><span>{t('Runs')}</span></NavLink>
-          {role === 'owner' ? <NavLink to="/setup"><ListChecks size={18} /><span>{t('Setup')}</span></NavLink> : <NavLink to="/agents"><Users size={18} /><span>{t('Agents')}</span></NavLink>}
+          <NavLink to="/agents"><Users size={18} /><span>{t('Agents')}</span></NavLink>
+          <NavLink to="/settings#system"><Settings size={18} /><span>{t('Settings')}</span></NavLink>
           <button type="button" className={open ? 'active' : ''} onClick={() => setOpen(true)}><MoreHorizontal size={18} /><span>{t('More')}</span></button>
         </nav>
         <Toaster />

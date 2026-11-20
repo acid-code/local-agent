@@ -9,11 +9,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: apps/mobile/package-lock.json
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -23,11 +18,6 @@ jobs:
           # The action's default list still asks for the removed "tools" package.
           # AGP 8.7.2 with compileSdk 35 needs platform 35 and build-tools 35.0.0.
           packages: platform-tools platforms;android-35 build-tools;35.0.0
-      - name: Sync the Capacitor shell
-        working-directory: apps/mobile
-        run: |
-          npm ci
-          npx cap sync android
       - name: Choose a signing key
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -64,7 +54,7 @@ jobs:
           apk="$(find apps/mobile/android/app/build/outputs/apk/release -name '*.apk' -print -quit)"
           test -n "$apk"
           cp "$apk" "local-agent-${short}.apk"
-          note="Android shell for the web console. ${APK_NOTE}."
+          note="Native Android app (Jetpack Compose / Material 3). ${APK_NOTE}."
           # The Windows workflow publishes the same tag. Create the release, or upload if it already exists.
           for attempt in 1 2 3 4 5 6; do
             if gh release view "$tag" >/dev/null 2>&1; then

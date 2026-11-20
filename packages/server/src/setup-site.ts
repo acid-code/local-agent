@@ -584,9 +584,9 @@ const PAGE = `<!doctype html>
         + field('Git email', 'gitEmail', 'text', s.gitEmail || 'agent@local')
         + field('SSH key path', 'gitSshKey', 'text', s.gitSshKey || '')
         + '<h3>Auto</h3><p class="muted">Empty main uses Gemma 4 26B-A4B if it is installed, otherwise Qwen3.6 35B-A3B. Empty thinking uses main with reasoning on. Empty cloud uses Gemini when the free quota is open, and falls back to main.</p>'
-        + field('Fast', 'autoFast', 'text', (s.autoModels && s.autoModels.fast) || 'qwen3:4b')
+        + field('Fast', 'autoFast', 'text', (s.autoModels && s.autoModels.fast) || 'gemma3:4b')
         + field('Main', 'autoMain', 'text', (s.autoModels && s.autoModels.main) || '')
-        + field('Coder', 'autoCoder', 'text', (s.autoModels && s.autoModels.coder) || 'qwen3-coder:30b')
+        + field('Coder', 'autoCoder', 'text', (s.autoModels && s.autoModels.coder) || 'gpt-oss:20b')
         + field('Thinking', 'autoThinking', 'text', (s.autoModels && s.autoModels.thinking) || '')
         + field('Smart / cloud', 'autoCloud', 'text', (s.autoModels && s.autoModels.cloud) || '')
         + field('Embed', 'autoEmbed', 'text', (s.autoModels && s.autoModels.embed) || 'nomic-embed-text')

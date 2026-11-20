@@ -10,17 +10,17 @@ import { authenticate, hashPassword, noteFailure, rateLimit, setSession, verifyP
 import { TEMPLATES } from './catalog.js';
 import { detectCodingClis, listEdits, readPlan, replacePlan, revertBatch, RollbackConflict, updatePlanItem } from './coding.js';
 import { secretDrift, secretNames, writeSecret } from './config.js';
-import type { DockerCtl } from './docker.js';
-import { checklist, readGpu, scanMachine, setupPreview } from './discovery.js';
+import { inDockerContainer, type DockerCtl } from './docker.js';
+import { checklist, findSearxng, readGpu, scanMachine, setupPreview } from './discovery.js';
 import type { McpRuntime } from './mcp.js';
 import type { McpServer } from './db.js';
 import { importConfigs, searchRegistry, trustOf, vetSpec, type VettingReport } from './mcp.js';
 import { cacheNpm, cacheStatus, dockerCatalog, officialCatalog, specFor, vetCatalogImage } from './mcp-catalog.js';
 import { localReputationSummarizer } from './reputation.js';
 import type { Notifier } from './notify.js';
-import { createBackup, listBackups, shipBackup, stageRestore } from './ops.js';
+import { createBackup, listBackups, preChangeBackup, shipBackup, stageRestore } from './ops.js';
 import { telegramQueue } from './notify.js';
-import { ollamaLoaded } from './ollama.js';
+import { ollamaLoaded, ollamaRoot } from './ollama.js';
 import { doctorChecks, geminiStateOf, missingRoleModels, redactValue, searchLogs, zipStore, LOG_COMPONENTS, type LogComponent } from './debug.js';
 import { ensureDiskRoom, isDiskFullError, previewPrune, runPrune, snapshotResources } from './resources.js';
 import { speak, transcribe, voiceStatus, VoiceError, KOKORO_COMMAND, WHISPER_COMMAND } from './voice.js';
@@ -44,7 +44,7 @@ import { createWorkshop, getWorkshop, listWorkshops } from './workshops.js';
 import { ACCENT_DEFAULT, FACES, accentOk, avatarPath, saveAvatar } from './avatars.js';
 import type { Bus } from './bus.js';
 import type { Engine } from './engine.js';
-import { git } from './repos.js';
+import { git, listSharedRepos, registerSharedRepo } from './repos.js';
 import { isInside } from '@local-agent/shared';
 import { CONTEXT_MARK, expandMentions } from './mentions.js';
 import { cloneInto, gitRoot, gitStatus, listDir, listGitRoots, openPullRequest, pushBranch, readExcerpt, validBranch } from './gitops.js';
@@ -53,14 +53,15 @@ import type { Store } from './db.js';
 import type { Vault } from './vault.js';
 import { renderSlides } from './slides.js';
 import { registerMonitor } from './monitor.js';
-import { OCR_URL, PIPER_URL, serviceUp } from './ocr.js';
+import { ensureManagedContainersNetwork, resolveServiceUrl } from './ocr.js';
+import { runPreCommitSemgrep } from './semgrep.js';
 import { benchRuntime, loadBench, machineInfo, saveBench } from './runtime-bench.js';
 import { registerOcr } from './ocr-routes.js';
 import { MEMBER_DENIED_TOOLS, OWNER_ID, accountOf, foreignPath, mustOwn, ownerOf, workspaceFor } from './accounts.js';
 import { memberByUsername } from './accounts.js';
 import { registerAccounts } from './members.js';
 import { registerMedia } from './media.js';
-import { prefillChatWorkspaces, resolveChatWorkspaces, setChatWorkspaces, chatWorkspacePaths } from './chat-workspaces.js';
+import { getChatWorkspaces, prefillChatWorkspaces, resolveChatWorkspaces, setChatWorkspaces, chatWorkspacePaths } from './chat-workspaces.js';
 import { usableModels } from './usable-models.js';
 import { registerWorkspaceRoutes } from './workspaces.js';
 import { budgetConfig, budgetReport, type MemoryBudget } from './memory.js';
@@ -291,19 +292,55 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const rec = RECOMMENDED_CONNECTORS.find((row) => row.id === id);
     return rec ? { name: rec.name, builtIn: false, status: recommendedConnected(store, id) ? 'connected' : 'not connected' } : null;
   };
-  // Web search is a built-in connector: on a fresh install, find SearXNG on :8088 or start the local container once.
-  if (ctx.autoConnectors) setTimeout(() => void (async () => {
-    if (store.getSettings().searxngUrl || connectorStateFlag(store, 'search:auto')) return;
-    connectorStateFlag(store, 'search:auto', true);
-    try {
-      const res = await fetchImpl('http://127.0.0.1:8088/search?q=ping&format=json', { signal: AbortSignal.timeout(3000) });
-      if (res.ok) { const current = store.getSettings(); store.saveSettings({ ...current, searxngUrl: 'http://127.0.0.1:8088' }, 'SearXNG found', { searxngUrl: 'http://127.0.0.1:8088' }); return; }
-    } catch { /* not running yet */ }
-    if (await docker.ping().catch(() => false)) {
-      const job = store.createJob('start-searxng', 'built-in web search');
-      await runSetup('start-searxng', undefined, job.id, ctx);
-    }
-  })().catch((error: Error) => store.addLog('warn', `Built-in search: ${error.message}`)), 3000);
+  // Startup auto-discovery: attach existing managed containers to our Docker network, auto-detect/heal SearXNG,
+  // and retry scanning Ollama / llama-server until a model server answers so the UI never stays stuck on "no models".
+  if (ctx.autoConnectors) {
+    void ensureManagedContainersNetwork(docker).catch(() => undefined);
+    // Background model discovery with retry backoff until Ollama / llama-server answers.
+    const delays = [0, 2000, 4000, 8000, 15000, 30000, 30000, 60000];
+    let attempt = 0;
+    const scanStartup = () => {
+      void (async () => {
+        try {
+          const report = await scanMachine(fetchImpl, docker, store);
+          lastScan = report;
+          engine.residentLarge = report.resident;
+          const foundLocal = store.listModels().some((m) => m.enabled && m.local && m.providerId !== 'prov_rehearsal');
+          if (report.ollama || foundLocal) {
+            bus.publish({ type: 'models_updated' });
+            return;
+          }
+        } catch { /* retry */ }
+        attempt += 1;
+        if (attempt < delays.length) setTimeout(scanStartup, delays[attempt]!);
+      })();
+    };
+    setTimeout(scanStartup, 500);
+
+    setTimeout(() => void (async () => {
+      await ensureManagedContainersNetwork(docker).catch(() => undefined);
+      const current = store.getSettings();
+      // Self-heal broken 127.0.0.1:8088 saved inside a bridge Docker container.
+      const savedUrl = (current.searxngUrl || '').trim();
+      const savedBrokenInDocker = inDockerContainer() && /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/|$)/i.test(savedUrl);
+      if (savedUrl && !savedBrokenInDocker) {
+        const ok = await findSearxng(fetchImpl, savedUrl);
+        if (ok) return;
+      }
+      const detected = await findSearxng(fetchImpl, savedBrokenInDocker ? undefined : savedUrl);
+      if (detected) {
+        store.saveSettings({ ...store.getSettings(), searxngUrl: detected }, 'SearXNG detected', { searxngUrl: detected });
+        connectorStateFlag(store, 'search:auto', true);
+        return;
+      }
+      if (connectorStateFlag(store, 'search:auto')) return;
+      if (await docker.ping().catch(() => false)) {
+        connectorStateFlag(store, 'search:auto', true);
+        const job = store.createJob('start-searxng', 'built-in web search');
+        await runSetup('start-searxng', undefined, job.id, ctx);
+      }
+    })().catch((error: Error) => store.addLog('warn', `Built-in search: ${error.message}`)), 2500);
+  }
   app.get('/api/connectors', async (req) => connectorReport(healthEnv(), accountOf(req).role === 'member'));
   app.patch('/api/connectors/:id', async (req) => {
     const id = (req.params as { id: string }).id;
@@ -460,6 +497,8 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       notify: z.enum(['all', 'mute']).optional(),
       language: z.enum(['auto', 'match', 'en', 'he']).optional(),
       hebrewCleanup: z.enum(['inherit', 'auto', 'on', 'off']).optional(),
+      voiceReply: z.boolean().optional(),
+      voiceName: z.string().max(80).optional(),
     }), req.body);
     mustOwn(store, req, 'agent', (req.params as { id: string }).id, 'Persona not found.');
     if (body.toolAllowlist) body.toolAllowlist = memberTools(req, body.toolAllowlist);
@@ -740,11 +779,13 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     if (body.action === 'commit') {
       const message = (body.message || '').trim();
       if (!message) throw http(400, 'Write a commit message.');
+      const scan = await runPreCommitSemgrep(docker, cwd, { dataDir: config.dataDir });
+      if (!scan.ok) throw http(400, scan.summary);
       const paths = (body.paths || []).filter((p) => p && !p.startsWith('-') && isInside(cwd, path.resolve(cwd, p)));
       fail(await git(cwd, ['add', '-A', '--', ...(paths.length ? paths : ['.'])]), 'Staging');
       const out = await git(cwd, ['commit', '-m', message], identFor(req));
       if (/nothing to commit/i.test(out)) throw http(400, 'Nothing to commit.');
-      return { output: fail(out, 'Commit') };
+      return { output: fail(out, 'Commit'), securityScan: scan.summary };
     }
     if (body.action === 'branch' || body.action === 'checkout') {
       const name = (body.name || '').trim();
@@ -816,7 +857,11 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   app.get('/api/sessions/:id/context', async (req) => {
     const id = (req.params as { id: string }).id;
     mustOwn(store, req, 'session', id, 'Chat not found.');
-    const helpers = engine.autonomy.listHelpers(id);
+    const helpers = engine.autonomy.listHelpers(id).map((h) => {
+      const childRun = h.childRunId ? store.getRun(h.childRunId) : null;
+      const modelName = childRun?.modelId ? (store.getModel(childRun.modelId)?.name || childRun.modelId) : null;
+      return { ...h, modelName };
+    });
     const files = listFiles(store, { sessionId: id, limit: 200, ownerId: me(req) });
     // Files a helper produced count as this chat's output too.
     const helperFiles = helpers.flatMap((row) => listFiles(store, { sessionId: row.childSessionId, limit: 50, ownerId: me(req), source: 'agent' }).map((file) => ({ ...file, helperId: row.id })));
@@ -824,6 +869,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const waiting = store.listApprovals('pending').filter((approval) => childRuns.has(approval.runId));
     return {
       helpers, approvals: waiting,
+      breakdown: engine.getSessionContextBreakdown(id),
       timers: engine.autonomy.timersFor(id), triggers: accountOf(req).role === 'member' ? [] : engine.autonomy.triggersFor(id),
       files: { uploads: files.filter((file) => file.source === 'upload'), produced: [...files.filter((file) => file.source !== 'upload'), ...helperFiles] },
       // One entry per reply that changed files and can still be rolled back.
@@ -870,7 +916,8 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const page = Number.isFinite(limit) && limit > 0 ? store.pageMessages(id, Math.min(500, Math.floor(limit))) : { messages: store.listMessages(id), hasMore: false };
     // A reply still running here (another tab, or a reload mid-run), so the page can attach to its stream.
     const activeRun = (store.db.prepare(`SELECT id, status FROM runs WHERE session_id = ? AND parent_run_id IS NULL AND status IN ('running', 'awaiting_approval', 'paused') ORDER BY started_at DESC LIMIT 1`).get(id) as { id: string; status: string } | undefined) ?? null;
-    return { session, activeRun, messages: page.messages, hasMore: page.hasMore, summaries: store.listSummaries(id), plan: readPlan(store, id), edits: listEdits(store, id), archived: store.listArchived(id), workshop };
+    const live = activeRun ? engine.getLiveStream(activeRun.id) : null;
+    return { session, activeRun, live, breakdown: engine.getSessionContextBreakdown(id), messages: page.messages, hasMore: page.hasMore, summaries: store.listSummaries(id), plan: readPlan(store, id), edits: listEdits(store, id), archived: store.listArchived(id), workshop };
   });
   app.get('/api/sessions/:id/messages', async (req) => {
     const id = (req.params as { id: string }).id;
@@ -904,6 +951,113 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     setChatWorkspaces(store, id, body.items);
     return { ...(await resolveChatWorkspaces(store, id, me(req))), session: store.getSession(id) };
   });
+  app.post('/api/sessions/:id/compact', async (req) => {
+    const id = (req.params as { id: string }).id;
+    mustOwn(store, req, 'session', id, 'Chat not found.');
+    if (engine.sessionBusy(id)) throw http(409, 'Wait for the current reply to finish or press Stop before compacting.');
+    return engine.compactSession(id);
+  });
+  app.post('/api/sessions/:id/handoff', async (req) => {
+    const id = (req.params as { id: string }).id;
+    mustOwn(store, req, 'session', id, 'Chat not found.');
+    return engine.handoffSession(id);
+  });
+  app.get('/api/projects/discover', async (req) => {
+    if (accountOf(req).role !== 'owner') throw http(403, 'Only the owner can discover local projects.');
+    const root = process.env.LA_PROJECTS_DIR || '/projects';
+    if (!fs.existsSync(root)) return { root, repos: [] };
+    const entries = await fs.promises.readdir(root, { withFileTypes: true }).catch(() => []);
+    const repos: { name: string; path: string; isGit: boolean }[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+      const full = path.join(root, entry.name);
+      const isGit = fs.existsSync(path.join(full, '.git'));
+      repos.push({ name: entry.name, path: full, isGit });
+    }
+    repos.sort((a, b) => Number(b.isGit) - Number(a.isGit) || a.name.localeCompare(b.name));
+    return { root, repos };
+  });
+  app.post('/api/projects/attach', async (req) => {
+    if (accountOf(req).role !== 'owner') throw http(403, 'Only the owner can attach local projects.');
+    const body = parse(z.object({ path: z.string().min(1), name: z.string().optional(), sessionId: z.string().optional() }), req.body);
+    const root = path.resolve(process.env.LA_PROJECTS_DIR || '/projects');
+    const target = path.resolve(body.path);
+    if (!target.startsWith(`${root}${path.sep}`) && target !== root) throw http(400, 'Project must live inside the mounted projects directory.');
+    if (!fs.existsSync(target)) throw http(404, 'Project folder not found.');
+    const label = (body.name || path.basename(target)).trim().slice(0, 60);
+    const existing = listSharedRepos(store).find((r) => path.resolve(r.path) === target);
+    const repo = existing ?? registerSharedRepo(store, { label, path: target, remote: null });
+    if (body.sessionId) {
+      mustOwn(store, req, 'session', body.sessionId, 'Chat not found.');
+      const rootEntry = listGitRoots(store, me(req)).find((r) => path.resolve(r.path) === target);
+      const rootId = rootEntry?.id ?? `repo:${repo.label}`;
+      const current = getChatWorkspaces(store, body.sessionId);
+      if (!current.some((item) => item.kind === 'root' && item.id === rootId)) {
+        setChatWorkspaces(store, body.sessionId, [...current, { kind: 'root', id: rootId }]);
+      }
+      return { repo, ...(await resolveChatWorkspaces(store, body.sessionId, me(req))) };
+    }
+    return { repo };
+  });
+  app.get('/api/sessions/:id/mention-files', async (req) => {
+    const id = (req.params as { id: string }).id;
+    mustOwn(store, req, 'session', id, 'Chat not found.');
+    const q = String((req.query as { q?: string }).q || '').trim().toLowerCase();
+    const resolved = await resolveChatWorkspaces(store, id, me(req));
+    const items: { kind: 'file' | 'git' | 'repo'; label: string; insert: string; detail: string }[] = [];
+    const seen = new Set<string>();
+    if (!q || 'git'.includes(q) || 'diff'.includes(q) || 'status'.includes(q)) {
+      items.push({ kind: 'git', label: '@git', insert: '@git (inspect git status and diff in the attached repo) ', detail: 'Current git status & diff' });
+    }
+    const skipDirs = new Set(['node_modules', '.git', 'dist', 'build', '.next', '__pycache__', '.venv', 'target']);
+    for (const root of resolved.roots.slice(0, 4)) {
+      const walk = async (dir: string, depth: number) => {
+        if (depth > 4 || items.length >= 28) return;
+        const entries = await fs.promises.readdir(dir, { withFileTypes: true }).catch(() => []);
+        for (const entry of entries) {
+          if (items.length >= 28) break;
+          if (entry.name.startsWith('.') && entry.name !== '.env.example') continue;
+          if (entry.isDirectory()) {
+            if (!skipDirs.has(entry.name)) await walk(path.join(dir, entry.name), depth + 1);
+          } else {
+            const rel = path.relative(root.path, path.join(dir, entry.name));
+            const fullLabel = `${root.label}/${rel}`;
+            if (q && !fullLabel.toLowerCase().includes(q)) continue;
+            if (seen.has(fullLabel)) continue;
+            seen.add(fullLabel);
+            items.push({ kind: 'file', label: fullLabel, insert: `@${fullLabel} `, detail: root.label });
+          }
+        }
+      };
+      await walk(root.path, 0);
+    }
+    return { items };
+  });
+  app.get('/api/schedules/presets', async () => ({
+    presets: [
+      {
+        id: 'morning-brief',
+        name: '[HEARTBEAT] Morning Brief',
+        cron: '0 8 * * *',
+        prompt: '[HEARTBEAT] Check any open tasks, upcoming timers, and recent git activity in attached repos. Give a crisp 5-bullet morning briefing.',
+        description: 'Daily 8:00 AM summary on the fast model.',
+      },
+      {
+        id: 'server-watchdog',
+        name: '[WATCHDOG] Server & GPU Health',
+        cron: '*/30 * * * *',
+        prompt: '[WATCHDOG] Check disk space, available RAM, and whether local-agent services (llama-server, SearXNG, OCR, Piper) are healthy. Only alert if disk > 85%, MemAvailable < 4 GiB, or a service is down.',
+        description: 'Runs every 30 min on the fast model; stays silent (HEARTBEAT_OK) unless an issue is detected.',
+      },
+      {
+        id: 'repo-watchdog',
+        name: '[WATCHDOG] Repo & Git Status',
+        cron: '0 */2 * * *',
+        prompt: '[WATCHDOG] Check git status in attached repos for uncommitted changes left behind or failed checks. Only alert if something needs attention.',
+        description: 'Runs every 2 hours on the fast model; only pings when dirty/broken.',
+      },
+    ],
+  }));
   app.delete('/api/sessions/:id', async (req) => {
     const id = (req.params as { id: string }).id;
     mustOwn(store, req, 'session', id, 'Chat not found.');
@@ -990,7 +1144,17 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     reply.hijack();
     reply.raw.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive', 'x-accel-buffering': 'no' });
     const send = (event: unknown) => reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
-    send({ type: 'snapshot', run: store.getRun(id), steps: store.listSteps(id), messages: store.listMessages(run.sessionId) });
+    const live = engine.getLiveStream(id);
+    send({
+      type: 'snapshot',
+      run: store.getRun(id),
+      steps: store.listSteps(id),
+      messages: store.listMessages(run.sessionId),
+      streaming: live?.text ?? '',
+      thinking: live?.thinking ?? '',
+      statusDetail: live?.detail ?? '',
+      waitInfo: live?.waitInfo ?? null,
+    });
     const off = bus.subscribeRun(id, send);
     const beat = setInterval(() => reply.raw.write(': ping\n\n'), 15000);
     req.raw.on('close', () => { clearInterval(beat); off(); });
@@ -998,9 +1162,10 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   app.post('/api/runs/:id/control', async (req) => {
     const id = (req.params as { id: string }).id;
     mustOwn(store, req, 'run', id, 'Run not found.');
-    const body = parse(z.object({ action: z.enum(['pause', 'resume', 'stop', 'retry_from']), checkpointId: z.string().optional() }), req.body);
+    const body = parse(z.object({ action: z.enum(['pause', 'resume', 'stop', 'force', 'retry_from']), checkpointId: z.string().optional() }), req.body);
     if (body.action === 'pause') return { run: engine.pause(id) };
     if (body.action === 'stop') return { run: engine.stop(id) };
+    if (body.action === 'force') return engine.forceRun(id);
     if (body.action === 'retry_from') {
       if (!body.checkpointId) throw http(400, 'checkpointId is required.');
       return engine.retryFrom(id, body.checkpointId);
@@ -1057,11 +1222,53 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       }),
     };
   });
+  app.post('/api/providers', async (req) => {
+    const body = parse(z.object({
+      id: z.string().min(2).max(60).optional(),
+      name: z.string().min(1).max(80),
+      kind: z.enum(['openai_compat', 'gemini', 'openrouter']).default('openai_compat'),
+      baseUrl: z.string().url(),
+      apiKeyEnv: z.string().nullable().optional(),
+      enabled: z.boolean().default(true),
+    }), req.body);
+    const cleanId = body.id
+      ? (body.id.startsWith('prov_') ? body.id : `prov_${body.id}`)
+      : `prov_${body.name.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`;
+    const provider = store.upsertProvider({
+      id: cleanId,
+      kind: body.kind ?? 'openai_compat',
+      name: body.name,
+      baseUrl: body.baseUrl.replace(/\/$/, ''),
+      apiKeyEnv: body.apiKeyEnv ?? null,
+      enabled: body.enabled ?? true,
+    });
+    lastScan = await scanMachine(fetchImpl, docker, store).catch(() => lastScan);
+    bus.publish({ type: 'models_updated' });
+    return { provider, models: store.listModels() };
+  });
   app.patch('/api/providers/:id', async (req) => {
     const body = parse(z.object({ enabled: z.boolean().optional(), baseUrl: z.string().nullable().optional(), apiKeyEnv: z.string().nullable().optional(), name: z.string().optional() }), req.body);
     const provider = store.updateProvider((req.params as { id: string }).id, body);
     if (!provider) throw http(404, 'Provider not found.');
+    lastScan = await scanMachine(fetchImpl, docker, store).catch(() => lastScan);
+    bus.publish({ type: 'models_updated' });
     return { provider };
+  });
+  app.post('/api/settings/searxng/test', async (req) => {
+    const body = parse(z.object({ url: z.string().optional() }), req.body ?? {});
+    const target = (body.url || '').trim();
+    const detected = await findSearxng(fetchImpl, target || undefined);
+    if (!detected) return { ok: false, url: target || null, detail: 'SearXNG did not answer JSON search on any candidate URL.' };
+    return { ok: true, url: detected, detail: `SearXNG answered at ${detected}` };
+  });
+  app.get('/api/system/update-status', async () => {
+    const backups = listBackups(config.dataDir);
+    let commit = '';
+    try {
+      const head = await new Promise<string>((resolve) => execFile('git', ['rev-parse', '--short', 'HEAD'], { cwd: process.cwd() }, (err, out) => resolve(err ? '' : out.trim())));
+      commit = head;
+    } catch { /* not a git checkout */ }
+    return { version: VERSION, commit: commit || null, dataDir: config.dataDir, backupsCount: backups.length, latestBackup: backups[0] ?? null, inDocker: inDockerContainer() };
   });
 
   app.get('/api/mcp', async () => ({ servers: mcp.list().map((server) => mcpView(server)), builtin: ['shell', 'files', 'web_search', 'web_fetch', 'docker', 'memory', 'consult_agent', 'plan', 'grep', 'glob', 'apply_patch', 'git'] }));
@@ -1369,11 +1576,13 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     }
   });
   app.post('/api/voice/speak', async (req, reply) => {
-    const body = parse(z.object({ text: z.string().min(1).max(2000), lang: z.enum(['he', 'en']).optional() }), req.body);
+    const body = parse(z.object({ text: z.string().min(1).max(2000), lang: z.enum(['he', 'en']).optional(), agentId: z.string().optional(), voice: z.string().max(80).optional() }), req.body);
     try {
       const account = accountOf(req);
       const cloud = account.role === 'owner' || account.limits.cloud !== false;
-      const audio = await speak(fetchImpl, body.text, { lang: body.lang, geminiKey: cloud ? process.env.GEMINI_API_KEY : '' });
+      const agent = body.agentId ? store.getAgent(body.agentId) : null;
+      const agentLang = agent?.language === 'he' || agent?.language === 'en' ? agent.language : undefined;
+      const audio = await speak(fetchImpl, body.text, { lang: body.lang ?? agentLang, voice: body.voice || agent?.voiceName || undefined, geminiKey: cloud ? process.env.GEMINI_API_KEY : '' });
       reply.header('content-type', audio.type);
       reply.header('x-tts-engine', audio.engine);
       return reply.send(audio.bytes);
@@ -1424,10 +1633,19 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const cfg = budgetConfig(store.getSettings());
     return { tracked: true, budgetBytes: cfg.budgetBytes, usage: await memory.usage(), active: memory.snapshotActive(), queue: memory.snapshotQueue(), summary: (await budgetReport(memory, cfg)).detail };
   });
+  app.post('/api/memory/recheck', async () => {
+    const memory = engine.memory;
+    if (!memory) return { tracked: false };
+    await memory.recheck();
+    const cfg = budgetConfig(store.getSettings());
+    return { tracked: true, usage: await memory.usage(), active: memory.snapshotActive(), queue: memory.snapshotQueue(), summary: (await budgetReport(memory, cfg)).detail };
+  });
   registerMonitor(app, {
     store, redact: (text) => vault.redact(text),
     health: async () => {
-      const [checks, ocrUp, piperUp] = await Promise.all([healthChecks(store, docker, fetchImpl, config.dataDir, engine.memory), serviceUp(fetchImpl, OCR_URL), serviceUp(fetchImpl, PIPER_URL)]);
+      const [checks, ocrFound, piperFound] = await Promise.all([healthChecks(store, docker, fetchImpl, config.dataDir, engine.memory), resolveServiceUrl(fetchImpl, 'ocr'), resolveServiceUrl(fetchImpl, 'piper')]);
+      const ocrUp = ocrFound?.health;
+      const piperUp = piperFound?.health;
       return [...checks,
         { id: 'ocr', ok: Boolean(ocrUp), optional: true, detail: ocrUp ? `OCR service up (${(ocrUp.langs as string[] | undefined)?.join('+') ?? 'tesseract'})` : 'OCR service not running' },
         { id: 'piper', ok: Boolean(piperUp), optional: true, detail: piperUp ? 'Piper voices up' : 'Piper voices not running' }];
@@ -1852,14 +2070,15 @@ async function runSetup(action: string, model: string | undefined, jobId: string
   try {
     if (action === 'pull-model' || action === 'pull-embed') {
       const name = action === 'pull-embed' ? 'nomic-embed-text' : (model || 'gemma4:e4b');
-      const base = (process.env.OLLAMA_HOST || lastScan?.ollama?.url || 'http://127.0.0.1:11434').replace(/\/$/, '');
+      const base = lastScan?.ollama?.url || ollamaRoot();
       await ollamaPull(fetchImpl, base, name, (text) => store.appendJob(jobId, text));
     } else if (action === 'bench-runtime') {
-      const base = (process.env.OLLAMA_HOST || lastScan?.ollama?.url || 'http://127.0.0.1:11434').replace(/\/$/, '');
+      const base = lastScan?.ollama?.url || ollamaRoot();
       const report = await benchRuntime(fetchImpl, base, { model: model || undefined, log: (line) => store.appendJob(jobId, line) });
       saveBench(ctx.config.dataDir, report);
     } else if (action === 'start-searxng') {
       if (!(await docker.ping())) throw new Error(`Docker is not available at ${docker.describe()}.`);
+      await preChangeBackup(ctx.config.dataDir, 'pre-searxng');
       const config = searxngConfig(ctx.config.dataDir);
       store.appendJob(jobId, 'pulling docker.io/searxng/searxng:latest\n');
       await docker.pull('docker.io/searxng/searxng:latest').catch(() => store.appendJob(jobId, 'pull failed; using the local image if there is one\n'));
@@ -1868,7 +2087,7 @@ async function runSetup(action: string, model: string | undefined, jobId: string
         Image: 'docker.io/searxng/searxng:latest',
         name: 'local-agent-searxng',
         replace: true,
-        Labels: { 'local-agent.role': 'searxng' },
+        Labels: { 'local-agent.role': 'searxng', 'local-agent.watch': '1' },
         Env: [`SEARXNG_SECRET=${config.secret}`, 'SEARXNG_BASE_URL=http://127.0.0.1:8088/'],
         ExposedPorts: { '8080/tcp': {} },
         HostConfig: {
@@ -1880,7 +2099,10 @@ async function runSetup(action: string, model: string | undefined, jobId: string
       });
       store.appendJob(jobId, `started ${id.slice(0, 12)} with JSON output on\n`);
       const current = store.getSettings();
-      if (!current.searxngUrl) store.saveSettings({ ...current, searxngUrl: 'http://127.0.0.1:8088' }, 'SearXNG started', { searxngUrl: 'http://127.0.0.1:8088' });
+      const reachable = await findSearxng(fetchImpl) || (inDockerContainer() ? 'http://local-agent-searxng:8080' : 'http://127.0.0.1:8088');
+      if (!current.searxngUrl || (inDockerContainer() && /^https?:\/\/(127\.0\.0\.1|localhost)/i.test(current.searxngUrl))) {
+        store.saveSettings({ ...current, searxngUrl: reachable }, 'SearXNG started', { searxngUrl: reachable });
+      }
     } else if (action === 'start-whisper' || action === 'start-kokoro') {
       if (!docker.available()) throw new Error('Docker is not available.');
       const whisper = action === 'start-whisper';

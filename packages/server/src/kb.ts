@@ -42,7 +42,8 @@ export function ollamaEmbedder(fetchImpl: typeof fetch, model = 'nomic-embed-tex
       const response = await fetchImpl(`${base}/api/embed`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ model, input: texts }),
+        // CPU by default (LA_EMBED_GPU=1 to change) so the GPU's GTT stays with llama-server.
+        body: JSON.stringify({ model, input: texts, keep_alive: '5m', ...(process.env.LA_EMBED_GPU === '1' ? {} : { options: { num_gpu: 0 } }) }),
         signal: AbortSignal.timeout(20_000),
       });
       if (response.ok) {

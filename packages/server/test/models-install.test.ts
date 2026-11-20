@@ -18,7 +18,7 @@ describe('model install plan', () => {
     const plan = planInstall(mini, {}, ['gemma3:4b']);
     expect(plan.fits).toBe(true);
     expect(plan.peakGiB).toBeLessThanOrEqual(40);
-    expect(plan.pulls).toEqual(['gemma4:26b-a4b', 'qwen3.6:35b-a3b', 'embeddinggemma']);
+    expect(plan.pulls).toEqual(['gemma4:26b-a4b', 'gpt-oss:20b', 'embeddinggemma']);
     expect(plan.pulls).not.toContain('sdxl-turbo');
   });
   it('refuses choices that pass the cap and uses catalog sizes', () => {

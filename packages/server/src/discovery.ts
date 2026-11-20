@@ -4,8 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { resolveProfile } from '@local-agent/shared';
 import type { ModelRow, Store } from './db.js';
-import { commandOnPath } from './docker.js';
+import { commandOnPath, inDockerContainer } from './docker.js';
 import type { DockerCtl } from './docker.js';
+import { normalizeOllamaHost, setOllamaRoot } from './ollama.js';
 
 export interface Probe {
   id: string;
@@ -32,6 +33,7 @@ const PORTS = [
   { id: 'ollama', url: 'http://127.0.0.1:11434', kind: 'ollama' },
   { id: 'ollama-host', url: 'http://host.docker.internal:11434', kind: 'ollama' },
   { id: 'llama', url: 'http://127.0.0.1:8080/v1', kind: 'openai' },
+  { id: 'llama-host', url: 'http://host.docker.internal:8080/v1', kind: 'openai' },
   { id: 'lmstudio', url: 'http://127.0.0.1:1234/v1', kind: 'openai' },
   { id: 'vllm', url: 'http://127.0.0.1:8000/v1', kind: 'openai' },
 ];
@@ -40,31 +42,55 @@ export async function scanMachine(fetchImpl: typeof fetch, docker: DockerCtl, st
   const probes: Probe[] = [];
   let ollama: DiscoveryReport['ollama'] = null;
   const resident: string[] = [];
-  const host = process.env.OLLAMA_HOST;
-  const targets = host ? [{ id: 'ollama-env', url: host.replace(/\/$/, ''), kind: 'ollama' }, ...PORTS] : PORTS;
+  const host = process.env.OLLAMA_HOST ? normalizeOllamaHost(process.env.OLLAMA_HOST) : '';
+  const llamaEnv = process.env.LLAMA_SERVER_URL ? process.env.LLAMA_SERVER_URL.trim().replace(/\/$/, '') : '';
+  const savedOpenAI = store.listProviders()
+    .filter((p) => p.enabled && p.kind === 'openai_compat' && p.id !== 'prov_ollama' && p.baseUrl)
+    .map((p) => ({ id: p.id.replace(/^prov_/, ''), url: p.baseUrl!.replace(/\/$/, ''), kind: 'openai', providerName: p.name }));
+  const rawTargets: { id: string; url: string; kind: string; providerName?: string }[] = [
+    ...(host ? [{ id: 'ollama-env', url: host, kind: 'ollama' }] : []),
+    ...(llamaEnv ? [{ id: 'llama', url: llamaEnv.endsWith('/v1') ? llamaEnv : `${llamaEnv}/v1`, kind: 'openai', providerName: 'llama-server' }] : []),
+    ...savedOpenAI,
+    ...PORTS,
+  ];
+  const seenUrls = new Set<string>();
+  const targets = rawTargets.filter((t) => {
+    const key = `${t.kind}:${t.url}`;
+    if (seenUrls.has(key)) return false;
+    seenUrls.add(key);
+    return true;
+  });
+  let llamaFound = false;
   for (const target of targets) {
+    if (target.id === 'llama-host' && llamaFound) continue;
     try {
       if (target.kind === 'ollama') {
-        const response = await fetchImpl(`${target.url}/api/tags`, { signal: AbortSignal.timeout(700) });
+        const response = await fetchImpl(`${target.url}/api/tags`, { signal: AbortSignal.timeout(3000) });
         if (!response.ok) throw new Error(String(response.status));
         const json = await response.json() as { models?: { name: string; size?: number; details?: { parameter_size?: string; family?: string } }[] };
         const models = parseOllamaTags(json).map((model) => ({ ...model, family: (json.models ?? []).find((item) => item.name === model.name)?.details?.family }));
         probes.push({ id: target.id, kind: 'ollama', ok: true, detail: `${models.length} model${models.length === 1 ? '' : 's'} at ${target.url}`, url: target.url });
-        if (!ollama) ollama = { url: target.url, models };
+        if (!ollama) {
+          ollama = { url: target.url, models };
+          setOllamaRoot(target.url);
+        }
         try {
-          const ps = await fetchImpl(`${target.url}/api/ps`, { signal: AbortSignal.timeout(700) });
+          const ps = await fetchImpl(`${target.url}/api/ps`, { signal: AbortSignal.timeout(2000) });
           if (ps.ok) {
             const body = await ps.json() as { models?: { name?: string }[] };
             for (const model of body.models ?? []) if (model.name) resident.push(model.name);
           }
         } catch { /* ps is optional */ }
       } else {
-        const response = await fetchImpl(`${target.url}/models`, { signal: AbortSignal.timeout(700) });
+        const response = await fetchImpl(`${target.url}/models`, { signal: AbortSignal.timeout(3000) });
         if (!response.ok) throw new Error(String(response.status));
         const json = await response.json() as { data?: { id?: string }[] };
         const count = json.data?.length ?? 0;
+        const normId = target.id === 'llama-host' ? 'llama' : target.id;
+        if (normId === 'llama') llamaFound = true;
         probes.push({ id: target.id, kind: 'openai', ok: true, detail: `${count} model${count === 1 ? '' : 's'} at ${target.url}`, url: target.url });
-        rememberOpenAI(store, target.id, target.url, json);
+        const nCtx = normId === 'llama' ? await llamaContext(fetchImpl, target.url) : 0;
+        rememberOpenAI(store, normId, target.url, json, target.providerName || (normId === 'llama' ? 'llama-server' : normId), nCtx);
       }
     } catch {
       probes.push({ id: target.id, kind: target.kind, ok: false, detail: `No answer from ${target.url}`, url: target.url });
@@ -76,7 +102,7 @@ export async function scanMachine(fetchImpl: typeof fetch, docker: DockerCtl, st
   probes.push({ id: 'docker', kind: 'docker', ok: dockerOk, detail: dockerOk ? `Docker answered at ${docker.describe()}.` : `Docker did not answer at ${docker.describe()}. Set DOCKER_HOST if it listens elsewhere.` });
   const tailscale = await tailscaleIp();
   const cloudflared = await commandOnPath('cloudflared');
-  const searxng = await findSearxng(fetchImpl, process.env.SEARXNG_URL);
+  const searxng = await findSearxng(fetchImpl, store.getSettings().searxngUrl || process.env.SEARXNG_URL);
   return {
     probedAt: new Date().toISOString(), probes, ollama, resident, gpu, docker: dockerOk, tailscale, cloudflared,
     memAvailableGiB: readMem(), searxng,
@@ -111,16 +137,36 @@ function rememberOllama(store: Store, ollama: NonNullable<DiscoveryReport['ollam
   }
 }
 
-function rememberOpenAI(store: Store, id: string, base: string, json: { data?: { id?: string }[] }) {
-  const provider = store.upsertProvider({ id: `prov_${id}`, kind: 'openai_compat', name: id, baseUrl: base, enabled: true });
-  for (const name of parseOpenAIModels(json)) {
+/** llama-server's per-slot context (-c), so prompts never exceed what the server was started with. */
+export async function llamaContext(fetchImpl: typeof fetch, base: string): Promise<number> {
+  try {
+    const root = base.replace(/\/$/, '').replace(/\/v1$/, '');
+    const response = await fetchImpl(`${root}/props`, { signal: AbortSignal.timeout(2000) });
+    if (!response.ok) return 0;
+    const json = await response.json() as { default_generation_settings?: { n_ctx?: number; params?: { n_ctx?: number } }; n_ctx?: number };
+    return Number(json.default_generation_settings?.n_ctx ?? json.default_generation_settings?.params?.n_ctx ?? json.n_ctx ?? 0) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+function rememberOpenAI(store: Store, id: string, base: string, json: { data?: { id?: string }[] }, displayName?: string, nCtx = 0) {
+  const provider = store.upsertProvider({ id: `prov_${id}`, kind: 'openai_compat', name: displayName || id, baseUrl: base, enabled: true });
+  const names = parseOpenAIModels(json);
+  for (const name of names) {
     const profile = resolveProfile(name);
     store.upsertModel({
       id: `${id}_${name.replace(/[^a-z0-9]+/gi, '_')}`, providerId: provider.id, name, apiName: name, profileId: profile.id,
-      tokenizer: profile.tokenizer, contextWindow: profile.contextWindow, practicalBudget: profile.practicalBudget, strategy: profile.strategy,
+      tokenizer: profile.tokenizer, contextWindow: nCtx ? Math.min(profile.contextWindow, nCtx) : profile.contextWindow,
+      practicalBudget: nCtx ? Math.min(profile.practicalBudget, nCtx) : profile.practicalBudget, strategy: profile.strategy,
       sizeClass: profile.sizeClass, local: true, modalities: profile.modalities, strengths: profile.strengths, typicalQ4GiB: profile.typicalQ4GiB ?? null,
       priceIn: 0, priceOut: 0, notes: profile.notes, parameterSize: null, family: profile.family, source: 'discovered', embedding: false, freeTier: null, enabled: true,
     });
+  }
+  const installed = new Set(names);
+  for (const row of store.listModels()) {
+    if (row.providerId !== provider.id || row.source !== 'discovered' || !row.enabled) continue;
+    if (!installed.has(row.apiName)) store.updateModel(row.id, { enabled: false });
   }
 }
 
@@ -162,12 +208,19 @@ async function tailscaleIp() {
   });
 }
 
-async function findSearxng(fetchImpl: typeof fetch, configured?: string) {
-  const urls = [configured, 'http://127.0.0.1:8088', 'http://host.docker.internal:8088'].filter((url): url is string => Boolean(url));
-  for (const url of urls) {
+export function searxngCandidates(configured?: string): string[] {
+  const envUrl = process.env.SEARXNG_URL;
+  const list = inDockerContainer()
+    ? [configured, envUrl, 'http://local-agent-searxng:8080', 'http://host.docker.internal:8088', 'http://127.0.0.1:8088']
+    : [configured, envUrl, 'http://127.0.0.1:8088', 'http://host.docker.internal:8088', 'http://local-agent-searxng:8080'];
+  return [...new Set(list.filter((url): url is string => Boolean(url && url.trim())).map((u) => u.trim().replace(/\/$/, '')))];
+}
+
+export async function findSearxng(fetchImpl: typeof fetch, configured?: string) {
+  for (const url of searxngCandidates(configured)) {
     try {
-      const response = await fetchImpl(`${url.replace(/\/$/, '')}/search?q=ping&format=json`, { signal: AbortSignal.timeout(700) });
-      if (response.ok) return url.replace(/\/$/, '');
+      const response = await fetchImpl(`${url}/search?q=ping&format=json`, { signal: AbortSignal.timeout(1500) });
+      if (response.ok) return url;
     } catch { /* next */ }
   }
   return null;

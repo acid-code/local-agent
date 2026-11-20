@@ -1,11 +1,10 @@
-import { ModelInstaller } from '../components/ModelInstaller';
 import { CuteArt } from '../components/CuteArt';
 import { isOwner } from '../lib/role';
 import { useEffect, useRef, useState } from 'react';
 import { Menu as DropMenu } from '../components/ui';
 import { ModelPicker, useUsableModels } from '../lib/models';
 import { browserDictationSupported, startDictation } from '../lib/dictation';
-import { ScanText, AtSign, Info, Layers, Brain, Check, ChevronDown, Code2, Copy, Download, Eye, FileText, Folder, FolderGit2, GitBranch, ListTree, Menu, MessageSquare, MessageSquarePlus, Pin, PinOff, Plus, Search, Mic, PanelRight, Paperclip, Pencil, Quote, RotateCcw, Send, Share, Square, Trash2, Volume2, Wrench, X } from 'lucide-react';
+import { ScanText, AtSign, Info, Layers, Brain, Check, ChevronDown, Code2, Copy, Download, Eye, FileText, Folder, FolderGit2, GitBranch, Headphones, ListTree, Menu, MessageSquare, MessageSquarePlus, Pin, PinOff, Plus, Search, Mic, PanelRight, Paperclip, Pencil, Quote, RotateCcw, Send, Share, Square, Trash2, Volume2, Wrench, X } from 'lucide-react';
 import { CiteContext, type CiteHandlers } from '../components/Markdown';
 import { FileViewer, type QuotePick, type ViewerSource } from '../components/FileViewer';
 import { MentionPicker, type MentionPick } from '../components/MentionPicker';
@@ -17,9 +16,11 @@ import { PersonaStatePanel } from '../components/PersonaStatePanel';
 import { PersonaPanel, useWorkspaces, type PanelAgent } from '../components/PersonaPanel';
 import { PersonaChip, greetingFor, startersFor } from '../components/ChatChips';
 import { ContextPanel } from '../components/ContextPanel';
-import { parseSources, toolSummary } from '@local-agent/shared';
+import { ContextRing } from '../components/ContextRing';
+import { ContextNudgeBanner, DecisionTimeline, InlineDiffCard, LocalRepoPicker, MiniAgentStrip, type MiniAgentRow } from '../components/ChatUpgrades';
+import { parseSources, toolSummary, type ContextBreakdown } from '@local-agent/shared';
 import { toast, errorText } from '../lib/toast';
-import { speak } from '../lib/speak';
+import { speak, subscribeSpeaking } from '../lib/speak';
 import { api, post } from '../lib/api';
 import { isAbort, latestOnly } from '../lib/latest';
 import { Markdown } from '../components/Markdown';
@@ -28,7 +29,7 @@ import { t, fmt } from '../i18n';
 
 interface Session { id: string; title: string; agentId: string | null; mode: 'chat' | 'code'; workshopId?: string | null; modelPin?: string | null; updatedAt?: string }
 type Agent = PanelAgent & FaceAgent;
-interface Message { id: string; role: string; content: string; createdAt?: string; agentId?: string | null; toolName?: string | null; routingNote?: string | null; toolCalls?: { name: string }[] | null }
+interface Message { id: string; role: string; content: string; createdAt?: string; agentId?: string | null; toolName?: string | null; routingNote?: string | null; thinking?: string | null; toolCalls?: { name: string }[] | null }
 interface Step { id: string; kind: string; name: string; status: string; latencyMs?: number; output?: unknown; error?: string | null }
 interface Plan { id: string; items: { id: string; text: string; status: string; note?: string | null }[] }
 interface Edit { id: string; label: string; diff: string; revertedAt: string | null }
@@ -73,7 +74,21 @@ export function Chat() {
   const { models: usable, all: models, loaded: modelsLoaded } = modelState;
   const [modelPin, setModelPin] = useState<string | null>(null);
   const [loadingNote, setLoadingNote] = useState('');
-  const [meter, setMeter] = useState<{ used: number; budget: number } | null>(null);
+  const [breakdown, setBreakdown] = useState<ContextBreakdown | null>(null);
+  const [miniAgents, setMiniAgents] = useState<MiniAgentRow[]>([]);
+  const [keptEdits, setKeptEdits] = useState<Set<string>>(() => new Set());
+  const [nudgeDismissed, setNudgeDismissed] = useState(false);
+  const [voiceLoop, setVoiceLoop] = useState(false);
+  const voiceLoopRef = useRef(false);
+  voiceLoopRef.current = voiceLoop;
+  const [speakingId, setSpeakingId] = useState<string | null>(null);
+  const [nearBottom, setNearBottom] = useState(true);
+  const nearBottomRef = useRef(true);
+  const modelsRef = useRef(models);
+  modelsRef.current = models;
+  const agentsRef = useRef(agents);
+  agentsRef.current = agents;
+  useEffect(() => subscribeSpeaking(setSpeakingId), []);
   const [rail, setRail] = useState(false);
   const [trace, setTrace] = useState(false);
   const box = useRef<HTMLDivElement>(null);
@@ -159,7 +174,7 @@ export function Chat() {
     try {
       const [data, wsData] = await Promise.all([
         // Newest page only; a jump to an older message loads everything so it can be found.
-        api<{ session: Session; activeRun?: { id: string; status: string } | null; messages: Message[]; hasMore?: boolean; plan: Plan | null; edits: Edit[] }>(pendingJump.current ? `/api/sessions/${id}` : `/api/sessions/${id}?limit=${PAGE}`, { signal: gate.signal }),
+        api<{ session: Session; activeRun?: { id: string; status: string } | null; live?: { text: string; thinking: string; status: string; detail?: string } | null; breakdown?: ContextBreakdown | null; messages: Message[]; hasMore?: boolean; plan: Plan | null; edits: Edit[] }>(pendingJump.current ? `/api/sessions/${id}` : `/api/sessions/${id}?limit=${PAGE}`, { signal: gate.signal }),
         api<typeof chatWs>(`/api/sessions/${id}/workspaces`, { signal: gate.signal }).catch((error) => { if (isAbort(error)) throw error; return { items: [], roots: [], sets: [] }; }),
       ]);
       if (!gate.current()) return;
@@ -171,13 +186,30 @@ export function Chat() {
       setEdits(data.edits);
       setMode(data.session.mode);
       setModelPin(data.session.modelPin || null);
-      setStreaming('');
-      setThinking('');
-      // Reloading the same chat after a failed reply keeps the reason on screen.
-      if (switching) setRunError(null);
-      // Attach to a reply already running in this chat; drop the stream of a chat we left.
-      if (data.activeRun) { runSession.current = id; setRunId(data.activeRun.id); setStatus(data.activeRun.status); }
-      else if (runSession.current !== id) { runSession.current = null; setRunId(null); setStatus(''); }
+      setBreakdown(data.breakdown ?? null);
+      if (switching) {
+        setRunError(null);
+        setLastModel('');
+      }
+      // Attach to a reply already running in this chat and hydrate any in-progress streamed output; drop the stream of a chat we left.
+      if (data.activeRun) {
+        runSession.current = id;
+        setRunId(data.activeRun.id);
+        setStatus(data.live?.status || data.activeRun.status);
+        setStreaming(data.live?.text || '');
+        setThinking(data.live?.thinking || '');
+        setLoadingNote(data.live?.detail || '');
+      } else if (runSession.current !== id) {
+        runSession.current = null;
+        setRunId(null);
+        setStatus('');
+        setStreaming('');
+        setThinking('');
+        setLoadingNote('');
+      } else {
+        setStreaming('');
+        setThinking('');
+      }
       if (data.session.agentId) void post(`/api/agents/${data.session.agentId}/read`, {}).catch(() => undefined);
     } catch (error) {
       if (!isAbort(error) && gate.current()) toast((error as Error).message, 'error');
@@ -197,27 +229,29 @@ export function Chat() {
 
   // While helpers run in the background, check now and then; when the last one ends, its result is in the chat.
   useEffect(() => {
-    if (!current) return;
+    setNudgeDismissed(false);
+    if (!current) { setMiniAgents([]); return; }
     const id = current;
     let stopped = false;
     let wasBusy = false;
     let timer: number | undefined;
     const check = async () => {
       try {
-        const ctx = await api<{ helpers: { status: string }[] }>(`/api/sessions/${id}/context`);
+        const ctx = await api<{ helpers: MiniAgentRow[] }>(`/api/sessions/${id}/context`);
         if (stopped || currentRef.current !== id) return;
-        const busy = ctx.helpers.some((row) => row.status === 'running' || row.status === 'waiting');
+        setMiniAgents(ctx.helpers || []);
+        const busy = (ctx.helpers || []).some((row) => row.status === 'running' || row.status === 'queued' || row.status === 'waiting');
         if (wasBusy && !busy) {
           const data = await api<{ messages: Message[] }>(`/api/sessions/${id}`);
           if (!stopped && currentRef.current === id) { setMessages(data.messages); setHelperTick((value) => value + 1); }
         }
         wasBusy = busy;
-        if (busy) timer = window.setTimeout(() => void check(), 4000);
+        if (busy) timer = window.setTimeout(() => void check(), 2500);
       } catch { /* the next run or open checks again */ }
     };
     void check();
     return () => { stopped = true; window.clearTimeout(timer); };
-  }, [current, status]);
+  }, [current, status, helperTick]);
 
   const location = useLocation();
   // Runs on every navigation (location.key), so clicking the same persona again still opens it.
@@ -268,8 +302,19 @@ export function Chat() {
       prependAnchor.current = null;
       return;
     }
-    box.current?.scrollTo({ top: box.current.scrollHeight });
+    if (nearBottomRef.current) {
+      box.current?.scrollTo({ top: box.current.scrollHeight });
+    }
   }, [messages, streaming, thinking, runError]);
+
+  // Periodic memory re-check while waiting in the admission queue so runs never stay stuck once memory frees.
+  useEffect(() => {
+    if (status !== 'waiting') return;
+    const timer = window.setInterval(() => {
+      void post('/api/memory/recheck', {}).catch(() => undefined);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [status]);
   async function loadOlder() {
     const first = messages.find((message) => !message.id.startsWith('local') && !message.id.startsWith('div-'));
     if (!current || !first || loadingOlder) return;
@@ -332,13 +377,20 @@ export function Chat() {
       const data = JSON.parse(event.data);
       if (data.type === 'snapshot') {
         setSteps(data.steps || []);
-        setStatus(data.run?.status || '');
+        setStatus(data.statusDetail && data.run?.status === 'running' && /Waiting for memory/i.test(String(data.statusDetail)) ? 'waiting' : (data.run?.status || ''));
+        if (typeof data.streaming === 'string' && data.streaming) setStreaming(data.streaming);
+        if (typeof data.thinking === 'string' && data.thinking) setThinking(data.thinking);
+        if (typeof data.statusDetail === 'string' && data.statusDetail) setLoadingNote(data.statusDetail);
+        if (Array.isArray(data.messages) && data.run?.sessionId === currentRef.current) {
+          setMessages((prev) => (data.messages.length >= prev.length ? data.messages : prev));
+        }
         // The run may have ended before this stream connected (e.g. it failed at once): show why.
         if (data.run?.status === 'failed' && data.run?.error) setRunError(String(data.run.error));
         // Ended before this stream connected: the 'done' event is gone, so load the reply now.
         if (['completed', 'failed', 'stopped', 'interrupted'].includes(String(data.run?.status))) {
           setLoadingNote('');
-          if (current && currentRef.current === current) void openSession(current);
+          const cur = currentRef.current;
+          if (cur) void openSession(cur);
           void refreshLists().catch(() => undefined);
           source.close();
           return;
@@ -350,15 +402,37 @@ export function Chat() {
       if (data.type === 'step' && data.step) {
         setSteps((value) => [...value.filter((step) => step.id !== data.step.id), data.step]);
         if (data.step.kind === 'model' && data.step.name) setLastModel(String(data.step.name));
-        if (data.step.name === 'tasks' && data.step.status === 'completed' && current) void api<{ plan: Plan | null }>(`/api/sessions/${current}?limit=1`).then((fresh) => setPlan(fresh.plan)).catch(() => undefined);
+        const cur = currentRef.current;
+        if (data.step.name === 'tasks' && data.step.status === 'completed' && cur) void api<{ plan: Plan | null }>(`/api/sessions/${cur}?limit=1`).then((fresh) => setPlan(fresh.plan)).catch(() => undefined);
       }
       if (data.type === 'message') {
         if (data.message?.sessionId && data.message.sessionId !== currentRef.current) return;
-        setMessages((value) => [...value, data.message]);
+        setMessages((value) => [...value.filter((m) => m.id !== data.message.id), data.message]);
         setStreaming('');
         setThinking('');
+        // Auto-speak reply if the responding persona has Answer by voice enabled or Voice-First Mode is on.
+        if (data.message?.role === 'assistant' && data.message?.content?.trim() && !(data.message.toolCalls?.length)) {
+          const speaker = agentsRef.current.find((a) => a.id === data.message.agentId);
+          if (speaker?.voiceReply || voiceLoopRef.current) {
+            const [spoken] = String(data.message.content).split(CONTEXT_MARK);
+            if (spoken?.trim()) speak(spoken, { key: data.message.id, agentId: speaker?.id });
+          }
+        }
       }
-      if (data.type === 'context') setMeter({ used: Number(data.used || 0), budget: Number(data.budget || 0) });
+      if (data.type === 'context') {
+        if (data.breakdown) setBreakdown(data.breakdown as ContextBreakdown);
+        else setBreakdown((prev) => ({
+          budget: Number(data.budget || prev?.budget || 1),
+          used: Number(data.used || 0),
+          remaining: Math.max(0, Number(data.budget || 0) - Number(data.used || 0)),
+          outputReserve: prev?.outputReserve ?? 2048,
+          systemPrompt: prev?.systemPrompt ?? 0,
+          personaAndTools: prev?.personaAndTools ?? 0,
+          memory: prev?.memory ?? 0,
+          history: Number(data.used || 0),
+          files: prev?.files ?? 0,
+        }));
+      }
       if (data.type === 'status') {
         setStatus(data.status);
         setLoadingNote(data.status === 'loading' || data.status === 'waiting' ? String(data.detail || (data.status === 'waiting' ? 'Waiting' : 'Loading model')) : '');
@@ -368,9 +442,10 @@ export function Chat() {
       if (data.type === 'done') {
         setLoadingNote('');
         setStatus(data.run?.status || 'completed');
-        if (data.run?.modelId) setLastModel(models.find((model) => model.id === data.run.modelId)?.name || String(data.run.modelId));
+        if (data.run?.modelId) setLastModel(modelsRef.current.find((model) => model.id === data.run.modelId)?.name || String(data.run.modelId));
         if (data.run?.status === 'failed' && data.run?.error) setRunError(String(data.run.error));
-        if (current && currentRef.current === current) void openSession(current);
+        const cur = currentRef.current;
+        if (cur && runSession.current === cur) void openSession(cur);
         void refreshLists().catch(() => undefined);
         source.close();
       }
@@ -492,6 +567,7 @@ export function Chat() {
     try {
       await post(`/api/runs/${runId}/control`, { action });
       if (action === 'stop') toast(t('Stopped.'), 'info');
+      if (action === 'force') toast(t('Forcing run past memory wait…'), 'info');
     } catch (error) { toast(errorText(error), 'error'); }
   }
 
@@ -781,7 +857,13 @@ export function Chat() {
             {chatWs.roots.length === 0 && <span className="faint ws-hint">{t('Attach folders or repos; the agent works in exactly these.')}</span>}
           </div>
         )}
-        <div className={dragging ? 'messages dragging' : 'messages'} ref={box} onMouseUp={onSelectText} onTouchEnd={() => setTimeout(onSelectText, 50)} onScroll={(event) => { if (selQuote) setSelQuote(null); if (hasMore && !loadingOlder && event.currentTarget.scrollTop < 200) void loadOlder(); }}
+        <div className={dragging ? 'messages dragging' : 'messages'} ref={box} onMouseUp={onSelectText} onTouchEnd={() => setTimeout(onSelectText, 50)} onScroll={(event) => {
+          const el = event.currentTarget;
+          const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+          if (nearBottomRef.current !== atBottom) { nearBottomRef.current = atBottom; setNearBottom(atBottom); }
+          if (selQuote) setSelQuote(null);
+          if (hasMore && !loadingOlder && el.scrollTop < 200) void loadOlder();
+        }}
           onDragOver={(event) => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); setDragging(true); } }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); void dropFiles(event.dataTransfer.files); }}>
           <div className="messages-inner">
           {hasMore && <div className="load-older"><button className="btn ghost small" disabled={loadingOlder} onClick={() => void loadOlder()}>{loadingOlder ? t('Loading…') : t('Load earlier messages')}</button></div>}
@@ -794,7 +876,7 @@ export function Chat() {
                   <li key={item.id} className={item.ok ? 'done' : ''}><span className={`dot ${item.ok ? 'ok' : 'warn'}`} /> <span><strong>{item.title}</strong> <span className="faint">{item.ok ? '' : item.detail}</span></span></li>
                 ))}
               </ul>
-              <div className="row"><Link className="btn primary" to="/setup">{t('Open Setup')}</Link><Link className="btn" to="/settings#health">{t('Check health')}</Link></div>
+              <div className="row"><Link className="btn primary" to="/settings#system">{t('Open System Settings')}</Link><Link className="btn" to="/settings#health">{t('Check health')}</Link></div>
             </div>
           )}
           {messages.length === 0 && (
@@ -802,7 +884,7 @@ export function Chat() {
               {persona ? <Face agent={persona} size={64} /> : <CuteArt />}
               <h2>{persona ? greetingFor(persona) : t('Create a persona to start.')}</h2>
               {modelsLoaded && usable.empty
-                ? <div className="no-model"><p className="muted">{t('No model yet. Pull a local one here, or')}{' '}<Link to="/setup">{t('set one up')}</Link>{' '}{t('(Ollama or a Gemini key).')}</p>{canManage && <><ModelInstaller compact onDone={() => void modelState.refresh()} /><details><summary className="faint">{t('Or pull one model')}</summary><PullModel onDone={() => void modelState.refresh()} /></details></>}</div>
+                ? <div className="no-model"><p className="muted">{t('No model yet. Pull a local one here, or configure one in')}{' '}<Link to="/settings#system">{t('Settings → System')}</Link>{' '}{t('(Ollama, llama-server, or Gemini).')}</p>{canManage && <PullModel suggestion="gpt-oss:20b" onDone={() => void modelState.refresh()} />}</div>
                 : <div className="starters">
                     {startersFor(persona, mode === 'code').map((prompt) => (
                       <button key={prompt} className="starter" onClick={() => { setDraft(prompt); input.current?.focus(); }}>{prompt}</button>
@@ -850,6 +932,12 @@ export function Chat() {
             <article key={message.id} id={`m-${message.id}`} data-mid={message.id} title={message.createdAt ? fmt.dateTime(message.createdAt) : undefined} className={`${message.role === 'user' ? 'msg user' : fromAgent ? `msg from-agent${streak ? ' cont' : ''}` : 'msg'}${helperNote ? ' helper-result' : ''}`} style={fromAgent ? { ['--accent' as string]: speaker.accent || '#e4b56a' } : undefined}>
               {fromAgent ? !streak && <div className="who"><Face agent={speaker} size={28} /><span className="meta">{speaker.emoji ? `${speaker.emoji} ` : ''}{speaker.name}</span></div> : message.role !== 'user' && message.role !== 'assistant' && <div className="meta"><span>{message.role}</span></div>}
               {message.routingNote && !helperNote && <div className="switch">{message.routingNote}</div>}
+              {message.thinking && (
+                <details className="thinking saved-thinking">
+                  <summary><Brain size={14} aria-hidden /> {t('Reasoning')}</summary>
+                  <div className="think" dir="auto">{message.thinking}</div>
+                </details>
+              )}
               <div dir="auto"><Markdown text={visible || ''} sourceId={message.id} /></div>
               {attached && <details className={attached.includes('### Text read from ') ? 'attached-note ocr-note' : 'attached-note'} open={attached.includes('### Text read from ') && attached.length < 3000}><summary className="faint">{attached.includes('### Text read from ') ? t('Text read from the photo') : <>{t('Context sent with this message (')}{Math.round(attached.length / 1000)}{t('k characters)')}</>}</summary><pre className={attached.includes('### Text read from ') ? 'tool-output ocr-text' : 'mono tool-output'} dir={attached.includes('### Text read from ') ? 'auto' : undefined}>{attached.slice(0, 4000)}{attached.length > 4000 ? '\n…' : ''}</pre></details>}
               {cites.length > 0 && <div className="file-cards">{[...new Map(cites.map((c) => [c.kind === 'file' ? c.id : '', c])).values()].map((cite) => cite.kind === 'file' && <FileCard key={cite.id} id={cite.id} onOpen={() => setViewer({ source: { kind: 'file', id: cite.id }, anchor: cite.anchor })} />)}</div>}
@@ -857,7 +945,7 @@ export function Chat() {
                 <div className="msg-actions">
                   <button className="icon-btn" aria-label={t('Quote message')} title={t('Quote in your reply')} onClick={() => addQuote({ ref: `msg:${message.id}`, text: (visible || '').slice(0, 1200), label: message.role === 'user' ? t('your message') : 'reply' })}><Quote size={15} /></button>
                   <button className="icon-btn" aria-label={t('Copy message')} title={t('Copy')} onClick={() => void copy(message.id, visible || '')}>{copied === message.id ? <Check size={15} /> : <Copy size={15} />}</button>
-                  {message.role !== 'user' && <button className="icon-btn" aria-label={t('Read aloud')} title={t('Read aloud (press again to stop)')} onClick={() => { if (!speak(visible || '')) toast(t('This browser cannot read aloud.'), 'error'); }}><Volume2 size={15} /></button>}
+                  {message.role !== 'user' && <button className={speakingId === message.id ? 'icon-btn on' : 'icon-btn'} aria-label={t('Read aloud')} title={speakingId === message.id ? t('Stop reading') : t('Read aloud')} onClick={() => { if (!speak(visible || '', { key: message.id, agentId: message.agentId ?? undefined })) toast(t('This browser cannot read aloud.'), 'error'); }}><Volume2 size={15} /></button>}
                   {message.role === 'user' && <button className="icon-btn" aria-label={t('Edit as new message')} title={t('Edit into the box')} onClick={() => { setDraft(visible || ''); input.current?.focus(); }}><Pencil size={15} /></button>}
                   {message.id === lastAssistant && !active && <button className="icon-btn" aria-label={t('Regenerate reply')} title={t('Ask again')} onClick={retry}><RotateCcw size={15} /></button>}
                 </div>
@@ -865,13 +953,21 @@ export function Chat() {
             </article>
             );
           })}
-          {thinking && (
-            <details className="thinking" open={!streaming}>
-              <summary><Brain size={14} /> {streaming ? t('Thought for a moment') : t('Thinking…')}</summary>
-              <div className="think" dir="auto">{thinking}</div>
-            </details>
+          {(thinking || streaming) && (
+            <article className={persona ? 'msg from-agent streaming-msg' : 'msg streaming-msg'} style={persona ? { ['--accent' as string]: persona.accent || '#e4b56a' } : undefined}>
+              {persona && <div className="who"><Face agent={persona} size={28} /><span className="meta">{persona.emoji ? `${persona.emoji} ` : ''}{persona.name}</span></div>}
+              {thinking && (
+                <details className="thinking" open>
+                  <summary><Brain size={14} aria-hidden /> {streaming ? t('Reasoning') : t('Thinking…')}</summary>
+                  <div className="think" dir="auto">{thinking}</div>
+                </details>
+              )}
+              {streaming && <div dir="auto"><Markdown text={streaming} streaming /></div>}
+            </article>
           )}
-          {streaming && <article className="msg" dir="auto"><Markdown text={streaming} streaming /></article>}
+          {steps.length > 0 && (
+            <DecisionTimeline steps={steps} live={Boolean(active)} onStop={() => control('stop')} />
+          )}
           {asks.map((ask) => (
             <div key={ask.id} className="approval-card" role="alertdialog" aria-label={t('Approval needed')}>
               <div className="grow">
@@ -884,7 +980,20 @@ export function Chat() {
               </div>
             </div>
           ))}
-          {active && !streaming && !thinking && <div className="typing" aria-label={t('Working')}><span /><span /><span /> <em>{loadingNote || t('Working…')}</em></div>}
+          {status === 'waiting' && (
+            <div className="wait-banner" role="status">
+              <div className="grow">
+                <strong>{t('Waiting for memory')}</strong>
+                <p className="faint">{loadingNote || t('Checking available RAM (MemAvailable)…')}</p>
+              </div>
+              <div className="row">
+                <button type="button" className="btn ghost small" onClick={() => void post('/api/memory/recheck', {}).then(() => toast(t('Re-checked memory.'), 'info')).catch((e) => toast(errorText(e), 'error'))}>{t('Re-check')}</button>
+                <button type="button" className="btn primary small" onClick={() => void control('force')}>{t('Force run')}</button>
+                <button type="button" className="btn danger small" onClick={() => void control('stop')}>{t('Cancel')}</button>
+              </div>
+            </div>
+          )}
+          {active && status !== 'waiting' && !streaming && !thinking && <div className="typing" aria-label={t('Working')}><span /><span /><span /> <em>{loadingNote || t('Working…')}</em></div>}
           {runError && !active && (
             <div className="banner error-card" role="alert">
               <strong>{t('The reply failed.')}</strong>
@@ -905,15 +1014,62 @@ export function Chat() {
               ))}
             </div>
           )}
-          {mode === 'code' && edits.map((edit) => (
-            <div key={edit.id} className="card">
-              <div className="row"><strong>{edit.label}</strong>{edit.revertedAt ? <span className="badge">reverted</span> : <button className="btn" onClick={async () => { await post(`/api/edits/${edit.id}/revert`); if (current) void openSession(current); }}>{t('Revert checkpoint')}</button>}</div>
-              <pre className="command">{edit.diff}</pre>
-            </div>
+          {edits.map((edit) => (
+            <InlineDiffCard
+              key={edit.id}
+              edit={edit}
+              kept={keptEdits.has(edit.id)}
+              onKeep={() => setKeptEdits((prev) => new Set(prev).add(edit.id))}
+              onRevert={async () => {
+                try {
+                  await post(`/api/edits/${edit.id}/revert`);
+                  if (current) void openSession(current);
+                  toast(t('Reverted {0}.', [edit.label]), 'ok');
+                } catch (error) { toast(errorText(error), 'error'); }
+              }}
+            />
           ))}
           </div>
+          {!nearBottom && (
+            <button type="button" className="scroll-bottom-pill" onClick={() => { nearBottomRef.current = true; setNearBottom(true); box.current?.scrollTo({ top: box.current.scrollHeight, behavior: 'smooth' }); }}>
+              <ChevronDown size={14} aria-hidden /> {active ? t('Jump to live reply') : t('Jump to bottom')}
+            </button>
+          )}
         </div>
         <div className="composer">
+          <MiniAgentStrip
+            helpers={miniAgents}
+            onStop={async (id) => {
+              try {
+                await post(`/api/helpers/${id}/stop`, {});
+                setHelperTick((v) => v + 1);
+                toast(t('Stopped mini-agent.'));
+              } catch (error) { toast(errorText(error), 'error'); }
+            }}
+          />
+          <ContextNudgeBanner
+            breakdown={breakdown}
+            dismissed={nudgeDismissed}
+            busy={Boolean(active)}
+            onDismiss={() => setNudgeDismissed(true)}
+            onCompact={async () => {
+              if (!currentSession) return;
+              try {
+                const res = await post<{ compactedMessages: number; breakdown?: ContextBreakdown | null }>(`/api/sessions/${currentSession.id}/compact`, {});
+                if (res.breakdown) setBreakdown(res.breakdown);
+                toast(res.compactedMessages ? t('Compacted {0} earlier messages.', [res.compactedMessages]) : t('Chat is already compact.'));
+              } catch (error) { toast(errorText(error), 'error'); }
+            }}
+            onHandoff={async () => {
+              if (!currentSession) return;
+              try {
+                const res = await post<{ session: Session }>(`/api/sessions/${currentSession.id}/handoff`, {});
+                setSessions((prev) => [res.session, ...prev.filter((s) => s.id !== res.session.id)]);
+                await openSession(res.session.id);
+                toast(t('Continued in a fresh chat with a handoff brief.'));
+              } catch (error) { toast(errorText(error), 'error'); }
+            }}
+          />
           {picker && <MentionPicker query={picker.query} setQuery={(query) => setPicker({ query })} defaultRoot={agentRoot} sessionId={current} onPick={addMention} onClose={() => { setPicker(null); input.current?.focus(); }} />}
           <form onSubmit={send}>
             {(quotes.length > 0 || mentions.length > 0) && (
@@ -965,13 +1121,47 @@ export function Chat() {
                   } catch (error) { toast(errorText(error), 'error'); setModelPin(previous); }
                 }} />
               </span>
-              {meter && <span className="context-meter" aria-label={t('Context used')} title={t('Context used / budget')}>{Math.round((meter.used / Math.max(1, meter.budget)) * 100)}{t('% ctx')}</span>}
+              <ContextRing
+                breakdown={breakdown}
+                busy={Boolean(active)}
+                onOpenContext={() => setPanel('context')}
+                onCompact={currentSession ? async () => {
+                  try {
+                    const res = await post<{ compactedMessages: number; breakdown?: ContextBreakdown | null }>(`/api/sessions/${currentSession.id}/compact`, {});
+                    if (res.breakdown) setBreakdown(res.breakdown);
+                    toast(res.compactedMessages ? t('Compacted {0} earlier messages.', [res.compactedMessages]) : t('Chat is already compact.'));
+                  } catch (error) { toast(errorText(error), 'error'); }
+                } : undefined}
+                onHandoff={currentSession ? async () => {
+                  try {
+                    const res = await post<{ session: Session }>(`/api/sessions/${currentSession.id}/handoff`, {});
+                    setSessions((prev) => [res.session, ...prev.filter((s) => s.id !== res.session.id)]);
+                    await openSession(res.session.id);
+                    toast(t('Continued in a fresh chat with a handoff brief.'));
+                  } catch (error) { toast(errorText(error), 'error'); }
+                } : undefined}
+              />
               <span className="spacer" />
+              {canManage && <LocalRepoPicker sessionId={current} onAttached={() => void loadChatWs(current)} />}
+              <button
+                className={voiceLoop ? 'icon-btn round on' : 'icon-btn round'}
+                type="button"
+                aria-pressed={voiceLoop}
+                aria-label={voiceLoop ? t('Voice mode on') : t('Voice mode')}
+                title={voiceLoop ? t('Voice-first mode ON — auto-speaks replies (click to stop)') : t('Voice-first mode — auto-speak replies and converse hands-free')}
+                onClick={() => {
+                  const next = !voiceLoop;
+                  setVoiceLoop(next);
+                  toast(next ? t('Voice-first mode on. Replies will be spoken automatically.') : t('Voice-first mode off.'));
+                }}
+              >
+                <Headphones size={17} />
+              </button>
               <button className={recording ? 'icon-btn round on' : 'icon-btn round'} type="button" aria-label={t('Hold to talk')} title={t('Hold to talk')} onPointerDown={() => void holdTalk(true)} onPointerUp={() => void holdTalk(false)} onPointerLeave={() => { if (recording) void holdTalk(false); }}><Mic size={18} /></button>
               {active && status !== 'paused' && <button className="btn ghost pause-btn" type="button" onClick={() => control('pause')}>{t('Pause')}</button>}
               {status === 'paused' && <button className="btn ghost" type="button" onClick={() => control('resume')}>{t('Resume')}</button>}
               {active ? <button className="icon-btn round danger-fill" type="button" aria-label={t('Stop (Esc)')} title={t('Stop (Esc)')} onClick={() => control('stop')}><Square size={16} /></button>
-                : <button className="icon-btn round primary-fill" type="submit" aria-label={t('Send')} title={t('Send (Enter)')} disabled={(!draft.trim() && !quotes.length && !mentions.length) || !current}><Send size={17} /></button>}
+                : <button className="icon-btn round primary-fill" type="submit" aria-label={t('Send')} title={t('Send (Enter)')} disabled={!draft.trim() && !quotes.length && !mentions.length}><Send size={17} /></button>}
             </div>
           </form>
           {(voiceNote || loadingNote) ? <p className="composer-hint faint">{voiceNote || loadingNote}</p> : <p className="composer-hint faint"><span className="kbd-hint">{t('Enter to send · Shift+Enter for a new line · Esc to stop')}</span></p>}

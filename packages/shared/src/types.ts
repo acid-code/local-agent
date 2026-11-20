@@ -104,4 +104,20 @@ export interface RunCursor {
   noTools?: boolean;
   /** One retry on the next Auto tier after the model was missing from Ollama. */
   missingRetry?: boolean;
+  /** One automatic nudge when Researcher answers a factual question without searching first. */
+  researchRetried?: boolean;
+  /** One automatic nudge when a high-confidence skill was not loaded. */
+  skillRetried?: boolean;
+}
+
+export interface ContextBreakdown {
+  budget: number;
+  used: number;
+  remaining: number;
+  outputReserve: number;
+  systemPrompt: number;
+  personaAndTools: number;
+  memory: number;
+  history: number;
+  files: number;
 }

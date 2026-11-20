@@ -22,6 +22,8 @@ interface Agent extends FaceAgent {
   pinned: boolean;
   hidden: boolean;
   workshopIds: string[];
+  voiceReply?: boolean;
+  voiceName?: string;
 }
 interface Template { id: string; name: string; description: string; systemPrompt: string; tools: string[] }
 interface Skill { slug: string; name: string; enabled?: boolean }
@@ -33,7 +35,7 @@ const ACCENTS = ['#e4b56a', '#e39486', '#9dccb4', '#9ec0e0', '#d7b4e8', '#f0e2b6
 const empty = (): Agent => ({
   id: '', name: '', title: '', description: '', systemPrompt: 'You are a careful local agent.', modelId: null,
   toolAllowlist: ['read_file', 'remember', 'recall'], emoji: '', accent: '#e4b56a', avatarKind: 'initials', avatarRef: '',
-  pinned: false, hidden: false, workshopIds: [],
+  pinned: false, hidden: false, workshopIds: [], voiceReply: false, voiceName: '',
 });
 
 export function Agents() {
@@ -80,7 +82,7 @@ export function Agents() {
       name: draft.name, title: draft.title, description: draft.description, systemPrompt: draft.systemPrompt,
       modelId: draft.modelId, strategy: draft.strategy || null, toolAllowlist: draft.toolAllowlist, emoji: draft.emoji, accent: draft.accent,
       avatarKind: draft.avatarKind, avatarRef: draft.avatarRef, pinned: draft.pinned, hidden: draft.hidden,
-      workshopIds: draft.workshopIds,
+      workshopIds: draft.workshopIds, voiceReply: Boolean(draft.voiceReply), voiceName: draft.voiceName || '',
     };
     try {
       const saved = draft.id
@@ -163,6 +165,15 @@ export function Agents() {
                 </select>
               </label>
             </div>
+            <label className="row" style={{ marginTop: 8 }}>
+              <input type="checkbox" checked={Boolean(draft.voiceReply)} onChange={(event) => setDraft({ ...draft, voiceReply: event.target.checked })} />
+              {' '}{t('Answer by voice automatically when this persona replies')}
+            </label>
+            {draft.voiceReply && (
+              <label className="field" style={{ marginTop: 8 }}><span>{t('Voice name (optional)')}</span>
+                <input value={draft.voiceName || ''} onChange={(event) => setDraft({ ...draft, voiceName: event.target.value })} placeholder={t('Default for language (e.g. af_heart, he_IL-saspeech-medium, Kore)')} />
+              </label>
+            )}
             <label className="field"><span>{t('Instructions (system prompt)')}</span><textarea rows={8} value={draft.systemPrompt} onChange={(event) => setDraft({ ...draft, systemPrompt: event.target.value })} /></label>
           </Section>
           <Section title={t('Tools')} description={t('What it may do. Anything that changes files outside its workspace still asks first.')}>

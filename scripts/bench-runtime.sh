@@ -49,11 +49,16 @@ echo "Saved to ${DATA_DIR:-$PWD/data}/runtime-bench.json (Setup shows it)."
 
 if [ "$APPLY" = 1 ]; then
   case "$PICK" in
-    ollama-vulkan) ENV="OLLAMA_VULKAN=1 OLLAMA_IGPU_ENABLE=1 GGML_VK_VISIBLE_DEVICES=0 OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 OLLAMA_CONTEXT_LENGTH=16384 OLLAMA_MAX_LOADED_MODELS=2 OLLAMA_KEEP_ALIVE=15m" ;;
-    ollama-cpu) ENV="OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 OLLAMA_CONTEXT_LENGTH=16384 OLLAMA_MAX_LOADED_MODELS=2 OLLAMA_KEEP_ALIVE=15m" ;;
+    ollama-vulkan) ENV="OLLAMA_HOST=0.0.0.0:11434 OLLAMA_VULKAN=1 OLLAMA_IGPU_ENABLE=1 GGML_VK_VISIBLE_DEVICES=0 OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 OLLAMA_CONTEXT_LENGTH=32768 OLLAMA_MAX_LOADED_MODELS=2 OLLAMA_KEEP_ALIVE=15m" ;;
+    ollama-cpu) ENV="OLLAMA_HOST=0.0.0.0:11434 OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 OLLAMA_CONTEXT_LENGTH=32768 OLLAMA_MAX_LOADED_MODELS=2 OLLAMA_KEEP_ALIVE=15m" ;;
     *) echo "Pick is $PICK: nothing to apply automatically (see docs/models.md)."; exit 0 ;;
   esac
+  # llama-server coexistence: limits.conf (1 model, 5m) owns residency when present.
+  if [ -f /etc/systemd/system/ollama.service.d/limits.conf ]; then
+    ENV=$(echo "$ENV" | sed 's/ OLLAMA_MAX_LOADED_MODELS=[^ ]*//; s/ OLLAMA_KEEP_ALIVE=[^ ]*//')
+  fi
   sudo mkdir -p /etc/systemd/system/ollama.service.d
+  sudo rm -f /etc/systemd/system/ollama.service.d/context.conf
   { echo "[Service]"; for kv in $ENV; do echo "Environment=\"$kv\""; done; } | sudo tee /etc/systemd/system/ollama.service.d/local-agent.conf >/dev/null
   [ "$PICK" = ollama-vulkan ] && { getent group render >/dev/null && sudo usermod -aG render,video ollama || true; }
   sudo systemctl daemon-reload && sudo systemctl restart ollama

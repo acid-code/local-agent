@@ -1,17 +1,19 @@
 import { isHebrewText } from '@local-agent/shared';
-import { PIPER_URL } from './ocr.js';
+import { inDockerContainer } from './docker.js';
+import { PIPER_URL, resolveServiceUrl } from './ocr.js';
 import { PIPER_VOICES } from './service-images.js';
 
-const WHISPER = process.env.WHISPER_URL || 'http://127.0.0.1:8091';
-const KOKORO = process.env.KOKORO_URL || 'http://127.0.0.1:8880';
+const WHISPER = process.env.WHISPER_URL || (inDockerContainer() ? 'http://host.docker.internal:8091' : 'http://127.0.0.1:8091');
+const KOKORO = process.env.KOKORO_URL || (inDockerContainer() ? 'http://host.docker.internal:8880' : 'http://127.0.0.1:8880');
 
 export const WHISPER_COMMAND = 'docker run -d --name local-agent-whisper --restart unless-stopped -p 8091:8000 fedirz/faster-whisper-server:latest-cpu';
 export const KOKORO_COMMAND = 'docker run -d --name local-agent-kokoro --restart unless-stopped -p 8880:8880 ghcr.io/remsky/kokoro-fastapi-cpu:latest';
 
 export async function voiceStatus(fetchImpl: typeof fetch) {
+  const piper = await resolveServiceUrl(fetchImpl, 'piper');
   return {
-    whisper: await up(fetchImpl, `${WHISPER}/v1/models`), kokoro: await up(fetchImpl, `${KOKORO}/v1/models`), piper: await up(fetchImpl, `${PIPER_URL}/health`),
-    geminiTts: Boolean(process.env.GEMINI_API_KEY), whisperUrl: WHISPER, kokoroUrl: KOKORO, piperUrl: PIPER_URL,
+    whisper: await up(fetchImpl, `${WHISPER}/v1/models`), kokoro: await up(fetchImpl, `${KOKORO}/v1/models`), piper: Boolean(piper),
+    geminiTts: Boolean(process.env.GEMINI_API_KEY), whisperUrl: WHISPER, kokoroUrl: KOKORO, piperUrl: piper?.url ?? PIPER_URL,
   };
 }
 
@@ -43,40 +45,43 @@ export async function transcribe(fetchImpl: typeof fetch, audio: Buffer, mime: s
  * is set. English: Kokoro, then Piper's English voice, then Gemini. When nothing is up the 503 tells the browser to
  * use its own speechSynthesis.
  */
-export async function speak(fetchImpl: typeof fetch, text: string, opts: { lang?: 'he' | 'en'; geminiKey?: string } = {}): Promise<{ bytes: Buffer; type: string; engine: string }> {
+export async function speak(fetchImpl: typeof fetch, text: string, opts: { lang?: 'he' | 'en'; geminiKey?: string; voice?: string } = {}): Promise<{ bytes: Buffer; type: string; engine: string }> {
   const lang = opts.lang ?? (isHebrewText(text) ? 'he' : 'en');
   const input = text.slice(0, 2000);
+  const piperFound = await resolveServiceUrl(fetchImpl, 'piper');
   const piper = async (voice: string) => {
-    const response = await fetchImpl(PIPER_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: input, voice }), signal: AbortSignal.timeout(60_000) });
+    const base = piperFound?.url ?? PIPER_URL;
+    const response = await fetchImpl(base, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: input, voice }), signal: AbortSignal.timeout(60_000) });
     if (!response.ok) throw new VoiceError(`Piper could not speak that (HTTP ${response.status}).`, 502, 'tts_failed');
     return { bytes: Buffer.from(await response.arrayBuffer()), type: 'audio/wav', engine: `piper:${voice}` };
   };
   const key = opts.geminiKey ?? process.env.GEMINI_API_KEY;
   if (lang === 'he') {
-    if (await up(fetchImpl, `${PIPER_URL}/health`)) return piper(PIPER_VOICES.he);
-    if (key) return geminiTts(fetchImpl, key, input);
+    if (piperFound) return piper(opts.voice && opts.voice.includes('he_') ? opts.voice : PIPER_VOICES.he);
+    if (key) return geminiTts(fetchImpl, key, input, opts.voice);
     throw new VoiceError('No Hebrew voice is running on this machine.', 503, 'no_tts', 'Start Piper voices on the Containers page, or add a Gemini key. The browser voice is used meanwhile.');
   }
   if (await up(fetchImpl, `${KOKORO}/v1/models`)) {
     const response = await fetchImpl(`${KOKORO}/v1/audio/speech`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'kokoro', input, voice: 'af_heart', response_format: 'mp3' }),
+      body: JSON.stringify({ model: 'kokoro', input, voice: opts.voice || 'af_heart', response_format: 'mp3' }),
     });
     if (!response.ok) throw new VoiceError(`Kokoro could not speak that (HTTP ${response.status}).`, 502, 'tts_failed');
     return { bytes: Buffer.from(await response.arrayBuffer()), type: 'audio/mpeg', engine: 'kokoro' };
   }
-  if (await up(fetchImpl, `${PIPER_URL}/health`)) return piper(PIPER_VOICES.en);
-  if (key) return geminiTts(fetchImpl, key, input);
-  throw new VoiceError('No text-to-speech model is running on this machine.', 503, 'no_tts', `Start Kokoro from Setup (Voice) or run: ${KOKORO_COMMAND}`);
+  if (piperFound) return piper(opts.voice && opts.voice.includes('en_') ? opts.voice : PIPER_VOICES.en);
+  if (key) return geminiTts(fetchImpl, key, input, opts.voice);
+  throw new VoiceError('No text-to-speech model is running on this machine.', 503, 'no_tts', `Start Kokoro from Settings → System or run: ${KOKORO_COMMAND}`);
 }
 
 /** Gemini TTS returns 24 kHz 16-bit mono PCM; wrap it in a WAV header. */
-async function geminiTts(fetchImpl: typeof fetch, key: string, text: string) {
+async function geminiTts(fetchImpl: typeof fetch, key: string, text: string, voice?: string) {
   const model = process.env.GEMINI_TTS_MODEL || 'gemini-2.5-flash-preview-tts';
+  const voiceName = voice && /^[A-Z][a-z]+$/.test(voice) ? voice : 'Kore';
   const response = await fetchImpl(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': key }, signal: AbortSignal.timeout(60_000),
-    body: JSON.stringify({ contents: [{ parts: [{ text }] }], generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } } } }),
+    body: JSON.stringify({ contents: [{ parts: [{ text }] }], generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } } } }),
   });
   const json = await response.json() as { candidates?: { content?: { parts?: { inlineData?: { data?: string } }[] } }[]; error?: { message?: string } };
   const data = json.candidates?.[0]?.content?.parts?.find((part) => part.inlineData?.data)?.inlineData?.data;

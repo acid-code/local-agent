@@ -1,16 +1,24 @@
 import type { ChatMessage, ToolCall, ToolDefinition } from '@local-agent/shared';
 import type { ModelRow, ProviderRow } from './db.js';
+import { isLlamaServerProvider } from './coexist.js';
 
 export interface Usage {
   inputTokens: number;
   outputTokens: number;
 }
 
+export interface Telemetry {
+  tokPerSec?: number;
+  promptTokens?: number;
+  cachedTokens?: number;
+  cacheHitPct?: number;
+}
+
 export type ProviderEvent =
   | { type: 'token'; text: string }
   /** Reasoning text from thinking models. Never part of the answer. */
   | { type: 'thinking'; text: string }
-  | { type: 'done'; finishReason: string; toolCalls?: ToolCall[]; usage?: Usage };
+  | { type: 'done'; finishReason: string; toolCalls?: ToolCall[]; usage?: Usage; telemetry?: Telemetry };
 
 export interface ModelProvider {
   complete(req: {
@@ -66,7 +74,10 @@ export function providerFor(model: ModelRow, provider: ProviderRow, fetchImpl: t
   if (provider.kind !== 'openrouter' && (provider.id === 'prov_ollama' || provider.name === 'Ollama' || /:11434(\/|$)/.test(base))) {
     return new OllamaProvider(base.replace(/\/v1$/, ''), fetchImpl);
   }
-  return new OpenAIProvider(base, key || '', fetchImpl, provider.kind === 'openrouter');
+  // llama-server: keep the slot prefix cache on so a stable system prompt + tools are not re-prefilled each turn.
+  const llama = isLlamaServerProvider(provider);
+  const extra = llama ? { cache_prompt: true } : undefined;
+  return new OpenAIProvider(base, key || '', fetchImpl, provider.kind === 'openrouter', extra, llama);
 }
 
 class OllamaProvider implements ModelProvider {
@@ -92,8 +103,27 @@ class OllamaProvider implements ModelProvider {
   }
 }
 
+/** First-token / headers timeout for llama-server (300s default so cold 16K–32K coding prefills never time out). */
+export const LLAMA_TIMEOUT_MS = Number(process.env.LLAMA_TIMEOUT_MS || 300_000);
+
+function waitAbortable(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(signal.reason ?? new Error('Aborted'));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(); }, ms);
+    const onAbort = () => { clearTimeout(timer); reject(signal?.reason ?? new Error('Aborted')); };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 class OpenAIProvider implements ModelProvider {
-  constructor(private readonly base: string, private readonly apiKey: string, private readonly fetchImpl: typeof fetch, private readonly openRouter: boolean) {}
+  constructor(
+    private readonly base: string,
+    private readonly apiKey: string,
+    private readonly fetchImpl: typeof fetch,
+    private readonly openRouter: boolean,
+    private readonly extra?: Record<string, unknown>,
+    private readonly isLlama = false,
+  ) {}
 
   async *complete(req: { model: string; messages: ChatMessage[]; tools?: ToolDefinition[]; signal?: AbortSignal }): AsyncIterable<ProviderEvent> {
     const headers: Record<string, string> = { 'content-type': 'application/json' };
@@ -102,18 +132,41 @@ class OpenAIProvider implements ModelProvider {
       headers['http-referer'] = 'http://local-agent.local';
       headers['x-title'] = 'local-agent';
     }
-    const response = await this.fetchImpl(`${this.base}/chat/completions`, {
-      method: 'POST',
-      headers,
-      signal: req.signal,
-      body: JSON.stringify({
-        model: req.model,
-        stream: true,
-        messages: req.messages.map(toOpenAI),
-        tools: req.tools?.length ? req.tools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.parameters } })) : undefined,
-      }),
+    const payload = JSON.stringify({
+      model: req.model,
+      stream: true,
+      messages: req.messages.map(toOpenAI),
+      tools: req.tools?.length ? req.tools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.parameters } })) : undefined,
+      ...this.extra,
     });
-    if (!response.ok) throw new Error(`Model request failed (${response.status}): ${(await response.text()).slice(0, 500)}`);
+    const maxAttempts = this.isLlama ? 4 : 1;
+    const retryMs = Number(process.env.LA_LLAMA_503_RETRY_MS ?? 4000);
+    let response: Response | null = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      // Explicit 300s first-token / headers timeout for llama-server so cold 16K–32K prefills succeed.
+      const timeoutCtrl = this.isLlama ? new AbortController() : null;
+      const timer = timeoutCtrl ? setTimeout(() => timeoutCtrl.abort(new Error(`llama-server timed out after ${Math.round(LLAMA_TIMEOUT_MS / 1000)}s waiting for first token.`)), LLAMA_TIMEOUT_MS) : null;
+      const signal = timeoutCtrl
+        ? (req.signal ? AbortSignal.any([req.signal, timeoutCtrl.signal]) : timeoutCtrl.signal)
+        : req.signal;
+      try {
+        response = await this.fetchImpl(`${this.base}/chat/completions`, {
+          method: 'POST',
+          headers,
+          signal,
+          body: payload,
+        });
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+      if (response.status === 503 && attempt < maxAttempts) {
+        await response.text().catch(() => '');
+        await waitAbortable(retryMs, req.signal);
+        continue;
+      }
+      break;
+    }
+    if (!response || !response.ok) throw new Error(`Model request failed (${response?.status ?? 0}): ${(response ? await response.text() : 'no response').slice(0, 500)}`);
     const contentType = response.headers.get('content-type') || '';
     if (!contentType.includes('text/event-stream')) {
       const json = await response.json() as OpenAIResponse;
@@ -348,21 +401,46 @@ function safeJson(value: string): unknown {
   try { return JSON.parse(value); } catch { return {}; }
 }
 
+interface LlamaTimings {
+  predicted_per_second?: number;
+  predicted_n?: number;
+  predicted_ms?: number;
+  prompt_n?: number;
+  cache_n?: number;
+}
+
+function parseTimings(t?: LlamaTimings): Telemetry | undefined {
+  if (!t) return undefined;
+  const tokPerSec = typeof t.predicted_per_second === 'number' && Number.isFinite(t.predicted_per_second)
+    ? Math.round(t.predicted_per_second * 10) / 10
+    : (t.predicted_n && t.predicted_ms ? Math.round((t.predicted_n / (t.predicted_ms / 1000)) * 10) / 10 : undefined);
+  const promptN = typeof t.prompt_n === 'number' ? t.prompt_n : 0;
+  const cacheN = typeof t.cache_n === 'number' ? t.cache_n : 0;
+  const totalPrompt = promptN + cacheN;
+  const cacheHitPct = totalPrompt > 0 ? Math.round((cacheN / totalPrompt) * 100) : undefined;
+  if (tokPerSec == null && cacheHitPct == null) return undefined;
+  return { tokPerSec, promptTokens: totalPrompt || undefined, cachedTokens: cacheN || undefined, cacheHitPct };
+}
+
 interface OpenAIChunk {
-  choices?: { delta?: { content?: string; tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[] } }[];
+  choices?: { finish_reason?: string | null; delta?: { content?: string; reasoning_content?: string; reasoning?: string; tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[] } }[];
   usage?: { prompt_tokens?: number; completion_tokens?: number };
+  timings?: LlamaTimings;
 }
 
 interface OpenAIResponse {
-  choices?: { message?: { content?: string; tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[] } }[];
+  choices?: { message?: { content?: string; reasoning_content?: string; reasoning?: string; tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[] } }[];
   usage?: { prompt_tokens?: number; completion_tokens?: number };
+  timings?: LlamaTimings;
 }
 
 function* fromOpenAI(json: OpenAIResponse): Generator<ProviderEvent> {
   const message = json.choices?.[0]?.message;
+  const reasoning = message?.reasoning_content || message?.reasoning;
+  if (reasoning) yield { type: 'thinking', text: reasoning };
   if (message?.content) yield { type: 'token', text: message.content };
   const toolCalls = (message?.tool_calls ?? []).map((tool) => ({ id: tool.id || `call_${tool.function?.name}`, name: tool.function?.name || '', arguments: tool.function?.arguments || '{}' })).filter((tool) => tool.name);
-  yield { type: 'done', finishReason: toolCalls.length ? 'tool_calls' : 'stop', toolCalls, usage: json.usage ? { inputTokens: json.usage.prompt_tokens ?? 0, outputTokens: json.usage.completion_tokens ?? 0 } : undefined };
+  yield { type: 'done', finishReason: toolCalls.length ? 'tool_calls' : 'stop', toolCalls, usage: json.usage ? { inputTokens: json.usage.prompt_tokens ?? 0, outputTokens: json.usage.completion_tokens ?? 0 } : undefined, telemetry: parseTimings(json.timings) };
 }
 
 async function* readSSE(response: Response): AsyncIterable<ProviderEvent> {
@@ -372,6 +450,9 @@ async function* readSSE(response: Response): AsyncIterable<ProviderEvent> {
   let buffer = '';
   const tools = new Map<number, ToolCall>();
   let usage: Usage | undefined;
+  let telemetry: Telemetry | undefined;
+  let sawEnd = false;
+  let finishReason = '';
   while (true) {
     const chunk = await reader.read();
     if (chunk.done) break;
@@ -380,9 +461,14 @@ async function* readSSE(response: Response): AsyncIterable<ProviderEvent> {
     buffer = lines.pop() ?? '';
     for (const line of lines) {
       const data = line.trim().replace(/^data:\s*/, '');
+      if (data === '[DONE]') { sawEnd = true; continue; }
       if (!data || !data.startsWith('{')) continue;
       const json = JSON.parse(data) as OpenAIChunk;
-      const delta = json.choices?.[0]?.delta;
+      const choice = json.choices?.[0];
+      if (choice?.finish_reason) { sawEnd = true; finishReason = choice.finish_reason; }
+      const delta = choice?.delta;
+      const reasoning = delta?.reasoning_content || delta?.reasoning;
+      if (reasoning) yield { type: 'thinking', text: reasoning };
       if (delta?.content) yield { type: 'token', text: delta.content };
       for (const tool of delta?.tool_calls ?? []) {
         const index = tool.index ?? 0;
@@ -393,8 +479,10 @@ async function* readSSE(response: Response): AsyncIterable<ProviderEvent> {
         tools.set(index, current);
       }
       if (json.usage) usage = { inputTokens: json.usage.prompt_tokens ?? 0, outputTokens: json.usage.completion_tokens ?? 0 };
+      if (json.timings) telemetry = parseTimings(json.timings) ?? telemetry;
     }
   }
+  if (!sawEnd) throw new Error('Model stream ended unexpectedly (server disconnected mid-reply).');
   const toolCalls = [...tools.entries()].sort((a, b) => a[0] - b[0]).map(([, tool]) => ({ ...tool, id: tool.id || `call_${tool.name}` })).filter((tool) => tool.name);
-  yield { type: 'done', finishReason: toolCalls.length ? 'tool_calls' : 'stop', toolCalls, usage };
+  yield { type: 'done', finishReason: toolCalls.length ? 'tool_calls' : (finishReason || 'stop'), toolCalls, usage, telemetry };
 }

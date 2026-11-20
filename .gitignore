@@ -16,3 +16,4 @@ coverage
 .vite
 e2e-report/
 test-results/
+*.apk

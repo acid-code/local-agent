@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
-import { ChevronDown, Cpu, KeyRound, RefreshCw, Settings2, Sparkles } from 'lucide-react';
+import { ChevronDown, Download, KeyRound, RefreshCw, Settings2, Sparkles, X } from 'lucide-react';
 import { api, post } from './api';
 import { errorText, toast } from './toast';
 import { Menu, type MenuItem } from '../components/ui';
+import { PullModel } from '../components/PullModel';
 import { t } from '../i18n';
 
 export interface UsableModel { id: string; name: string; local: boolean; disabled?: boolean; reason?: string }
@@ -18,6 +20,29 @@ export function useUsableModels() {
   const [refreshing, setRefreshing] = useState(false);
   const reload = useCallback(() => api<UsableModels>('/api/models/usable').then((data) => { setModels(data); setLoaded(true); return data; }).catch(() => { setLoaded(true); return null; }), []);
   useEffect(() => { void reload(); }, [reload]);
+
+  // Listen for background startup discovery completing and auto-retry while local models are empty.
+  useEffect(() => {
+    const onLive = (event: Event) => {
+      const detail = (event as CustomEvent<{ type?: string }>).detail;
+      if (detail?.type === 'models_updated') void reload();
+    };
+    window.addEventListener('la:live', onLive);
+    return () => window.removeEventListener('la:live', onLive);
+  }, [reload]);
+
+  useEffect(() => {
+    if (!loaded || models.local.length > 0) return;
+    let tries = 0;
+    const timer = window.setInterval(async () => {
+      tries += 1;
+      if (tries > 15) { window.clearInterval(timer); return; }
+      const data = await reload();
+      if (data && data.local.length > 0) window.clearInterval(timer);
+    }, 3500);
+    return () => window.clearInterval(timer);
+  }, [loaded, models.local.length, reload]);
+
   /** Rescan Ollama and providers (owner), then update the list in place. */
   const refresh = useCallback(async () => {
     setRefreshing(true);
@@ -48,13 +73,14 @@ export function ModelOptions({ models }: { models: UsableModels }) {
 
 /**
  * The chat model picker: Auto on top, then Local and Cloud, out-of-quota models disabled with the reason,
- * and the actions you need right there (refresh, add a Gemini key, set up a model).
+ * and inline actions (refresh, pull model, Gemini key, Settings → System).
  */
 export function ModelPicker({ value, onChange, autoLabel = 'Auto', state }: { value: string | null; onChange: (id: string | null) => void; autoLabel?: string; state: ReturnType<typeof useUsableModels> }) {
   const navigate = useNavigate();
+  const [pullOpen, setPullOpen] = useState(false);
   const { models, all, loaded, refresh, refreshing } = state;
   const current = value ? all.find((model) => model.id === value) : null;
-  const label = loaded && models.empty ? 'No model yet' : current ? current.name : autoLabel;
+  const label = loaded && models.empty ? t('No model yet') : current ? current.name : autoLabel;
   const pick = (model: UsableModel, index: number, heading: string): MenuItem => ({
     label: model.name, checked: value === model.id, disabled: model.disabled, hint: model.disabled ? model.reason?.replace(/^.*? is /, '') : undefined,
     heading: index === 0 ? heading : undefined, separator: index === 0, onSelect: () => onChange(model.id),
@@ -65,9 +91,29 @@ export function ModelPicker({ value, onChange, autoLabel = 'Auto', state }: { va
     ...models.cloud.map((model, index) => pick(model, index, 'Cloud')),
     ...models.dev.map((model, index) => pick(model, index, 'Dev only')),
   ];
-  if (loaded && models.empty) items.push({ label: t('Set up a model…'), icon: Cpu, separator: true, onSelect: () => navigate('/setup') });
-  if (models.canManage !== false) items.push({ label: refreshing ? t('Refreshing…') : t('Refresh models'), icon: RefreshCw, separator: !(loaded && models.empty), disabled: refreshing, onSelect: () => void refresh() });
+  if (models.canManage !== false) {
+    items.push({ label: refreshing ? t('Refreshing…') : t('Refresh models'), icon: RefreshCw, separator: true, disabled: refreshing, keepOpen: true, onSelect: () => void refresh() });
+    items.push({ label: t('Pull model…'), icon: Download, hint: t('Ollama'), onSelect: () => setPullOpen(true) });
+  }
   if (models.canManage && models.geminiConnected === false) items.push({ label: t('Add a Gemini key…'), icon: KeyRound, hint: t('cloud fallback'), onSelect: () => navigate('/settings#vault') });
-  if (models.canManage) items.push({ label: t('Manage models…'), icon: Settings2, onSelect: () => navigate('/models') });
-  return <Menu label={t('Model')} text={label} icon={refreshing ? RefreshCw : null} busy={refreshing} className="model-trigger" align="start" trailing={<ChevronDown size={14} aria-hidden />} items={items} />;
+  if (models.canManage) items.push({ label: t('System settings…'), icon: Settings2, onSelect: () => navigate('/settings#system') });
+
+  return (
+    <>
+      <Menu label={t('Model')} text={label} icon={refreshing ? RefreshCw : null} busy={refreshing} className="model-trigger" align="start" trailing={<ChevronDown size={14} aria-hidden />} items={items} />
+      {pullOpen && createPortal(
+        <div className="modal-backdrop" role="presentation" onClick={() => setPullOpen(false)}>
+          <div className="modal-card" role="dialog" aria-label={t('Pull Ollama model')} onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>{t('Pull an Ollama model')}</h3>
+              <button type="button" className="icon-btn round" aria-label={t('Close')} onClick={() => setPullOpen(false)}><X size={16} /></button>
+            </div>
+            <p className="faint">{t('Enter any Ollama model tag (e.g. gemma4:26b-a4b, gpt-oss:20b, gemma3:4b).')}</p>
+            <PullModel suggestion="gpt-oss:20b" onDone={() => { void refresh(); }} />
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
+  );
 }

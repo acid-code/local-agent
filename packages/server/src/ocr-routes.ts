@@ -11,7 +11,8 @@ import { filePath, getFile } from './files.js';
 import { cleanupHebrew } from './hebrew-cleanup.js';
 import { getLanguage } from './language.js';
 import { ollamaRoot } from './ollama.js';
-import { buildService, IMAGE_EXT, liveRunners, recognize, serviceStatus, startService, type OcrMode, type OcrResult, type ServiceId } from './ocr.js';
+import { buildService, IMAGE_EXT, liveRunners, recognize, serviceStatus, startService, understandImage, type OcrMode, type OcrResult, type ServiceId } from './ocr.js';
+import { preChangeBackup } from './ops.js';
 
 /**
  * OCR endpoints, the agent tool's reader, background indexing of uploaded images, and the app's own service containers
@@ -24,7 +25,7 @@ export function registerOcr(app: FastifyInstance, deps: { store: Store; engine: 
   async function runnersFor(ownerId: string) {
     const account = getAccount(store, ownerId);
     const cloudAllowed = !account || account.role === 'owner' || account.limits.cloud !== false;
-    return liveRunners({ fetchImpl, memory: engine.memory, ollamaRoot: ollamaRoot(), cloudAllowed, geminiKey: process.env.GEMINI_API_KEY, visionModel: process.env.OCR_VISION_MODEL });
+    return liveRunners({ fetchImpl, memory: engine.memory, ollamaRoot: ollamaRoot(), cloudAllowed, geminiKey: process.env.GEMINI_API_KEY, visionModel: process.env.OCR_VISION_MODEL, preferLightweight: engine.llama.isActive() });
   }
 
   /** Best local Hebrew writer that fits the RAM budget, for the OCR cleanup pass. */
@@ -67,6 +68,27 @@ export function registerOcr(app: FastifyInstance, deps: { store: Store; engine: 
   }
   engine.ocrReader = (fileId, mode, ownerId) => readFile(fileId, mode, ownerId);
 
+  async function analyzeFile(fileId: string, question: string | undefined, ownerId: string) {
+    const file = getFile(store, fileId);
+    const full = file ? filePath(store, dataDir, fileId) : null;
+    if (!file || !full || (file.ownerId && file.ownerId !== ownerId)) throw fail(404, 'File not found.');
+    if (!IMAGE_EXT.test(file.name) && !String(file.mime).startsWith('image/')) throw fail(400, 'That file is not an image.');
+    return understandImage(fs.readFileSync(full), await runnersFor(ownerId), question);
+  }
+  engine.imageAnalyzer = (fileId, question, ownerId) => analyzeFile(fileId, question, ownerId);
+
+  app.post('/api/vision/analyze', async (req) => {
+    const parsed = z.object({ fileId: z.string().min(1), question: z.string().optional() }).safeParse(req.body ?? {});
+    if (!parsed.success) throw fail(400, parsed.error.issues[0]?.message || 'Invalid input.');
+    mustOwn(store, req, 'file', parsed.data.fileId, 'File not found.');
+    try {
+      return { result: await analyzeFile(parsed.data.fileId, parsed.data.question, accountOf(req).id) };
+    } catch (error) {
+      const statusCode = (error as { statusCode?: number }).statusCode;
+      throw statusCode ? error : fail(502, error instanceof Error ? error.message : 'Vision analysis failed.');
+    }
+  });
+
   app.post('/api/ocr', async (req) => {
     const parsed = z.object({ fileId: z.string().min(1), mode: z.enum(['auto', 'printed', 'handwriting']).optional(), cleanup: z.boolean().optional() }).safeParse(req.body ?? {});
     if (!parsed.success) throw fail(400, parsed.error.issues[0]?.message || 'Invalid input.');
@@ -90,6 +112,7 @@ export function registerOcr(app: FastifyInstance, deps: { store: Store; engine: 
     void (async () => {
       const log = (line: string) => store.appendJob(job.id, line);
       try {
+        await preChangeBackup(dataDir, `pre-${id}-${action}`);
         if (action === 'download') await buildService(docker, id, log);
         else if (action === 'start') await startService(docker, id, log);
         else {

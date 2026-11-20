@@ -6,24 +6,27 @@ import { toast } from '../lib/toast';
 import { Appearance } from '../components/Appearance';
 import { AccountCard, People, QuotaCard } from '../components/People';
 import { ImageRole } from '../components/ImageRole';
+import { PullModel } from '../components/PullModel';
 import { EmptyState, PageHeader } from '../components/ui';
 import { useUsableModels } from '../lib/models';
-import { Activity, Archive, Bot, Bug, Check, Cpu, FolderGit2, Globe, KeyRound, Palette, ScrollText, ShieldCheck, Users, type LucideIcon, Languages } from 'lucide-react';
+import { Activity, Archive, Bot, Bug, Check, Cpu, FolderGit2, Globe, KeyRound, Palette, RefreshCw, ScrollText, Search, Server, ShieldCheck, Users, type LucideIcon, Languages } from 'lucide-react';
 import { useWorkspaces } from '../components/PersonaPanel';
 import { Face, type FaceAgent } from '../components/Face';
 import { t as tr } from '../i18n';
 
 interface Secret { id: string; name: string; handle: string; scope: string; revokedAt: string | null }
 interface Audit { id: number; action: string; actor: string; createdAt: string }
-interface SettingsShape { codeApproval: string; geminiTier: string; sandbox: string; autoResume: boolean; approvalForDestructive: boolean; approvalMode?: string; readOnly?: boolean; dailyTokenLimit?: number | null; killSwitch?: boolean }
+interface SettingsShape { codeApproval: string; geminiTier: string; sandbox: string; autoResume: boolean; approvalForDestructive: boolean; approvalMode?: string; readOnly?: boolean; dailyTokenLimit?: number | null; killSwitch?: boolean; searxngUrl?: string }
+interface ProviderItem { id: string; kind: string; name: string; baseUrl: string | null; enabled: boolean }
+interface ModelItem { id: string; name: string; apiName: string; local: boolean; enabled: boolean; providerId: string; parameterSize?: string | null; practicalBudget?: number }
 
 interface Def { id: string; label: string; icon: LucideIcon; blurb: string; words: string; owner?: boolean; group: 'General' | 'Admin' }
-/** One page, in this order. Old deep links (#vault, #policy, #backups…) land on the matching section. */
+/** One page, in this order. Old deep links (#models, #setup, #vault, #policy, #backups…) land on the matching section. */
 const SECTIONS: Def[] = [
   { id: 'appearance', group: 'General', label: tr('Appearance'), icon: Palette, blurb: tr('Theme, font, bubbles and wallpaper for your account.'), words: 'theme dark light font wallpaper color bubbles density accent' },
   { id: 'language', group: 'General', label: tr('Language'), icon: Languages, blurb: tr('Interface language and Hebrew polishing.'), words: 'language hebrew עברית english rtl locale translate' },
-  { id: 'models', group: 'General', label: tr('Models'), icon: Cpu, blurb: tr('What answers, and which model draws images.'), words: 'models ollama gemini image pull refresh limits quota tier' },
-  { id: 'personas', group: 'General', label: tr('Personas'), icon: Bot, blurb: tr('Who you talk to. Edit one from the chat with its name.'), words: 'personas agents prompt instructions tools skills face' },
+  { id: 'system', group: 'General', label: tr('System'), icon: Cpu, blurb: tr('Models, Ollama pulls, llama-server, SearXNG web search, and image generation.'), words: 'system models ollama llama-server pull refresh searxng search url gemini image limits quota tier setup' },
+  { id: 'personas', group: 'General', label: tr('Personas'), icon: Bot, blurb: tr('Who you talk to. Edit one from the chat with its name.'), words: 'personas agents prompt instructions tools skills face voice' },
   { id: 'workspaces', group: 'General', label: tr('Workspaces'), icon: FolderGit2, blurb: tr('Folders and repos chats can attach.'), words: 'workspaces folders repos git clone sets' },
   { id: 'data', group: 'General', label: tr('Data'), icon: Archive, blurb: tr('Your account, backups and exports.'), words: 'backups snapshot restore export password account diagnostics' },
   { id: 'people', group: 'Admin', owner: true, label: tr('People'), icon: Users, blurb: tr('Member accounts and what they may use.'), words: 'members accounts users invite quota' },
@@ -34,7 +37,7 @@ const SECTIONS: Def[] = [
   { id: 'debug', group: 'Admin', owner: true, label: tr('Debug'), icon: Bug, blurb: tr('Logs, run inspector and diagnostics. Nothing leaves this machine.'), words: 'logs inspector replay tool test diagnostics' },
   { id: 'remote', group: 'Admin', owner: true, label: tr('Remote access'), icon: Globe, blurb: tr('Reach this box from your phone or laptop.'), words: 'tailscale phone lan network access cloudflare' },
 ];
-const ALIASES: Record<string, string> = { backups: 'data', account: 'data', quota: 'models', images: 'models' };
+const ALIASES: Record<string, string> = { backups: 'data', account: 'data', models: 'system', setup: 'system', quota: 'system', images: 'system', searxng: 'system' };
 
 /** Autosave feedback: a "Saved" tick in the header for a moment after any change lands. */
 function useSavedTick() {
@@ -166,27 +169,142 @@ function WorkspacesBlock() {
   );
 }
 
-function ModelsBlock({ owner, settings, patchSettings }: { owner: boolean; settings: SettingsShape | null; patchSettings?: (body: Record<string, unknown>) => Promise<void> }) {
+function SystemBlock({ owner, settings, patchSettings }: { owner: boolean; settings: SettingsShape | null; patchSettings?: (body: Record<string, unknown>) => Promise<void> }) {
   const usable = useUsableModels();
+  const [providers, setProviders] = useState<ProviderItem[]>([]);
+  const [allModels, setAllModels] = useState<ModelItem[]>([]);
+  const [resident, setResident] = useState<string[]>([]);
+  const [llamaUrl, setLlamaUrl] = useState('http://host.docker.internal:8080/v1');
+  const [savingLlama, setSavingLlama] = useState(false);
+  const [searxUrl, setSearxUrl] = useState('');
+  const [searxNote, setSearxNote] = useState('');
+  const [testingSearx, setTestingSearx] = useState(false);
+  const [sysInfo, setSysInfo] = useState<{ version: string; commit: string | null; backupsCount: number; inDocker: boolean } | null>(null);
+
+  useEffect(() => {
+    if (settings?.searxngUrl !== undefined) setSearxUrl(settings.searxngUrl || '');
+  }, [settings?.searxngUrl]);
+
+  const loadModels = () => {
+    if (!owner) return;
+    void api<{ models: ModelItem[]; providers: ProviderItem[]; resident: string[] }>('/api/models').then((data) => {
+      setAllModels(data.models || []);
+      setProviders(data.providers || []);
+      setResident(data.resident || []);
+      const llama = (data.providers || []).find((p) => p.id === 'prov_llama');
+      if (llama?.baseUrl) setLlamaUrl(llama.baseUrl);
+    }).catch(() => undefined);
+  };
+
+  useEffect(() => {
+    loadModels();
+    if (owner) void api<{ version: string; commit: string | null; backupsCount: number; inDocker: boolean }>('/api/system/update-status').then(setSysInfo).catch(() => undefined);
+  }, [owner]);
+
   const count = usable.models.local.length + usable.models.cloud.filter((m) => !m.disabled).length;
+  const localModels = allModels.filter((m) => m.local && m.enabled && m.providerId !== 'prov_rehearsal');
+
   return (
     <>
-      <div className="item-row settings-line">
-        <span className="grow"><strong>{usable.loaded ? (count ? tr('{0} model{1} ready', [count, count === 1 ? '' : 's']) : tr('No model yet')) : tr('Checking…')}</strong>
-          <span className="faint">{usable.models.local.map((m) => m.name).slice(0, 4).join(', ') || tr('Pull one with Ollama')}{usable.models.geminiConnected ? tr(' · Gemini connected') : tr(' · Gemini not connected')}</span></span>
-        {owner && <button className="btn small" disabled={usable.refreshing} onClick={() => void usable.refresh()}>{usable.refreshing ? tr('Refreshing…') : tr('Refresh models')}</button>}
-        <Link className="btn small ghost" to="/models">{tr('Open Models')}</Link>
+      <div className="card">
+        <div className="card-head">
+          <div>
+            <h3>{tr('Models')}</h3>
+            <p className="faint">{usable.loaded ? (count ? tr('{0} model{1} ready', [count, count === 1 ? '' : 's']) : tr('No model yet')) : tr('Checking…')}{usable.models.geminiConnected ? tr(' · Gemini connected') : ''}</p>
+          </div>
+          {owner && (
+            <button className="btn small" disabled={usable.refreshing} onClick={async () => { await usable.refresh(); loadModels(); }}>
+              <RefreshCw size={14} className={usable.refreshing ? 'spin' : undefined} aria-hidden />{' '}{usable.refreshing ? tr('Refreshing…') : tr('Refresh models')}
+            </button>
+          )}
+        </div>
+        {owner && (
+          <>
+            <div style={{ marginBottom: 12 }}>
+              <PullModel suggestion="gpt-oss:20b" onDone={() => { void usable.refresh().then(loadModels); }} />
+            </div>
+            {localModels.length > 0 && (
+              <div className="item-list" style={{ marginBottom: 12 }}>
+                {localModels.map((model) => {
+                  const prov = providers.find((p) => p.id === model.providerId);
+                  const loadedNow = resident.includes(model.apiName) || resident.includes(model.name);
+                  return (
+                    <div key={model.id} className="item-row">
+                      <span className={loadedNow ? 'dot ok' : 'dot'} aria-hidden />
+                      <span className="grow">
+                        <strong>{model.name}</strong>
+                        <span className="faint mono">
+                          {prov?.name || 'Local'}{model.parameterSize ? ` · ${model.parameterSize}` : ''}{model.practicalBudget ? ` · ${Math.round(model.practicalBudget / 1024)}K ctx` : ''}{loadedNow ? ' · loaded' : ''}
+                        </span>
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </>
+        )}
+        {owner && settings && patchSettings && (
+          <label className="field settings-line"><span>{tr('Gemini tier')}</span>
+            <select value={settings.geminiTier} onChange={(event) => void patchSettings({ geminiTier: event.target.value })}>
+              <option value="free">{tr('Free tier (respect the documented limits)')}</option>
+              <option value="paid">{tr('Paid (Argon and Pro become eligible)')}</option>
+            </select>
+          </label>
+        )}
       </div>
-      {owner && settings && patchSettings && (
-        <label className="field settings-line"><span>{tr('Gemini tier')}</span>
-          <select value={settings.geminiTier} onChange={(event) => void patchSettings({ geminiTier: event.target.value })}>
-            <option value="free">{tr('Free tier (respect the documented limits)')}</option>
-            <option value="paid">{tr('Paid (Argon and Pro become eligible)')}</option>
-          </select>
-        </label>
+
+      {owner && (
+        <div className="card">
+          <h3><Server size={15} aria-hidden />{' '}{tr('llama-server (OpenAI-compatible provider)')}</h3>
+          <p className="faint">{tr('Connect a local llama-server instance (with DFlash2 draft sidecar under /opt/llama-server). Inside Docker use http://host.docker.internal:8080/v1; natively use http://127.0.0.1:8080/v1.')}</p>
+          <form className="row" onSubmit={async (e) => {
+            e.preventDefault();
+            if (!llamaUrl.trim()) return;
+            setSavingLlama(true);
+            try {
+              await post('/api/providers', { id: 'prov_llama', name: 'llama-server', kind: 'openai_compat', baseUrl: llamaUrl.trim(), enabled: true });
+              await usable.refresh();
+              loadModels();
+              toast(tr('llama-server saved and scanned.'), 'ok');
+            } catch (error) { toast((error as Error).message, 'error'); } finally { setSavingLlama(false); }
+          }}>
+            <input className="mono grow" type="url" value={llamaUrl} onChange={(e) => setLlamaUrl(e.target.value)} placeholder="http://127.0.0.1:8080/v1" aria-label={tr('llama-server base URL')} />
+            <button className="btn primary small" disabled={savingLlama}>{savingLlama ? tr('Connecting…') : tr('Save & scan')}</button>
+          </form>
+        </div>
       )}
-      {usable.models.empty && usable.loaded && <p className="faint">{tr('Without a model nothing can answer.')}{' '}<Link to="/setup">{tr('Set one up')}</Link>.</p>}
+
+      {owner && settings && patchSettings && (
+        <div className="card">
+          <h3><Search size={15} aria-hidden />{' '}{tr('SearXNG web search URL')}</h3>
+          <p className="faint">{tr('Inside Docker bridge networking use http://local-agent-searxng:8080 or http://host.docker.internal:8088 (never 127.0.0.1). Leave blank to auto-detect.')}</p>
+          <div className="row">
+            <input className="mono grow" type="url" value={searxUrl} onChange={(e) => setSearxUrl(e.target.value)} placeholder="http://local-agent-searxng:8080" aria-label={tr('SearXNG URL')} />
+            <button type="button" className="btn small" onClick={() => void patchSettings({ searxngUrl: searxUrl.trim() })}>{tr('Save')}</button>
+            <button type="button" className="btn ghost small" disabled={testingSearx} onClick={async () => {
+              setTestingSearx(true); setSearxNote('');
+              try {
+                const res = await post<{ ok: boolean; url: string | null; detail: string }>('/api/settings/searxng/test', { url: searxUrl.trim() });
+                setSearxNote(res.detail);
+                if (res.ok && res.url) {
+                  setSearxUrl(res.url);
+                  await patchSettings({ searxngUrl: res.url });
+                  toast(res.detail, 'ok');
+                } else toast(res.detail, 'error');
+              } catch (error) { toast((error as Error).message, 'error'); } finally { setTestingSearx(false); }
+            }}>{testingSearx ? tr('Testing…') : tr('Auto-detect & test')}</button>
+          </div>
+          {searxNote && <p className="faint" style={{ marginTop: 6 }}>{searxNote}</p>}
+        </div>
+      )}
+
       <ImageRole />
+      {sysInfo && (
+        <p className="faint mono" style={{ marginTop: 8 }}>
+          v{sysInfo.version}{sysInfo.commit ? ` (${sysInfo.commit})` : ''} · {sysInfo.inDocker ? 'Docker' : 'Native'} · {sysInfo.backupsCount} backup{sysInfo.backupsCount === 1 ? '' : 's'}
+        </p>
+      )}
       {!owner && <QuotaCard />}
     </>
   );
@@ -199,7 +317,7 @@ export function Settings({ role = 'owner' }: { role?: 'owner' | 'member' }) {
         {(show) => <>
           {show('appearance') && <Block id="appearance"><Appearance /></Block>}
           {show('language') && <Block id="language"><LanguageSettings /></Block>}
-          {show('models') && <Block id="models"><ModelsBlock owner={false} settings={null} /></Block>}
+          {show('system') && <Block id="system"><SystemBlock owner={false} settings={null} /></Block>}
           {show('personas') && <Block id="personas"><PersonasBlock /></Block>}
           {show('workspaces') && <Block id="workspaces"><WorkspacesBlock /></Block>}
           {show('data') && <Block id="data"><AccountCard /></Block>}
@@ -262,7 +380,7 @@ function OwnerSettings() {
       {(show, track) => { trackRef.current = track; return <>
       {show('appearance') && <Block id="appearance"><Appearance /></Block>}
           {show('language') && <Block id="language"><LanguageSettings /></Block>}
-      {show('models') && <Block id="models"><ModelsBlock owner settings={settings} patchSettings={patchSettings} /></Block>}
+      {show('system') && <Block id="system"><SystemBlock owner settings={settings} patchSettings={patchSettings} /></Block>}
       {show('personas') && <Block id="personas"><PersonasBlock /></Block>}
       {show('workspaces') && <Block id="workspaces"><WorkspacesBlock /></Block>}
       {show('data') && <Block id="data">

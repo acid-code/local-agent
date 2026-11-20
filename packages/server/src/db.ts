@@ -30,6 +30,10 @@ export interface Agent {
   language?: 'auto' | 'match' | 'en' | 'he';
   /** Hebrew cleanup pass for this persona; inherit uses the member's setting. */
   hebrewCleanup?: 'inherit' | 'auto' | 'on' | 'off';
+  /** Automatically play assistant replies aloud by voice for this persona. */
+  voiceReply?: boolean;
+  /** Optional voice identifier override (Piper/Kokoro/Gemini voice name). */
+  voiceName?: string;
   createdAt: string; updatedAt: string; ownerId: string;
 }
 export interface Room { id: string; name: string; createdAt: string; agentIds: string[] }
@@ -40,7 +44,7 @@ export interface Session {
 export interface Message {
   id: string; sessionId: string; seq: number; role: string; content: string; toolCallId: string | null;
   toolName: string | null; toolCalls: unknown; agentId: string | null; runId: string | null;
-  imageUrl: string | null; routingNote: string | null; createdAt: string;
+  imageUrl: string | null; routingNote: string | null; thinking?: string | null; createdAt: string;
 }
 export interface Note { id: string; agentId: string; content: string; pinned: boolean; createdAt: string; updatedAt: string }
 export interface RunRow {
@@ -253,9 +257,12 @@ export class Store {
     addAgentCol('template_id', 'template_id TEXT');
     addAgentCol('language', `language TEXT NOT NULL DEFAULT 'auto'`);
     addAgentCol('hebrew_cleanup', `hebrew_cleanup TEXT NOT NULL DEFAULT 'inherit'`);
+    addAgentCol('voice_reply', `voice_reply INTEGER NOT NULL DEFAULT 0`);
+    addAgentCol('voice_name', `voice_name TEXT NOT NULL DEFAULT ''`);
     // Agent self-management and background helpers.
     const colsOf = (table: string) => this.many<Raw>(`PRAGMA table_info(${table})`).map((row) => String(row.name));
     const addCol = (table: string, name: string, ddl: string) => { if (!colsOf(table).includes(name)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`); };
+    addCol('messages', 'thinking', 'thinking TEXT');
     addCol('schedules', 'origin_session_id', 'origin_session_id TEXT');
     addCol('schedules', 'created_by', `created_by TEXT NOT NULL DEFAULT 'user'`);
     addCol('triggers', 'origin_session_id', 'origin_session_id TEXT');
@@ -511,9 +518,9 @@ export class Store {
     const current = this.getAgent(id);
     if (!current) return null;
     const next = { ...current, ...patch, updatedAt: now() };
-    this.db.prepare(`UPDATE agents SET name=?, title=?, description=?, system_prompt=?, model_id=?, routing=?, strategy=?, tool_allowlist=?, memory_enabled=?, avatar_kind=?, avatar_ref=?, accent=?, emoji=?, pinned=?, hidden=?, sort_order=?, notify=?, template_id=?, language=?, hebrew_cleanup=?, updated_at=? WHERE id=?`).run(
+    this.db.prepare(`UPDATE agents SET name=?, title=?, description=?, system_prompt=?, model_id=?, routing=?, strategy=?, tool_allowlist=?, memory_enabled=?, avatar_kind=?, avatar_ref=?, accent=?, emoji=?, pinned=?, hidden=?, sort_order=?, notify=?, template_id=?, language=?, hebrew_cleanup=?, voice_reply=?, voice_name=?, updated_at=? WHERE id=?`).run(
       next.name, next.title, next.description, next.systemPrompt, next.modelId, next.routing, next.strategy, JSON.stringify(next.toolAllowlist), next.memoryEnabled ? 1 : 0,
-      next.avatarKind, next.avatarRef, next.accent, next.emoji, next.pinned ? 1 : 0, next.hidden ? 1 : 0, next.sortOrder, next.notify === 'mute' ? 'mute' : 'all', next.templateId ?? null, next.language || 'auto', next.hebrewCleanup || 'inherit', next.updatedAt, id,
+      next.avatarKind, next.avatarRef, next.accent, next.emoji, next.pinned ? 1 : 0, next.hidden ? 1 : 0, next.sortOrder, next.notify === 'mute' ? 'mute' : 'all', next.templateId ?? null, next.language || 'auto', next.hebrewCleanup || 'inherit', next.voiceReply ? 1 : 0, next.voiceName || '', next.updatedAt, id,
     );
     if (patch.workshopIds) this.setAgentWorkshops(id, patch.workshopIds);
     return this.getAgent(id);
@@ -646,10 +653,10 @@ export class Store {
     const seqRow = this.one<Raw>('SELECT COALESCE(MAX(seq), 0) AS seq FROM messages WHERE session_id = ?', input.sessionId);
     const seq = Number(seqRow?.seq ?? 0) + 1;
     const ts = now();
-    this.db.prepare(`INSERT INTO messages (id, session_id, seq, role, content, tool_call_id, tool_name, tool_calls, agent_id, run_id, image_url, routing_note, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    this.db.prepare(`INSERT INTO messages (id, session_id, seq, role, content, tool_call_id, tool_name, tool_calls, agent_id, run_id, image_url, routing_note, thinking, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       id, input.sessionId, seq, input.role, input.content, input.toolCallId, input.toolName,
-      input.toolCalls ? JSON.stringify(input.toolCalls) : null, input.agentId, input.runId, input.imageUrl, input.routingNote, ts,
+      input.toolCalls ? JSON.stringify(input.toolCalls) : null, input.agentId, input.runId, input.imageUrl, input.routingNote, input.thinking ?? null, ts,
     );
     this.db.prepare('UPDATE chat_sessions SET updated_at = ? WHERE id = ?').run(ts, input.sessionId);
     return this.getMessage(id)!;
@@ -1073,6 +1080,7 @@ function mapAgent(row: Raw): Agent {
     pinned: Boolean(row.pinned), hidden: Boolean(row.hidden), sortOrder: Number(row.sort_order || 0), lastReadAt: row.last_read_at ? String(row.last_read_at) : null,
     unread: 0, workshopIds: [], notify: row.notify === 'mute' ? 'mute' : 'all', templateId: row.template_id ? String(row.template_id) : null,
     language: (['match', 'en', 'he'].includes(String(row.language)) ? String(row.language) : 'auto') as Agent['language'], hebrewCleanup: (['auto', 'on', 'off'].includes(String(row.hebrew_cleanup)) ? String(row.hebrew_cleanup) : 'inherit') as Agent['hebrewCleanup'],
+    voiceReply: Boolean(row.voice_reply), voiceName: row.voice_name ? String(row.voice_name) : '',
     createdAt: String(row.created_at), updatedAt: String(row.updated_at), ownerId: String(row.owner_id || 'owner'),
   };
 }
@@ -1093,7 +1101,9 @@ function mapMessage(row: Raw): Message {
     toolCallId: row.tool_call_id ? String(row.tool_call_id) : null, toolName: row.tool_name ? String(row.tool_name) : null,
     toolCalls: parseJson(row.tool_calls ? String(row.tool_calls) : '', null), agentId: row.agent_id ? String(row.agent_id) : null,
     runId: row.run_id ? String(row.run_id) : null, imageUrl: row.image_url ? String(row.image_url) : null,
-    routingNote: row.routing_note ? String(row.routing_note) : null, createdAt: String(row.created_at),
+    routingNote: row.routing_note ? String(row.routing_note) : null,
+    thinking: row.thinking ? String(row.thinking) : null,
+    createdAt: String(row.created_at),
   };
 }
 

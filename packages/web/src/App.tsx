@@ -9,7 +9,6 @@ import { Agents } from './pages/Agents';
 import { Chat } from './pages/Chat';
 import { Containers } from './pages/Containers';
 import { Login } from './pages/Login';
-import { Models } from './pages/Models';
 import { Resources } from './pages/Resources';
 import { Runs } from './pages/Runs';
 import { Library } from './pages/Library';
@@ -17,7 +16,6 @@ import { Schedules } from './pages/Schedules';
 import { Skills } from './pages/Skills';
 import { Triggers } from './pages/Triggers';
 import { Settings } from './pages/Settings';
-import { Setup } from './pages/Setup';
 import { Tools } from './pages/Tools';
 import { Workspace } from './pages/Workspace';
 import { loadAccountTheme } from './lib/theme';
@@ -51,13 +49,13 @@ export function App() {
         <Route path="/runs" element={<Runs />} />
         <Route path="/runs/:id" element={<Runs />} />
         {owner && <Route path="/tools" element={<Tools />} />}
-        {owner && <Route path="/models" element={<Models />} />}
+        {owner && <Route path="/models" element={<Navigate to="/settings#system" replace />} />}
         {owner && <Route path="/containers" element={<Containers />} />}
         <Route path="/schedules" element={<Schedules />} />
         <Route path="/library" element={<Library />} />
         {owner && <Route path="/skills" element={<Skills />} />}
         {owner && <Route path="/triggers" element={<Triggers />} />}
-        {owner && <Route path="/setup" element={<Setup />} />}
+        {owner && <Route path="/setup" element={<Navigate to="/settings#system" replace />} />}
         {owner && <Route path="/resources" element={<Resources />} />}
         <Route path="/settings" element={<Settings role={owner ? 'owner' : 'member'} />} />
         <Route path="*" element={<Navigate to="/" replace />} />

@@ -162,16 +162,34 @@ export const BUILTIN_TOOLS: Tool[] = [
   },
   {
     name: 'read_file',
-    description: 'Read a text file in the workspace or a workshop project. Prefix the path with the project label, such as server/src/index.ts.',
-    parameters: obj({ path: { type: 'string' } }, ['path']),
+    description: 'Read a text file in the workspace or a workshop project. Prefix the path with the project label, such as server/src/index.ts. Pass startLine and endLine (1-based) to read slices of large files.',
+    parameters: obj({
+      path: { type: 'string' },
+      startLine: { type: 'number', description: 'Optional 1-based starting line.' },
+      endLine: { type: 'number', description: 'Optional 1-based ending line (inclusive).' },
+    }, ['path']),
     mutates: () => false,
     approval: () => null,
     async execute(args, ctx) {
       const hit = locatePath({ workspace: ctx.workspace, roots: ctx.roots, target: String(args.path || '') });
       if (!hit) throw new Error('That file is not in this workshop.');
       const stat = await fs.stat(hit.full);
-      if (stat.size > 200_000) throw new Error('File is larger than 200 KB.');
-      return fs.readFile(hit.full, 'utf8');
+      if (stat.size > 1_000_000) throw new Error('File is larger than 1 MB.');
+      const raw = await fs.readFile(hit.full, 'utf8');
+      const lines = raw.split('\n');
+      const hasRange = args.startLine != null || args.endLine != null;
+      if (hasRange) {
+        const start = Math.max(1, Math.floor(Number(args.startLine || 1)));
+        const end = Math.min(lines.length, Math.max(start, Math.floor(Number(args.endLine || start + 399))));
+        const body = lines.slice(start - 1, end).map((line, i) => `${start + i}: ${line}`).join('\n');
+        return `Lines ${start}-${end} of ${lines.length}:\n${body}`;
+      }
+      if (lines.length > 400 || stat.size > 200_000) {
+        const cap = Math.min(400, lines.length);
+        const body = lines.slice(0, cap).map((line, i) => `${i + 1}: ${line}`).join('\n');
+        return `Lines 1-${cap} of ${lines.length} (truncated — pass startLine/endLine to read more):\n${body}`;
+      }
+      return raw;
     },
   },
   {
@@ -216,26 +234,29 @@ export const BUILTIN_TOOLS: Tool[] = [
       if (assessCommand(command) === 'blocked') throw new Error('That command is blocked.');
       const cwd = (ctx.roots?.length ?? 0) > 0 ? projectPath(ctx.roots!, args.cwd ? String(args.cwd) : undefined, ctx.workspace) : ctx.workspace;
       if (ctx.sandbox !== 'host' && ctx.docker.available()) {
+        const hostCwd = toHostBindPath(cwd);
+        const image = await pickShellImage(cwd, ctx.docker);
+        const shellBin = image.startsWith('alpine') ? 'sh' : 'bash';
         const result = await ctx.docker.runCollect({
-          Image: 'alpine:3.20',
-          Cmd: ['sh', '-lc', command],
+          Image: image,
+          Cmd: [shellBin, '-lc', command],
           WorkingDir: '/work',
           Labels: { 'local-agent.role': 'shell', 'local-agent.agent': ctx.agent.id },
           HostConfig: {
             AutoRemove: false,
-            Memory: 512 * 1024 * 1024,
-            NanoCpus: 1_000_000_000,
+            Memory: 2 * 1024 * 1024 * 1024,
+            NanoCpus: 4_000_000_000,
             CapDrop: ['ALL'],
             SecurityOpt: ['no-new-privileges:true'],
             NetworkMode: 'none',
-            Binds: [`${cwd}:/work`],
-            PidsLimit: 64,
+            Binds: [`${hostCwd}:/work`],
+            PidsLimit: 256,
           },
         });
-        return `exit ${result.code}\n${result.output}`;
+        return `exit ${result.code}\n${clipToolOutput(result.output)}`;
       }
       if (ctx.sandbox === 'docker-only') throw new Error('Docker sandbox is required and the Docker socket is not available.');
-      return hostJail(command, ctx, cwd);
+      return clipToolOutput(await hostJail(command, ctx, cwd));
     },
   },
   {
@@ -437,4 +458,42 @@ export async function readWorkspaceFile(root: string, relative: string) {
   const stat = await fs.stat(file);
   if (stat.size > 200_000) throw new Error('File is too large to preview.');
   return fs.readFile(file, 'utf8');
+}
+
+/** Map container paths (/data, /projects) to host paths when launching sibling Docker containers. */
+export function toHostBindPath(containerPath: string): string {
+  const resolved = path.resolve(containerPath);
+  const dataDir = path.resolve(process.env.DATA_DIR || '/data');
+  const hostData = process.env.LA_HOST_DATA_DIR?.trim();
+  if (hostData && (resolved === dataDir || resolved.startsWith(`${dataDir}${path.sep}`))) {
+    return path.join(hostData, path.relative(dataDir, resolved));
+  }
+  const projDir = path.resolve(process.env.LA_PROJECTS_DIR || '/projects');
+  const hostProj = process.env.LA_HOST_PROJECTS_DIR?.trim();
+  if (hostProj && (resolved === projDir || resolved.startsWith(`${projDir}${path.sep}`))) {
+    return path.join(hostProj, path.relative(projDir, resolved));
+  }
+  return resolved;
+}
+
+/** Pick a locally cached dev image matching the project so shell commands have node/python/git. */
+async function pickShellImage(cwd: string, docker: DockerCtl): Promise<string> {
+  const has = async (file: string) => fs.access(path.join(cwd, file)).then(() => true).catch(() => false);
+  const candidates: string[] = [];
+  if (await has('package.json')) candidates.push('node:22-bookworm-slim', 'node:22-alpine');
+  if (await has('pyproject.toml') || await has('requirements.txt')) candidates.push('python:3.11-slim');
+  candidates.push('alpine:3.20');
+  for (const image of candidates) {
+    if (await docker.hasImage(image).catch(() => false)) return image;
+  }
+  return 'alpine:3.20';
+}
+
+/** Keep shell outputs from flooding the context window: preserve head + tail when output is huge. */
+export function clipToolOutput(text: string, maxChars = 12_000): string {
+  if (text.length <= maxChars) return text;
+  const head = Math.floor(maxChars * 0.45);
+  const tail = Math.floor(maxChars * 0.45);
+  const omitted = text.length - head - tail;
+  return `${text.slice(0, head)}\n\n... [${omitted.toLocaleString('en-US')} characters omitted to protect context] ...\n\n${text.slice(-tail)}`;
 }

@@ -1,3 +1,5 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { hebrewVariants, stripNiqqud } from '@local-agent/shared';
 import { discoverRules, rulesBrief } from './rules.js';
 import { OWNER_ID } from './accounts.js';
@@ -76,21 +78,47 @@ export function memoryFileTool(): Tool {
 export function proposeSkillTool(): Tool {
   return {
     name: 'propose_skill',
-    description: 'After a hard or repeated task, offer to save how you did it as a skill (or update an existing one) so next time is quicker. The user approves it first. name, description (when to use it, one line), body (Markdown steps, commands, pitfalls), slug to update an existing skill.',
-    parameters: obj({ name: { type: 'string' }, description: { type: 'string' }, body: { type: 'string' }, slug: { type: 'string' } }, ['name', 'description', 'body']),
+    description: 'Create or update a shared skill (and optionally attach a reusable executable script) so EVERY persona can use it via load_skill and run_skill_script. The user approves it first. Pass name, description (when to use it, one line), body (Markdown steps, commands, pitfalls), optional slug to update an existing skill, and optional scriptName + scriptBody to create a shared script/tool.',
+    parameters: obj({
+      name: { type: 'string' },
+      description: { type: 'string' },
+      body: { type: 'string' },
+      slug: { type: 'string' },
+      scriptName: { type: 'string', description: 'Optional filename (e.g. build-deck.py or check.sh) saved under this skill\'s scripts/ folder for all personas to run via run_skill_script.' },
+      scriptBody: { type: 'string', description: 'Optional script source code when scriptName is provided.' },
+    }, ['name', 'description', 'body']),
     mutates: () => true,
     approval: (args, ctx) => {
       const existing = args.slug && ctx ? listSkills(ctx.store).find((skill) => skill.slug === String(args.slug)) : null;
-      const head = existing ? `Update skill “${existing.name}” to v${existing.version + 1}` : `Save new skill “${String(args.name || '').slice(0, 60)}”`;
-      return `${head}: ${String(args.description || '').slice(0, 160)}`;
+      const head = existing ? `Update shared skill “${existing.name}” to v${existing.version + 1}` : `Save new shared skill “${String(args.name || '').slice(0, 60)}”`;
+      const scriptTag = args.scriptName ? ` (+ script ${String(args.scriptName).slice(0, 40)})` : '';
+      return `${head}${scriptTag}: ${String(args.description || '').slice(0, 160)}`;
     },
     async execute(args, ctx) {
       const name = String(args.name || '').trim().slice(0, 80);
       const description = String(args.description || '').trim().replace(/\s+/g, ' ').slice(0, 300);
       const body = String(args.body || '').trim().slice(0, 20_000);
       if (!name || !description || !body) throw new Error('name, description and body are all needed.');
-      const skill = await saveSkill(ctx.store, ctx.libraryDir || '', renderSkillMd({ name, description, body }), args.slug ? String(args.slug) : undefined);
-      return `Saved skill ${skill.slug} v${skill.version}. It is in the catalog for every persona; its body loads only when a task fits.`;
+      if (body.length < 40) throw new Error('Skill body is too short; include concrete steps, commands, or pitfalls.');
+      const existing = listSkills(ctx.store);
+      let targetSlug = args.slug ? String(args.slug).trim() : undefined;
+      if (!targetSlug) {
+        const dup = existing.find((s) => s.name.toLowerCase() === name.toLowerCase());
+        if (dup) targetSlug = dup.slug;
+      }
+      const skill = await saveSkill(ctx.store, ctx.libraryDir || '', renderSkillMd({ name, description, body }), targetSlug);
+      let scriptNote = '';
+      if (args.scriptName && args.scriptBody && ctx.libraryDir) {
+        const safeName = path.basename(String(args.scriptName).trim()).replace(/[^a-zA-Z0-9._-]+/g, '_');
+        if (safeName && !safeName.startsWith('.')) {
+          const scriptDir = path.join(ctx.libraryDir, 'skills', skill.slug, 'scripts');
+          await fs.mkdir(scriptDir, { recursive: true });
+          const scriptPath = path.join(scriptDir, safeName);
+          await fs.writeFile(scriptPath, String(args.scriptBody).slice(0, 40_000), { encoding: 'utf8', mode: 0o755 });
+          scriptNote = ` Attached shared script skills/${skill.slug}/scripts/${safeName} (any persona can run it with run_skill_script).`;
+        }
+      }
+      return `Saved shared skill ${skill.slug} v${skill.version}.${scriptNote} Every persona can now load and use it.`;
     },
   };
 }
@@ -153,19 +181,47 @@ export function snippetOf(body: string, terms: string[], width = 90) {
 export function searchChats(store: Store, opts: { query: string; ownerId: string; exclude?: string | null; limit?: number }) {
   syncFts(store);
   const match = ftsQuery(opts.query);
-  if (!match) return [];
-  const hits = store.db.prepare(`SELECT f.session_id AS sid, f.message_id AS mid, f.content AS body, bm25(messages_tri) AS score
-    FROM messages_tri f JOIN chat_sessions s ON s.id = f.session_id
-    WHERE messages_tri MATCH ? AND s.owner_id = ? AND s.archived = 0 AND (? IS NULL OR f.session_id <> ?)
-    ORDER BY score LIMIT 60`).all(match, opts.ownerId, opts.exclude ?? null, opts.exclude ?? null) as { sid: string; mid: string; body: string; score: number }[];
+  const ftsHits = match
+    ? (store.db.prepare(`SELECT f.session_id AS sid, f.message_id AS mid, f.content AS body, bm25(messages_tri) AS score
+        FROM messages_tri f JOIN chat_sessions s ON s.id = f.session_id
+        WHERE messages_tri MATCH ? AND s.owner_id = ? AND s.archived = 0 AND (? IS NULL OR f.session_id <> ?)
+        ORDER BY score LIMIT 60`).all(match, opts.ownerId, opts.exclude ?? null, opts.exclude ?? null) as { sid: string; mid: string; body: string; score: number }[])
+    : [];
   const terms = [...new Set((match.match(/"((?:[^"]|"")+)"/g) ?? []).map((term) => term.slice(1, -1).replace(/""/g, '"')))].sort((a, b) => b.length - a.length);
-  const grouped = new Map<string, { sid: string; hits: { mid: string; snip: string }[]; score: number }>();
-  for (const hit of hits) {
-    const group = grouped.get(hit.sid) ?? { sid: hit.sid, hits: [], score: hit.score };
-    if (group.hits.length < 3) group.hits.push({ mid: hit.mid, snip: snippetOf(hit.body, terms) });
-    grouped.set(hit.sid, group);
+  // Hybrid RRF fusion: combine FTS5 lexical hits with token-similarity scoring over recent summaries/messages.
+  const k = 60;
+  const rrf = new Map<string, { sid: string; hits: { mid: string; snip: string }[]; score: number }>();
+  ftsHits.forEach((hit, rank) => {
+    const group = rrf.get(hit.sid) ?? { sid: hit.sid, hits: [], score: 0 };
+    group.score += 1 / (k + rank + 1);
+    if (group.hits.length < 3 && !group.hits.some((h) => h.mid === hit.mid)) {
+      group.hits.push({ mid: hit.mid, snip: snippetOf(hit.body, terms) });
+    }
+    rrf.set(hit.sid, group);
+  });
+  const qWords = new Set(stripNiqqud(opts.query.toLowerCase()).match(/[\p{L}\p{N}_]{2,}/gu) ?? []);
+  if (qWords.size > 0) {
+    const recent = store.db.prepare(`SELECT m.session_id AS sid, m.id AS mid, m.content AS body
+      FROM messages m JOIN chat_sessions s ON s.id = m.session_id
+      WHERE s.owner_id = ? AND s.archived = 0 AND m.role IN ('user','assistant') AND (? IS NULL OR m.session_id <> ?)
+      ORDER BY m.rowid DESC LIMIT 200`).all(opts.ownerId, opts.exclude ?? null, opts.exclude ?? null) as { sid: string; mid: string; body: string }[];
+    const semScored = recent.map((row) => {
+      const words = new Set(stripNiqqud(row.body.toLowerCase()).match(/[\p{L}\p{N}_]{2,}/gu) ?? []);
+      let overlap = 0;
+      for (const w of qWords) if (words.has(w)) overlap += 1;
+      const score = overlap / Math.sqrt(qWords.size * Math.max(1, words.size));
+      return { ...row, score };
+    }).filter((r) => r.score > 0.08).sort((a, b) => b.score - a.score).slice(0, 30);
+    semScored.forEach((hit, rank) => {
+      const group = rrf.get(hit.sid) ?? { sid: hit.sid, hits: [], score: 0 };
+      group.score += 0.85 / (k + rank + 1);
+      if (group.hits.length < 3 && !group.hits.some((h) => h.mid === hit.mid)) {
+        group.hits.push({ mid: hit.mid, snip: snippetOf(hit.body, [...qWords]) });
+      }
+      rrf.set(hit.sid, group);
+    });
   }
-  return [...grouped.values()].slice(0, Math.min(10, opts.limit ?? 5)).map((group) => {
+  return [...rrf.values()].sort((a, b) => b.score - a.score).slice(0, Math.min(10, opts.limit ?? 5)).map((group) => {
     const session = store.getSession(group.sid)!;
     const summaries = store.listSummaries(group.sid);
     const summary = summaries.at(-1)?.content || session.summary || '';

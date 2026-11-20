@@ -1,7 +1,8 @@
 import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
+import { DockerCtl } from './docker.js';
 import { interfacesFromOs, parseAllowlist, preferredLanUrl, setupBindAddresses } from './lan.js';
-import { applyPendingRestore } from './ops.js';
+import { applyPendingRestore, guardEmptyDataDir } from './ops.js';
 import { buildSetupApp } from './setup-site.js';
 import { ensureSetupToken } from './setup-token.js';
 import { loadMasterKey, Vault } from './vault.js';
@@ -10,6 +11,7 @@ import path from 'node:path';
 
 const config = loadConfig();
 if (applyPendingRestore(config.dataDir)) console.log('Restored the pending backup.');
+await guardEmptyDataDir(config.dataDir, new DockerCtl());
 
 const setupOnly = process.env.LA_SETUP_ONLY === '1';
 const disableSetup = process.env.LA_DISABLE_SETUP === '1';

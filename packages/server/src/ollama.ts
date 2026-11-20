@@ -4,8 +4,30 @@ export interface LoadedModel {
   sizeBytes: number | null;
 }
 
+let discoveredOllamaRoot: string | null = null;
+
+export function setOllamaRoot(url: string | null) {
+  discoveredOllamaRoot = url ? normalizeOllamaHost(url) : null;
+}
+
+export function normalizeOllamaHost(raw: string): string {
+  let value = raw.trim().replace(/\/$/, '').replace(/\/v1$/i, '');
+  if (!value) return 'http://127.0.0.1:11434';
+  if (!/^https?:\/\//i.test(value)) value = `http://${value}`;
+  try {
+    const parsed = new URL(value);
+    if (parsed.hostname === '0.0.0.0' || parsed.hostname === '::') parsed.hostname = '127.0.0.1';
+    if (!parsed.port) parsed.port = '11434';
+    return parsed.origin;
+  } catch {
+    return value;
+  }
+}
+
 export function ollamaRoot() {
-  return (process.env.OLLAMA_HOST || 'http://127.0.0.1:11434').replace(/\/$/, '');
+  if (process.env.OLLAMA_HOST) return normalizeOllamaHost(process.env.OLLAMA_HOST);
+  if (discoveredOllamaRoot) return discoveredOllamaRoot;
+  return 'http://127.0.0.1:11434';
 }
 
 export async function ollamaLoaded(fetchImpl: typeof fetch): Promise<LoadedModel[]> {

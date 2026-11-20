@@ -5,6 +5,7 @@ import { isInside } from '@local-agent/shared';
 import { locatePath, projectPath, type PathHit } from './workshops.js';
 import { addProjectNote, explainPull, git, pushApproval, tryLockRepo } from './repos.js';
 import { openPullRequest, validBranch } from './gitops.js';
+import { runPreCommitSemgrep } from './semgrep.js';
 import { OWNER_ID, foreignPath } from './accounts.js';
 import type { Store } from './db.js';
 import type { Tool, ToolContext } from './tools.js';
@@ -290,6 +291,8 @@ export const CODING_TOOLS: Tool[] = [
       }
       if (action === 'commit') {
         return onceEffect(ctx, action, async () => {
+          const scan = await runPreCommitSemgrep(ctx.docker, cwd, { dataDir: ctx.libraryDir });
+          if (!scan.ok) throw new Error(scan.summary);
           await git(cwd, ['add', '-A'], identity);
           const message = String(args.message || 'agent edit');
           const committed = await git(cwd, ['commit', '-m', message], identity);
@@ -297,7 +300,7 @@ export const CODING_TOOLS: Tool[] = [
             const sha = (await git(cwd, ['rev-parse', '--short', 'HEAD'], identity)).replace(/^exit \d+\n/, '').trim();
             addProjectNote(ctx.store, { label, agentId: ctx.agent.id, kind: 'change', body: `${ctx.agent.name}: ${message}`, sha });
           }
-          return committed;
+          return scan.skipped ? committed : `${scan.summary}\n${committed}`;
         });
       }
       if (action === 'pull') return explainPull(await git(cwd, ['pull', '--ff-only'], identity));

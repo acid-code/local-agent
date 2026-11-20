@@ -1,5 +1,7 @@
 import { estimateTokens } from './tokens.js';
-import type { StrategyName, TokenizerId } from './types.js';
+import type { ContextBreakdown, StrategyName, TokenizerId } from './types.js';
+
+export type { ContextBreakdown };
 
 export interface ContextSourceMessage {
   id: string;
@@ -35,6 +37,13 @@ export interface PlanInput {
   retrieved: RetrievedChunk[];
   messages: ContextSourceMessage[];
   tokenizer: TokenizerId;
+  /** Optional token breakdown hints from the caller for the Cursor-style context indicator. */
+  breakdownHints?: {
+    systemPrompt?: number;
+    personaAndTools?: number;
+    memory?: number;
+    files?: number;
+  };
 }
 
 export interface ContextPlan {
@@ -51,6 +60,7 @@ export interface ContextPlan {
   notes: string[];
   trimmed: string[];
   excerpted: { id: string; omitted: string }[];
+  breakdown: ContextBreakdown;
 }
 
 function tokens(text: string, tokenizer: TokenizerId) {
@@ -62,7 +72,7 @@ export function shrinkBudget(budget: number): number {
 }
 
 export function isContextOverflowError(message: string): boolean {
-  return /context length|maximum context|num_ctx|too many tokens|context window|overflow/i.test(message);
+  return /context length|maximum context|num_ctx|n_ctx|too many tokens|context window|context size|exceed_context_size|context_length_exceeded|prompt is too long|overflow/i.test(message);
 }
 
 export function rootCapTokens(practicalBudget: number): number {
@@ -186,6 +196,32 @@ export function planContext(input: PlanInput): ContextPlan {
   const estimatedTokens = tokens(preamble, input.tokenizer) + recent.reduce((sum, message) => sum + tokens(message.content, input.tokenizer) + 4, 0);
   const overflow = droppedIds.length > 0 && input.strategy !== 'pinned';
   if (overflow) notes.push(`${droppedIds.length} older messages sit outside this call.`);
+  const hints = input.breakdownHints ?? {};
+  const pinnedToks = tokens(pinnedBlock, input.tokenizer);
+  const fileMessageToks = recent.reduce((sum, message) => {
+    if (message.role === 'tool' || /\[file:|\[Attached|<!--context-->/i.test(message.content)) {
+      return sum + tokens(message.content, input.tokenizer) + 4;
+    }
+    return sum;
+  }, 0);
+  const recentToks = recent.reduce((sum, message) => sum + tokens(message.content, input.tokenizer) + 4, 0);
+  const filesToks = (hints.files ?? 0) + fileMessageToks;
+  const historyToks = Math.max(0, summaryTokens + recentToks - fileMessageToks);
+  const memoryToks = (hints.memory ?? 0) + pinnedToks;
+  const personaAndToolsToks = hints.personaAndTools ?? 0;
+  const systemPromptToks = hints.systemPrompt ?? Math.max(0, tokens(system, input.tokenizer) - memoryToks - (hints.files ?? 0));
+  const totalUsed = estimatedTokens + (hints.personaAndTools ?? 0);
+  const breakdown: ContextBreakdown = {
+    budget: budgetTokens,
+    used: totalUsed,
+    remaining: Math.max(0, budgetTokens - totalUsed),
+    outputReserve: input.outputReserve,
+    systemPrompt: Math.max(0, systemPromptToks),
+    personaAndTools: Math.max(0, personaAndToolsToks),
+    memory: Math.max(0, memoryToks),
+    history: Math.max(0, historyToks),
+    files: Math.max(0, filesToks),
+  };
   return {
     strategy: input.strategy,
     budgetTokens,
@@ -200,6 +236,7 @@ export function planContext(input: PlanInput): ContextPlan {
     notes,
     trimmed,
     excerpted,
+    breakdown,
   };
 }
 

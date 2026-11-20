@@ -28,15 +28,26 @@ export interface MemoryProbe {
 
 export interface BudgetConfig { budgetBytes: number; systemReserveBytes: number }
 
+export interface WaitInfo {
+  ahead: number;
+  neededBytes: number;
+  availableBytes: number;
+  usedBytes: number;
+  budgetBytes: number;
+  reason: string;
+}
+
 export interface JobRequest {
   kind: JobKind;
   label: string;
+  /** Optional run id so the user can cancel or force-admit a queued run. */
+  runId?: string;
   /** Ollama model name for chat/background jobs (shared memory: concurrent jobs on one model count it once). */
   model?: string;
   /** Estimated bytes this job needs while it runs. */
   bytes: number;
-  /** Called with the number of jobs ahead while waiting. */
-  onWait?: (ahead: number) => void;
+  /** Called with queue position and memory info while waiting. */
+  onWait?: (ahead: number, info?: WaitInfo) => void;
   signal?: AbortSignal;
 }
 
@@ -79,11 +90,15 @@ export class MemoryBudget {
 
   // ----- Estimates -----
 
-  /** Weights + f16 KV cache for num_ctx + 10% and 300 MB overhead, scaled by what earlier loads of this model really used. */
+  /** Weights + KV cache for num_ctx + 10% and 300 MB overhead, scaled by what earlier loads of this model really used. */
   async estimateModel(model: string, numCtx: number): Promise<number> {
     const shape = await this.probe.shape(model);
     if (!shape) return 0;
-    const kv = 2 * shape.layers * numCtx * shape.kvHeads * shape.headDim * 2;
+    const kvType = (process.env.OLLAMA_KV_CACHE_TYPE || '').toLowerCase();
+    const kvBytesPerElem = kvType.startsWith('q4') ? 0.5 : kvType.startsWith('q8') ? 1 : 2;
+    const isSliding = /gemma[-_.: ]?4/i.test(model);
+    const effectiveCtx = isSliding ? Math.min(numCtx, 4096) + Math.max(0, numCtx - 4096) * 0.25 : numCtx;
+    const kv = 2 * shape.layers * effectiveCtx * shape.kvHeads * shape.headDim * kvBytesPerElem;
     const raw = (shape.fileBytes + kv) * 1.1 + 300 * 1024 ** 2;
     return Math.round(raw * this.factor(`ollama:${model}`));
   }
@@ -161,9 +176,11 @@ export class MemoryBudget {
     try {
       do {
         this.again = false;
+        let lastState: Awaited<ReturnType<MemoryBudget['usage']>> | null = null;
         while (this.queue.length) {
           const head = this.queue[0]!;
           let state = await this.usage();
+          lastState = state;
           let extra = this.extraFor(head.req, state.loaded);
           if (!this.fits(extra, state.usedBytes, state.systemAvailable)) {
             // Free idle models first (loaded in Ollama, no running job uses them), largest first.
@@ -172,6 +189,7 @@ export class MemoryBudget {
             for (const model of idle) {
               await this.probe.unload(model.name);
               state = await this.usage();
+              lastState = state;
               extra = this.extraFor(head.req, state.loaded);
               if (this.fits(extra, state.usedBytes, state.systemAvailable)) break;
             }
@@ -180,18 +198,57 @@ export class MemoryBudget {
           this.queue.shift();
           head.resolve(this.start(head));
         }
-        this.notifyPositions();
+        this.notifyPositions(lastState);
       } while (this.again);
     } finally {
       this.pumping = false;
+      if (this.queue.length && !this.timer) this.timer = setInterval(() => void this.pump(), this.pollMs);
+      if (!this.queue.length && this.timer) { clearInterval(this.timer); this.timer = null; }
     }
-    if (this.queue.length && !this.timer) this.timer = setInterval(() => void this.pump(), this.pollMs);
-    if (!this.queue.length && this.timer) { clearInterval(this.timer); this.timer = null; }
   }
 
-  /** Tell each waiter how many queued jobs are in front of it. */
-  private notifyPositions() {
-    this.queue.forEach((waiter, index) => waiter.req.onWait?.(index));
+  /** Force a queued run to start immediately, bypassing the admission check (useful when MemAvailable estimates are conservative). */
+  forceAdmit(runId: string): boolean {
+    const index = this.queue.findIndex((waiter) => waiter.req.runId === runId || waiter.id === runId);
+    if (index < 0) return false;
+    const [waiter] = this.queue.splice(index, 1);
+    if (!waiter) return false;
+    waiter.resolve(this.start(waiter));
+    this.notifyPositions(null);
+    if (!this.queue.length && this.timer) { clearInterval(this.timer); this.timer = null; }
+    return true;
+  }
+
+  /** Cancel a queued run while waiting for memory. */
+  cancelWait(runId: string): boolean {
+    const index = this.queue.findIndex((waiter) => waiter.req.runId === runId || waiter.id === runId);
+    if (index < 0) return false;
+    const [waiter] = this.queue.splice(index, 1);
+    if (!waiter) return false;
+    waiter.reject(new BudgetError('Cancelled while waiting for memory.', false));
+    this.notifyPositions(null);
+    if (!this.queue.length && this.timer) { clearInterval(this.timer); this.timer = null; }
+    return true;
+  }
+
+  /** Trigger an immediate re-check of available memory and queued jobs. */
+  async recheck(): Promise<void> {
+    await this.pump();
+  }
+
+  /** Tell each waiter how many queued jobs are in front of it and current MemAvailable. */
+  private notifyPositions(state: Awaited<ReturnType<MemoryBudget['usage']>> | null = null) {
+    const cfg = this.config();
+    const availableBytes = state?.systemAvailable ?? this.probe.systemAvailable();
+    const usedBytes = state?.usedBytes ?? 0;
+    const loaded = state?.loaded ?? this.lastLoaded;
+    this.queue.forEach((waiter, index) => {
+      const neededBytes = this.extraFor(waiter.req, loaded);
+      const reason = index > 0
+        ? `Waiting for memory, ${index} ahead (${gb(availableBytes)} available)`
+        : `Waiting for memory (${gb(neededBytes)} needed, ${gb(availableBytes)} available)`;
+      waiter.req.onWait?.(index, { ahead: index, neededBytes, availableBytes, usedBytes, budgetBytes: cfg.budgetBytes, reason });
+    });
   }
 
   private start(waiter: Waiter): Lease {
@@ -213,7 +270,7 @@ export class MemoryBudget {
   /** Peak RSS seen for a running job (image runner), for calibration after it finishes. */
   peakOf(lease: Lease) { const job = this.active.get(lease.id); if (job?.pid) { const rss = this.probe.pidRss(job.pid); if (rss > job.peakRss) job.peakRss = rss; } return job?.peakRss ?? 0; }
 
-  snapshotQueue() { return this.queue.map((waiter, index) => ({ position: index + 1, kind: waiter.req.kind, label: waiter.req.label, bytes: waiter.req.bytes })); }
+  snapshotQueue() { return this.queue.map((waiter, index) => ({ id: waiter.id, runId: waiter.req.runId ?? null, position: index + 1, kind: waiter.req.kind, label: waiter.req.label, bytes: waiter.req.bytes })); }
   snapshotActive() { return [...this.active.values()].map((job) => ({ kind: job.kind, label: job.label, model: job.model, bytes: job.bytes })); }
   lastLoadedModels() { return this.lastLoaded; }
 }
@@ -225,6 +282,19 @@ function readKb(file: string, key: string) {
     const match = new RegExp(`^${key}:\\s+(\\d+)\\s+kB`, 'm').exec(fs.readFileSync(file, 'utf8'));
     return match ? Number(match[1]) * 1024 : 0;
   } catch { return 0; }
+}
+
+function readAvailableBytes(): number {
+  const avail = readKb('/proc/meminfo', 'MemAvailable');
+  if (avail > 0) return avail;
+  // Older kernels without MemAvailable: MemFree + reclaimable page cache (Buffers + Cached + SReclaimable).
+  const free = readKb('/proc/meminfo', 'MemFree');
+  const buffers = readKb('/proc/meminfo', 'Buffers');
+  const cached = readKb('/proc/meminfo', 'Cached');
+  const reclaim = readKb('/proc/meminfo', 'SReclaimable');
+  const computed = free + buffers + cached + reclaim;
+  if (computed > 0) return computed;
+  return os.freemem();
 }
 
 export function systemProbe(fetchImpl: typeof fetch): MemoryProbe {
@@ -265,7 +335,7 @@ export function systemProbe(fetchImpl: typeof fetch): MemoryProbe {
     },
     serverRss: () => process.memoryUsage().rss,
     pidRss: (pid) => readKb(`/proc/${pid}/status`, 'VmRSS'),
-    systemAvailable: () => readKb('/proc/meminfo', 'MemAvailable') || os.freemem(),
+    systemAvailable: readAvailableBytes,
   };
 }
 

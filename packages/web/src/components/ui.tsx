@@ -70,16 +70,18 @@ export interface MenuItem {
   heading?: string;
   /** Shows a check mark (current choice). */
   checked?: boolean;
+  /** Keep the menu open after selecting this item (e.g. inline refresh). */
+  keepOpen?: boolean;
 }
 
 /**
  * Dropdown / overflow menu. Rendered in a portal and positioned from the trigger so it never gets clipped,
- * flips up or left near the window edge, closes on outside click, Esc, scroll or resize, and supports
- * arrow keys, Home/End and type-ahead. Focus returns to the trigger.
+ * flips up or left near the window edge, closes on outside click, Esc, or ancestor scroll (never background stream scroll),
+ * and supports arrow keys, Home/End and type-ahead. Focus returns to the trigger.
  */
 export function Menu({ items, label = 'More actions', icon: Icon = MoreHorizontal, text, className, align = 'end', trailing, busy, lead, hint }: { items: MenuItem[]; label?: string; icon?: LucideIcon | null; text?: string; className?: string; align?: 'start' | 'end'; trailing?: ReactNode; busy?: boolean; lead?: ReactNode; hint?: string }) {
   const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+  const [pos, setPos] = useState<{ top: number; left: number; side: 'top' | 'bottom' } | null>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLDivElement>(null);
   const id = useId();
@@ -93,11 +95,15 @@ export function Menu({ items, label = 'More actions', icon: Icon = MoreHorizonta
     let left = align === 'end' ? rect.right - width : rect.left;
     left = Math.max(8, Math.min(left, window.innerWidth - width - 8));
     let top = rect.bottom + 6;
-    if (top + height > window.innerHeight - 8) top = Math.max(8, rect.top - height - 6);
-    setPos({ top, left });
+    let side: 'top' | 'bottom' = 'bottom';
+    if (top + height > window.innerHeight - 8) {
+      top = Math.max(8, rect.top - height - 6);
+      side = 'top';
+    }
+    setPos({ top, left, side });
     const first = panel.current.querySelector<HTMLButtonElement>('button:not(:disabled)');
     first?.focus();
-  }, [open, align]);
+  }, [open, align, items.length]);
 
   useEffect(() => {
     if (!open) return;
@@ -106,7 +112,14 @@ export function Menu({ items, label = 'More actions', icon: Icon = MoreHorizonta
       if (panel.current?.contains(target) || trigger.current?.contains(target)) return;
       close(false);
     };
-    const onScroll = (event: Event) => { if (!panel.current?.contains(event.target as Node)) close(false); };
+    const onScroll = (event: Event) => {
+      const target = event.target;
+      if (panel.current && target instanceof Node && panel.current.contains(target)) return;
+      // Ignore unrelated scroll containers (like .messages auto-scrolling during streaming replies).
+      if (target === document || target === window || (target instanceof Node && trigger.current && target.contains(trigger.current))) {
+        close(false);
+      }
+    };
     const onResize = () => close(false);
     document.addEventListener('mousedown', onDown);
     document.addEventListener('touchstart', onDown);
@@ -154,7 +167,7 @@ export function Menu({ items, label = 'More actions', icon: Icon = MoreHorizonta
         {lead}{Icon && <Icon size={16} aria-hidden className={busy ? 'spin' : undefined} />}{text && <span className="menu-trigger-text">{text}</span>}{trailing}
       </button>
       {open && createPortal(
-        <div ref={panel} id={id} role="menu" aria-label={label} className="menu-panel" style={{ top: pos?.top ?? -9999, left: pos?.left ?? -9999 }} onKeyDown={onKey}>
+        <div ref={panel} id={id} role="menu" aria-label={label} className="menu-panel" data-side={pos?.side ?? 'bottom'} style={{ top: pos?.top ?? -9999, left: pos?.left ?? -9999, visibility: pos ? 'visible' : 'hidden' }} onKeyDown={onKey}>
           {items.map((item, index) => (
             <div key={`${item.label}-${index}`} role="none">
               {item.separator && index > 0 && <div className="menu-sep" role="separator" />}
@@ -165,7 +178,7 @@ export function Menu({ items, label = 'More actions', icon: Icon = MoreHorizonta
                 aria-checked={item.checked === undefined ? undefined : item.checked}
                 className={item.danger ? 'menu-item danger' : 'menu-item'}
                 disabled={item.disabled}
-                onClick={() => { close(); item.onSelect?.(); }}
+                onClick={() => { if (!item.keepOpen) close(); item.onSelect?.(); }}
               >
                 {item.icon ? <item.icon size={15} aria-hidden /> : <span className="menu-icon-gap" aria-hidden />}
                 <span className="menu-label">{item.label}</span>

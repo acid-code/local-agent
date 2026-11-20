@@ -5,7 +5,8 @@ import type { RunCursor } from '@local-agent/shared';
 import { OWNER_ID, foreignPath } from './accounts.js';
 import type { Bus } from './bus.js';
 import { getChatWorkspaces, setChatWorkspaces } from './chat-workspaces.js';
-import type { RunRow, Store } from './db.js';
+import { OLLAMA_SIDE_MAX_GIB, isOllamaProvider, modelGiB } from './coexist.js';
+import type { ModelRow, RunRow, Store } from './db.js';
 import type { Tool, ToolContext } from './tools.js';
 import { createTrigger, getTrigger, listTriggers, updateTrigger, type TriggerKind } from './triggers.js';
 import { nid, now, secret as randomSecret } from './util.js';
@@ -31,7 +32,7 @@ export interface HelperRow {
   maxSteps: number; timeoutMs: number; tools: string[] | null; createdAt: string; endedAt: string | null;
 }
 
-type StartTurn = (input: { sessionId: string; agentId: string; content: string; parentRunId?: string | null; depth?: number; background?: boolean; cursorExtras?: Partial<RunCursor>; onDone?: (run: RunRow) => void }) => Promise<RunRow>;
+type StartTurn = (input: { sessionId: string; agentId: string; content: string; modelId?: string; parentRunId?: string | null; depth?: number; background?: boolean; cursorExtras?: Partial<RunCursor>; onDone?: (run: RunRow) => void }) => Promise<RunRow>;
 
 const obj = (properties: Record<string, unknown>, required: string[] = []) => ({ type: 'object', properties, required, additionalProperties: false });
 const TERMINAL = new Set(['completed', 'failed', 'stopped', 'interrupted', 'cancelled']);
@@ -112,7 +113,47 @@ export class Autonomy {
     return done;
   }
 
-  async spawn(ctx: ToolContext, input: { task: string; persona?: string; tools?: string[]; maxSteps?: number; timeoutMinutes?: number; cli?: string }): Promise<HelperRow> {
+  /**
+   * Pick the model for a spawned mini-agent.
+   * - tier "fast" (default): picks a lightweight local model (<= 4 GiB, e.g. gemma3:4b on Ollama)
+   *   so mini-missions run in parallel without blocking llama-server's single slot or risking GTT OOM.
+   * - tier "main" / "auto": leaves routing to the engine (uses llama-server / main model).
+   */
+  pickHelperModel(tier: 'fast' | 'main' | 'auto' = 'fast', explicit?: string): ModelRow | undefined {
+    const providers = new Map(this.store.listProviders().map((p) => [p.id, p]));
+    const usable = this.store.listModels().filter((m) => {
+      if (!m.enabled || m.embedding) return false;
+      const p = providers.get(m.providerId);
+      return Boolean(p?.enabled && p.kind !== 'rehearsal');
+    });
+    if (explicit?.trim()) {
+      const needle = explicit.trim().toLowerCase();
+      const hit = usable.find((m) => m.id.toLowerCase() === needle || m.apiName.toLowerCase() === needle || m.name.toLowerCase() === needle)
+        ?? usable.find((m) => m.apiName.toLowerCase().includes(needle) || m.name.toLowerCase().includes(needle));
+      if (hit) return hit;
+    }
+    if (tier !== 'fast') return undefined;
+    const settings = this.store.getSettings();
+    const fastWanted = (settings.autoModels?.fast || '').trim().toLowerCase();
+    const isLightLocal = (m: ModelRow) => {
+      if (!m.local) return false;
+      const p = providers.get(m.providerId);
+      if (p && isOllamaProvider(p)) return modelGiB(m) <= OLLAMA_SIDE_MAX_GIB;
+      return m.sizeClass === 'small' && modelGiB(m) <= OLLAMA_SIDE_MAX_GIB;
+    };
+    const light = usable.filter(isLightLocal);
+    if (!light.length) return undefined;
+    if (fastWanted) {
+      const named = light.find((m) => m.apiName.toLowerCase() === fastWanted || m.name.toLowerCase() === fastWanted || m.apiName.toLowerCase().startsWith(fastWanted));
+      if (named) return named;
+    }
+    // Prefer Ollama small models so they run concurrently alongside llama-server.
+    const ollamaLight = light.filter((m) => { const p = providers.get(m.providerId); return p ? isOllamaProvider(p) : false; });
+    const pool = ollamaLight.length ? ollamaLight : light;
+    return pool.sort((a, b) => modelGiB(a) - modelGiB(b))[0];
+  }
+
+  async spawn(ctx: ToolContext, input: { task: string; persona?: string; tools?: string[]; maxSteps?: number; timeoutMinutes?: number; cli?: string; tier?: 'fast' | 'main' | 'auto'; model?: string }): Promise<HelperRow & { modelName?: string }> {
     if (!ctx.sessionId) throw new Error('Helpers start from a chat.');
     if ((ctx.depth ?? 0) >= 1) throw new Error('A helper cannot start helpers of its own.');
     const task = input.task.trim();
@@ -131,19 +172,23 @@ export class Autonomy {
     const parent = this.store.getSession(ctx.sessionId);
     const child = this.store.createSession({ agentId: agent.id, title: `Helper: ${task.slice(0, 60)}`, ownerId: owner });
     this.store.db.prepare('UPDATE chat_sessions SET helper_of = ? WHERE id = ?').run(ctx.sessionId, child.id);
-    if (parent?.mode === 'code' || cli) this.store.updateSession(child.id, { mode: 'code' });
-    // Same workspaces as the parent chat, so a coding helper works on the same repos.
+    const childPatch: { mode?: 'chat' | 'code'; workshopId?: string | null } = {};
+    if (parent?.mode === 'code' || cli) childPatch.mode = 'code';
+    if (parent?.workshopId) childPatch.workshopId = parent.workshopId;
+    if (Object.keys(childPatch).length) this.store.updateSession(child.id, childPatch);
+    // Same workspaces as the parent chat, so a mini-agent works on the exact same repos.
     const items = getChatWorkspaces(this.store, ctx.sessionId);
     if (items.length) setChatWorkspaces(this.store, child.id, items);
+    const chosenModel = cli ? undefined : this.pickHelperModel(input.tier ?? 'fast', input.model);
     const id = nid('hlp');
     this.store.db.prepare(`INSERT INTO helpers (id, parent_session_id, parent_run_id, child_session_id, child_run_id, agent_id, owner_id, task, cli, status, max_steps, timeout_ms, tools, created_at)
       VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)`).run(id, ctx.sessionId, ctx.runId ?? null, child.id, agent.id, owner, task, cli, maxSteps, timeoutMs, tools ? JSON.stringify(tools) : null, now());
     const prompt = cli
       ? `Use handoff_cli with cli "${cli}" to do the task below in this chat's workspace, then report briefly what changed and anything left to do.\n\nTask:\n${task}`
-      : `You are a background helper. Do the task below on your own, then answer with the result only: short, concrete, with paths or links when relevant. You cannot ask questions.\n\nTask:\n${task}`;
+      : `You are a background helper (mini-agent) running in the same workspace as the main agent. Do the task below on your own, then answer with the result only: short, concrete, with file paths, line numbers, or links when relevant. You cannot ask questions.\n\nTask:\n${task}`;
     try {
       const run = await this.startTurn({
-        sessionId: child.id, agentId: agent.id, content: prompt, parentRunId: ctx.runId ?? null, depth: 1, background: true,
+        sessionId: child.id, agentId: agent.id, content: prompt, modelId: chosenModel?.id, parentRunId: ctx.runId ?? null, depth: 1, background: true,
         cursorExtras: { maxSteps, timeoutMs, toolSubset: tools ?? undefined, helperId: id },
       });
       this.store.db.prepare("UPDATE helpers SET child_run_id = ?, status = CASE WHEN delivered = 1 THEN status ELSE 'running' END WHERE id = ?").run(run.id, id);
@@ -154,7 +199,7 @@ export class Autonomy {
     }
     const helper = this.getHelper(id)!;
     this.bus.publish({ type: 'helper', sessionId: ctx.sessionId, helper });
-    return helper;
+    return { ...helper, modelName: chosenModel?.name };
   }
 
   /** Called by the engine whenever a helper's run ends, from the run record itself. */
@@ -352,16 +397,37 @@ export class Autonomy {
       },
       {
         name: 'spawn_agent',
-        description: `Start a helper in the background on an isolated copy of the task: its own chat, context and limits (default ${HELPER_LIMITS.defaultSteps} steps, ${HELPER_LIMITS.defaultMinutes} min). Use for side work that can run while you continue. persona: another persona by name (default you). tools: optional subset. cli: hand the work to an installed coding CLI (cursor-agent, claude, aider, codex). The result is posted into this chat when it finishes; call helpers with action "wait" to wait for it now.`,
-        parameters: obj({ task: { type: 'string' }, persona: { type: 'string' }, tools: { type: 'array', items: { type: 'string' } }, max_steps: { type: 'number' }, timeout_minutes: { type: 'number' }, cli: { type: 'string' } }, ['task']),
+        description: `Spawn a mini-agent on the same workspace and repos to run a smaller sub-mission in parallel (default ${HELPER_LIMITS.defaultSteps} steps, ${HELPER_LIMITS.defaultMinutes} min). By default (tier="fast") it runs on a lightweight local model (<=4 GiB on Ollama) so it executes concurrently alongside the main model without blocking it. Pass tier="main" only if the sub-mission needs heavy reasoning, or wait=true to wait and receive its result immediately. Fan out multiple mini-agents and call helpers({action:"wait"}) to collect all results.`,
+        parameters: obj({
+          task: { type: 'string', description: 'Concrete mission for the mini-agent.' },
+          tier: { type: 'string', enum: ['fast', 'main', 'auto'], description: 'fast (default): lightweight parallel local model; main/auto: primary model.' },
+          model: { type: 'string', description: 'Optional explicit model name.' },
+          wait: { type: 'boolean', description: 'If true, wait for this mini-agent to finish and return its output directly.' },
+          persona: { type: 'string' },
+          tools: { type: 'array', items: { type: 'string' } },
+          max_steps: { type: 'number' },
+          timeout_minutes: { type: 'number' },
+          cli: { type: 'string' },
+        }, ['task']),
         mutates: () => false,
         approval: () => null,
         async execute(args, ctx) {
+          const tier = args.tier === 'main' || args.tier === 'auto' ? args.tier : 'fast';
           const helper = await self.spawn(ctx, {
-            task: String(args.task || ''), persona: args.persona ? String(args.persona) : undefined, tools: Array.isArray(args.tools) ? args.tools.map(String) : undefined,
-            maxSteps: Number(args.max_steps) || undefined, timeoutMinutes: Number(args.timeout_minutes) || undefined, cli: args.cli ? String(args.cli) : undefined,
+            task: String(args.task || ''),
+            tier,
+            model: args.model ? String(args.model) : undefined,
+            persona: args.persona ? String(args.persona) : undefined,
+            tools: Array.isArray(args.tools) ? args.tools.map(String) : undefined,
+            maxSteps: Number(args.max_steps) || undefined,
+            timeoutMinutes: Number(args.timeout_minutes) || undefined,
+            cli: args.cli ? String(args.cli) : undefined,
           });
-          return `Started helper ${helper.id} (${helper.agentName}${helper.cli ? ` via ${helper.cli}` : ''}, up to ${helper.maxSteps} steps / ${Math.round(helper.timeoutMs / 60000)} min). Its result will appear in this chat.`;
+          if (args.wait && ctx.sessionId) {
+            const done = (await self.wait(ctx.sessionId, [helper.id], Math.min(300, Math.round(helper.timeoutMs / 1000)), ctx.signal))[0] ?? helper;
+            return `Mini-agent ${done.id} (${done.agentName}${helper.modelName ? ` on ${helper.modelName}` : ''}) ${done.status}:\n${done.result || done.error || '(no output)'}`;
+          }
+          return `Started mini-agent ${helper.id} (${helper.agentName}${helper.modelName ? ` on ${helper.modelName}` : ''}${helper.cli ? ` via ${helper.cli}` : ''}, up to ${helper.maxSteps} steps / ${Math.round(helper.timeoutMs / 60000)} min) on the same workspace. Call helpers({action:"wait"}) to collect results.`;
         },
       },
       {

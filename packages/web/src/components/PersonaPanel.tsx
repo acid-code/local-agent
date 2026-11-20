@@ -8,7 +8,7 @@ import { ModelOptions, useUsableModels } from '../lib/models';
 import { Face, FACE_IDS, type FaceAgent } from './Face';
 import { t } from '../i18n';
 
-export interface PanelAgent extends FaceAgent { id: string; name: string; title?: string; description?: string; systemPrompt?: string; modelId?: string | null; toolAllowlist?: string[]; workshopIds?: string[]; strategy?: string | null; notify?: 'all' | 'mute'; language?: 'auto' | 'match' | 'en' | 'he'; hebrewCleanup?: 'inherit' | 'auto' | 'on' | 'off' }
+export interface PanelAgent extends FaceAgent { id: string; name: string; title?: string; description?: string; systemPrompt?: string; modelId?: string | null; toolAllowlist?: string[]; workshopIds?: string[]; strategy?: string | null; notify?: 'all' | 'mute'; language?: 'auto' | 'match' | 'en' | 'he'; hebrewCleanup?: 'inherit' | 'auto' | 'on' | 'off'; voiceReply?: boolean; voiceName?: string }
 interface Skill { slug: string; name: string; enabled?: boolean }
 interface MemoryFile { kind: 'user' | 'notes'; title: string; cap: number; content: string }
 export interface WorkspaceRow { id: string; label: string; path: string; kind: 'folder' | 'repo'; source: 'agent' | 'project'; remote: string | null; branch: string | null; dirty: number; sets: string[] }
@@ -175,6 +175,14 @@ export function PersonaPanel({ agent, tab, onTab, onClose, onSaved, ws, canManag
           <label className="field toggle-field"><span>{t('Unread dot for new replies')}</span>
             <input type="checkbox" role="switch" checked={draft.notify !== 'mute'} onChange={(event) => save({ notify: event.target.checked ? 'all' : 'mute' }, 'notifications', 0)} />
           </label>
+          <label className="field toggle-field"><span>{t('Answer by voice (auto-speak replies)')}</span>
+            <input type="checkbox" role="switch" checked={Boolean(draft.voiceReply)} onChange={(event) => save({ voiceReply: event.target.checked }, 'voice reply', 0)} />
+          </label>
+          {draft.voiceReply && (
+            <label className="field"><span>{t('Voice name (optional)')}</span>
+              <input value={draft.voiceName || ''} maxLength={80} placeholder={t('Default for language (e.g. af_heart, Kore)')} onChange={(event) => save({ voiceName: event.target.value }, 'voice', 700)} />
+            </label>
+          )}
           <label className="field"><span>{t('Reply language')}</span>
             <select value={draft.language || 'auto'} onChange={(event) => save({ language: event.target.value as PanelAgent['language'] }, 'language', 0)}>
               <option value="auto">{t('Your language (Hebrew messages get Hebrew)')}</option>
