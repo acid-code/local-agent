@@ -69,10 +69,17 @@ async function check(win) {
   offered = release.tag_name;
   const { response } = await dialog.showMessageBox(win, { type: 'info', buttons: ['Restart to install', 'Later'], defaultId: 0, cancelId: 1, message: 'Update available, restart to install', detail: `${release.name || release.tag_name} is ready. You are on ${app.getVersion()}.` });
   if (response !== 0) return;
-  // Delay 2s via cmd.exe so Electron fully exits and releases file locks before NSIS /S runs.
+  // Delay 2s via PowerShell so Electron fully exits and releases file locks before NSIS /S runs.
   // Use app.exit(0) instead of app.quit() so a minimize-to-tray handler cannot keep the process alive.
   if (process.platform === 'win32') {
-    spawn('cmd.exe', ['/c', `ping -n 3 127.0.0.1 >nul & start "" "${file}" /S --force-run`], {
+    const psFile = file.replace(/'/g, "''");
+    spawn('powershell.exe', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-WindowStyle', 'Hidden',
+      '-Command',
+      `Start-Sleep -Seconds 2; Start-Process -FilePath '${psFile}' -ArgumentList '/S','--force-run'`,
+    ], {
       detached: true,
       stdio: 'ignore',
       windowsHide: true,
