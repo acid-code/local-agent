@@ -478,7 +478,7 @@ const PAGE = `<!doctype html>
         scanBtn.disabled = true; scanBtn.textContent = 'Scanning…'; status.className = ''; status.textContent = '';
         try {
           const data = await api('/api/setup/detect', { method: 'POST', body: '{}' });
-          document.querySelector('#out').textContent = data.ollama ? (data.ollama + '\n' + (data.models.join('\n') || '(no models yet)')) : '';
+          document.querySelector('#out').textContent = data.ollama ? (data.ollama + '\\n' + (data.models.join('\\n') || '(no models yet)')) : '';
           if (data.ollama && data.models.length) {
             status.className = 'ok'; status.textContent = '✓ Found Ollama with ' + data.models.length + ' model' + (data.models.length === 1 ? '' : 's') + '. You are ready for the next step.';
             next.className = ''; next.textContent = 'Next: cloud keys'; next.focus();
