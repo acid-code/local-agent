@@ -118,14 +118,14 @@ export async function revertBatch(store: Store, batchId: string) {
   await revertBatches(store, [batchId]);
 }
 
-export async function revertBatchFile(store: Store, batchId: string, path: string) {
+export async function revertBatchFile(store: Store, batchId: string, filePath: string) {
   const row = store.db.prepare('SELECT * FROM edit_batches WHERE id = ?').get(batchId) as { id: string; files: string; reverted_at: string | null; reverted_files: string | null } | undefined;
   if (!row) throw new Error('Edit batch not found.');
   if (row.reverted_at) throw new Error('That edit batch was already reverted.');
   const files = JSON.parse(row.files) as BatchFile[];
   const reverted = row.reverted_files ? JSON.parse(row.reverted_files) as string[] : [];
-  const match = files.find((file) => file.path === path || file.path.endsWith(path) || path.endsWith(file.path));
-  if (!match) throw new Error(`That file is not in this edit batch: ${path}`);
+  const match = files.find((file) => file.path === filePath || file.path.endsWith(filePath) || filePath.endsWith(file.path));
+  if (!match) throw new Error(`That file is not in this edit batch: ${filePath}`);
   if (reverted.includes(match.path)) throw new Error('That file was already reverted.');
   if (match.after !== undefined && await readOrNull(match.path) !== match.after) {
     throw new RollbackConflict([match.path]);
