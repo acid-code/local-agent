@@ -208,7 +208,7 @@ export function sqliteTool(): Tool {
 }
 
 interface BrowseAction {
-  type: 'click' | 'fill' | 'press' | 'scroll' | 'wait';
+  type: 'navigate' | 'reload' | 'back' | 'click' | 'fill' | 'select' | 'hover' | 'press' | 'scroll' | 'wait' | 'submit';
   selector?: string;
   text?: string;
   value?: string;
@@ -217,9 +217,22 @@ interface BrowseAction {
   ms?: number;
 }
 
-/** Minimal Chrome DevTools Protocol client over Node 22 built-in WebSocket (zero external deps). */
-async function runCdpSession(chrome: string, url: string, actions: BrowseAction[], wantScreenshot: boolean, signal: AbortSignal) {
+const browserProfiles = new Map<string, { profile: string; expiresAt: number }>();
+const BROWSER_PROFILE_TTL = 30 * 60_000;
+
+function browserProfile(sessionKey: string) {
+  const now = Date.now();
+  for (const [key, value] of browserProfiles) if (value.expiresAt <= now) { fs.rmSync(value.profile, { recursive: true, force: true }); browserProfiles.delete(key); }
+  const existing = browserProfiles.get(sessionKey);
+  if (existing) { existing.expiresAt = now + BROWSER_PROFILE_TTL; return existing.profile; }
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'la-cdp-'));
+  browserProfiles.set(sessionKey, { profile, expiresAt: now + BROWSER_PROFILE_TTL });
+  return profile;
+}
+
+/** Minimal Chrome DevTools Protocol client over Node 22 built-in WebSocket (zero external deps). */
+async function runCdpSession(chrome: string, url: string, actions: BrowseAction[], wantScreenshot: boolean, signal: AbortSignal, sessionKey?: string) {
+  const profile = sessionKey ? browserProfile(sessionKey) : fs.mkdtempSync(path.join(os.tmpdir(), 'la-cdp-'));
   const port = 9222 + Math.floor(Math.random() * 1000);
   const flags = [
     '--headless=new', '--disable-gpu', '--disable-extensions', '--no-first-run', '--disable-sync', '--mute-audio',
@@ -288,7 +301,22 @@ async function runCdpSession(chrome: string, url: string, actions: BrowseAction[
       const log: string[] = [];
       for (const act of actions.slice(0, 12)) {
         if (signal.aborted) throw new Error('Aborted.');
-        if (act.type === 'wait') {
+        if (act.type === 'navigate') {
+          const target = String(act.value || act.selector || url);
+          const blocked = isBlockedUrl(target);
+          if (blocked) throw new Error(blocked);
+          await send('Page.navigate', { url: target });
+          await new Promise((r) => setTimeout(r, 2500));
+          log.push(`navigated to ${target}`);
+        } else if (act.type === 'reload') {
+          await send('Page.reload');
+          await new Promise((r) => setTimeout(r, 2500));
+          log.push('reloaded the page');
+        } else if (act.type === 'back') {
+          await evalJs(`history.back()`);
+          await new Promise((r) => setTimeout(r, 2500));
+          log.push('navigated back');
+        } else if (act.type === 'wait') {
           const ms = Math.min(8000, Math.max(200, Number(act.ms || 1000)));
           await new Promise((r) => setTimeout(r, ms));
           log.push(`waited ${ms}ms`);
@@ -318,12 +346,50 @@ async function runCdpSession(chrome: string, url: string, actions: BrowseAction[
             const el = document.querySelector(${sel});
             if (!el) return false;
             el.focus();
-            el.value = ${val};
-            el.dispatchEvent(new Event('input', { bubbles: true }));
+            const setter = Object.getOwnPropertyDescriptor(el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, 'value')?.set;
+            setter ? setter.call(el, ${val}) : (el.value = ${val});
+            el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
             el.dispatchEvent(new Event('change', { bubbles: true }));
             return true;
           })()`);
           log.push(ok ? `filled ${act.selector}` : `fill target not found: ${act.selector}`);
+        } else if (act.type === 'select') {
+          const sel = JSON.stringify(act.selector || 'select');
+          const val = JSON.stringify(act.value ?? '');
+          const ok = await evalJs<boolean>(`(() => {
+            const el = document.querySelector(${sel});
+            if (!(el instanceof HTMLSelectElement)) return false;
+            el.value = ${val};
+            el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            return true;
+          })()`);
+          log.push(ok ? `selected ${act.value} in ${act.selector}` : `select target not found: ${act.selector}`);
+        } else if (act.type === 'hover') {
+          const sel = JSON.stringify(act.selector || '');
+          const txt = JSON.stringify(act.text || '');
+          const ok = await evalJs<boolean>(`(() => {
+            const s = ${sel}, t = ${txt}.toLowerCase();
+            let el = s ? document.querySelector(s) : null;
+            if (!el && t) el = [...document.querySelectorAll('a,button,[role="button"]')].find(e => (e.innerText || e.getAttribute('aria-label') || '').toLowerCase().includes(t));
+            if (!el) return false;
+            el.scrollIntoView({ block: 'center' });
+            el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, clientX: 10, clientY: 10 }));
+            el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+            return true;
+          })()`);
+          log.push(ok ? `hovered ${act.selector || act.text}` : `hover target not found: ${act.selector || act.text}`);
+        } else if (act.type === 'submit') {
+          const sel = JSON.stringify(act.selector || 'form');
+          const ok = await evalJs<boolean>(`(() => {
+            const el = document.querySelector(${sel});
+            if (!el) return false;
+            if (typeof el.requestSubmit === 'function') el.requestSubmit();
+            else el.submit();
+            return true;
+          })()`);
+          await new Promise((r) => setTimeout(r, 1800));
+          log.push(ok ? `submitted ${act.selector}` : `form not found: ${act.selector}`);
         } else if (act.type === 'press') {
           const key = String(act.key || 'Enter');
           await send('Input.dispatchKeyEvent', { type: 'keyDown', key, text: key === 'Enter' ? '\r' : undefined });
@@ -363,7 +429,7 @@ async function runCdpSession(chrome: string, url: string, actions: BrowseAction[
     }
   } finally {
     killChild();
-    fs.rmSync(profile, { recursive: true, force: true });
+    if (!sessionKey) fs.rmSync(profile, { recursive: true, force: true });
   }
 }
 
@@ -371,23 +437,23 @@ async function runCdpSession(chrome: string, url: string, actions: BrowseAction[
 export function browseTool(): Tool {
   return {
     name: 'browse',
-    description: 'Open a public web page in headless Chromium, see its rendered look via screenshot (saved as [file:<id>] so you can inspect visuals with understand_image), inspect interactive buttons/inputs/links, and optionally interact with the page (click, fill, press, scroll, wait). Public http(s) only.',
+    description: 'Open a public web page in headless Chromium, inspect the rendered page and interactive controls, and perform bounded actions (navigate, reload, back, click, fill, select, hover, press, scroll, submit, wait). Screenshots are saved as [file:<id>] for understand_image. Cookie/site state is retained for this chat for up to 30 minutes. Public http(s) only.',
     parameters: obj({
       url: { type: 'string', description: 'Public http(s) URL to open.' },
       screenshot: { type: 'boolean', description: 'Capture a rendered PNG screenshot saved as [file:<id>] (pass to understand_image to see visual layout/colors).' },
       actions: {
         type: 'array',
-        description: 'Optional sequence of interactive steps: {type:"click"|"fill"|"press"|"scroll"|"wait", selector?, text?, value?, key?, y?, ms?}.',
+        description: 'Optional sequence: navigate/reload/back/click/fill/select/hover/press/scroll/submit/wait, with selector, text, value, key, y or ms.',
         items: { type: 'object' },
       },
     }, ['url']),
     mutates: (args) => Array.isArray(args.actions) && args.actions.some((a) => {
       const t = String((a as { type?: string })?.type || '');
-      return t === 'click' || t === 'fill' || t === 'press';
+      return ['navigate', 'click', 'fill', 'select', 'press', 'submit'].includes(t);
     }),
     approval: (args) => {
       const actions = Array.isArray(args.actions) ? (args.actions as BrowseAction[]) : [];
-      const interactive = actions.filter((a) => a?.type === 'click' || a?.type === 'fill' || a?.type === 'press');
+      const interactive = actions.filter((a) => ['navigate', 'click', 'fill', 'select', 'press', 'submit'].includes(a?.type));
       if (!interactive.length) return null;
       return `Interact with web page ${String(args.url || '').slice(0, 120)} (${interactive.map((a) => `${a.type} ${a.selector || a.text || a.key || ''}`.trim()).join(', ').slice(0, 140)})`;
     },
@@ -399,7 +465,7 @@ export function browseTool(): Tool {
       if (!chrome) return `(no browser installed; plain fetch)\n${await fetchPublicText(url, ctx.fetchImpl, ctx.signal)}`;
       const actions = Array.isArray(args.actions) ? (args.actions as BrowseAction[]) : [];
       const wantShot = Boolean(args.screenshot) || actions.length > 0;
-      const result = await runCdpSession(chrome, url, actions, wantShot, ctx.signal);
+      const result = await runCdpSession(chrome, url, actions, wantShot, ctx.signal, ctx.sessionId || ctx.agent.id);
       let fileRef = '';
       if (result.png && ctx.libraryDir) {
         const host = (() => { try { return new URL(result.href || url).hostname.replace(/[^a-z0-9.-]+/gi, '_'); } catch { return 'page'; } })();

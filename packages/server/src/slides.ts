@@ -69,9 +69,7 @@ export function validateDeck(raw: unknown): DeckSpec {
     if (!slide || typeof slide.title !== 'string') throw new Error(`Slide ${index + 1} needs a title.`);
     slide.title = slide.title.trim().slice(0, 70);
     if (!slide.title) throw new Error(`Slide ${index + 1} needs a non-empty title.`);
-    if (slide.bullets) {
-      slide.bullets = slide.bullets.slice(0, 5).map((line) => line.trim().split(/\s+/).slice(0, 12).join(' ')).filter(Boolean);
-    }
+    if (slide.bullets) slide.bullets = slide.bullets.map((line) => line.trim()).filter(Boolean);
     if (slide.subtitle) slide.subtitle = slide.subtitle.trim().slice(0, 180);
     if (slide.notes) slide.notes = slide.notes.trim().slice(0, 1200);
     if (slide.stats && (!Array.isArray(slide.stats) || slide.stats.some((tile) => !tile || typeof tile.value !== 'string' || typeof tile.label !== 'string'))) throw new Error(`Slide ${index + 1}: each stat needs a value and a label (strings).`);

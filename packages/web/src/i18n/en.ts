@@ -1429,4 +1429,10 @@ export const en: Record<string, string> = {
   "· v": "· v",
   "” in": "” in",
   "… {0} more lines": "… {0} more lines",
+  "Steer the active agent without stopping it…": "Steer the active agent without stopping it…",
+  "Steering added to the active run.": "Steering added to the active run.",
+  "Copy file names": "Copy file names",
+  "Undo": "Undo",
+  "file": "file",
+  "files": "files",
 };

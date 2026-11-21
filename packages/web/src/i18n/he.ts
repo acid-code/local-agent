@@ -1464,4 +1464,10 @@ export const he: Record<string, string> = {
   "Change server…": "החלפת שרת…",
   "Could not reach the server.": "לא ניתן להתחבר לשרת.",
   "The server took too long to answer.": "השרת לא הגיב בזמן.",
+  "Steer the active agent without stopping it…": "הכו את הסוכן הפעיל בלי לעצור אותו…",
+  "Steering added to the active run.": "ההכוונה נוספה לריצה הפעילה.",
+  "Copy file names": "העתקת שמות הקבצים",
+  "Undo": "ביטול",
+  "file": "קובץ",
+  "files": "קבצים",
 };
