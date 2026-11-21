@@ -237,7 +237,7 @@ async function downloadValidImage(fetchImpl: typeof fetch, url: string, signal?:
 /** Search Wikimedia Commons first (great for science, medical diagrams & photos), then local SearXNG image search, and save a verified PNG/JPEG to the user's Library. */
 export async function fetchWebImage(
   deps: { store: Store; dataDir: string; fetchImpl: typeof fetch; searxngUrl?: string },
-  input: { query: string; ownerId: string; sessionId?: string | null; agentId?: string | null; signal?: AbortSignal },
+  input: { query: string; ownerId: string; sessionId?: string | null; agentId?: string | null; signal?: AbortSignal; primaryOnly?: boolean },
 ) {
   const query = input.query.trim().slice(0, 200);
   if (!query) throw new Error('Provide an image search query.');
@@ -261,7 +261,7 @@ export async function fetchWebImage(
   } catch { /* fall through to SearXNG */ }
 
   // 2. Local SearXNG image search fallback
-  const searx = (deps.searxngUrl || process.env.SEARXNG_URL || '').replace(/\/$/, '');
+  const searx = input.primaryOnly ? '' : (deps.searxngUrl || process.env.SEARXNG_URL || '').replace(/\/$/, '');
   if (searx) {
     try {
       const combined = input.signal ? AbortSignal.any([input.signal, AbortSignal.timeout(8_000)]) : AbortSignal.timeout(8_000);

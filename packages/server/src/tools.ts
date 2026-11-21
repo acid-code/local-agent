@@ -144,6 +144,28 @@ export async function fetchPublicText(url: string, fetchImpl: typeof fetch, sign
 
 export const BUILTIN_TOOLS: Tool[] = [
   {
+    name: 'create_file',
+    description: 'Create or replace a text file in the agent workspace. Alias for write_file, for clients that use create-file names.',
+    parameters: obj({ path: { type: 'string' }, content: { type: 'string' } }, ['path', 'content']),
+    mutates: () => true,
+    approval: (args) => `Write ${args.path}`,
+    async execute(args, ctx) {
+      const hit = locatePath({ workspace: ctx.workspace, roots: ctx.roots, target: String(args.path || '') });
+      if (!hit?.write) throw new Error('That file is not in a writable project.');
+      if (ctx.sessionId) {
+        let before: string | null = null;
+        try { before = await fs.readFile(hit.full, 'utf8'); } catch { before = null; }
+        const rel = path.relative(ctx.workspace, hit.full);
+        ctx.store.db.prepare('INSERT INTO edit_batches (id, session_id, run_id, label, files, diff, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+          nid('edit'), ctx.sessionId, ctx.runId ?? null, String(args.path), JSON.stringify([{ path: hit.full, before, after: String(args.content ?? '') }]), lineDiff(rel, before ?? '', String(args.content ?? '')), now(),
+        );
+      }
+      await fs.mkdir(path.dirname(hit.full), { recursive: true });
+      await fs.writeFile(hit.full, String(args.content ?? ''), 'utf8');
+      return `Created ${hit.label ? `${hit.label}/` : ''}${path.relative(hit.root, hit.full)} (${String(args.content ?? '').length} bytes).`;
+    },
+  },
+  {
     name: 'list_dir',
     description: 'List files in the workspace, or in a workshop project when you pass its label (server, apk) or a path under it.',
     parameters: obj({ path: { type: 'string', description: 'Project label, or a directory under it. Defaults to the only project, or lists every project.' } }),

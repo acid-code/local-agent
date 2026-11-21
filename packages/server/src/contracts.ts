@@ -61,6 +61,7 @@ const toolSchemas: Record<string, z.ZodTypeAny> = {
   repo_sync: z.object({ label: z.string().optional(), url: z.string().optional() }),
   shell: z.object({ command: z.string().min(1), cwd: z.string().optional() }),
   write_file: z.object({ path: z.string().min(1), content: z.string() }),
+  create_file: z.object({ path: z.string().min(1), content: z.string() }),
   read_file: z.object({ path: z.string().min(1) }),
   web_search: z.object({ query: z.string().min(1) }),
   web_fetch: z.object({ url: z.string().min(1) }),

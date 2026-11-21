@@ -17,7 +17,7 @@ import { PersonaPanel, useWorkspaces, type PanelAgent } from '../components/Pers
 import { PersonaChip, greetingFor, startersFor } from '../components/ChatChips';
 import { ContextPanel } from '../components/ContextPanel';
 import { ContextRing } from '../components/ContextRing';
-import { ContextNudgeBanner, DecisionTimeline, InlineDiffCard, LocalRepoPicker, MiniAgentStrip, type MiniAgentRow } from '../components/ChatUpgrades';
+import { ContextNudgeBanner, DecisionTimeline, BulkDiffCard, LocalRepoPicker, MiniAgentStrip, type MiniAgentRow } from '../components/ChatUpgrades';
 import { parseSources, toolSummary, type ContextBreakdown } from '@local-agent/shared';
 import { toast, errorText } from '../lib/toast';
 import { copyText } from '../lib/files';
@@ -33,7 +33,7 @@ type Agent = PanelAgent & FaceAgent;
 interface Message { id: string; role: string; content: string; createdAt?: string; agentId?: string | null; toolName?: string | null; routingNote?: string | null; thinking?: string | null; toolCalls?: { name: string }[] | null }
 interface Step { id: string; kind: string; name: string; status: string; latencyMs?: number; output?: unknown; error?: string | null }
 interface Plan { id: string; items: { id: string; text: string; status: string; note?: string | null }[] }
-interface Edit { id: string; label: string; diff: string; revertedAt: string | null }
+interface Edit { id: string; runId: string | null; label: string; diff: string; revertedAt: string | null; keptAt: string | null; keptFiles: string[]; revertedFiles: string[] }
 interface Offer { id: string; kind: string; masked: string }
 interface CheckItem { id: string; title: string; ok: boolean; detail: string; optional: boolean }
 
@@ -58,6 +58,7 @@ export function Chat() {
   const [streaming, setStreaming] = useState('');
   const [liveTps, setLiveTps] = useState<number | null>(null);
   const streamMetricsRef = useRef<{ startedAt: number; chunks: number; chars: number }>({ startedAt: 0, chunks: 0, chars: 0 });
+  const streamFlushRef = useRef<{ text: string; thinking: string; textTimer: number | null; thinkingTimer: number | null }>({ text: '', thinking: '', textTimer: null, thinkingTimer: null });
   const [runId, setRunId] = useState<string | null>(null);
   const runSession = useRef<string | null>(null);
   const [status, setStatus] = useState('');
@@ -79,9 +80,6 @@ export function Chat() {
   const [loadingNote, setLoadingNote] = useState('');
   const [breakdown, setBreakdown] = useState<ContextBreakdown | null>(null);
   const [miniAgents, setMiniAgents] = useState<MiniAgentRow[]>([]);
-  const [keptEdits, setKeptEdits] = useState<Set<string>>(() => {
-    try { return new Set(JSON.parse(localStorage.getItem('la-kept-edits') || '[]') as string[]); } catch { return new Set(); }
-  });
   const [nudgeDismissed, setNudgeDismissed] = useState(false);
   const [voiceLoop, setVoiceLoop] = useState(false);
   const voiceLoopRef = useRef(false);
@@ -381,6 +379,13 @@ export function Chat() {
     source.onmessage = (event) => {
       const data = JSON.parse(event.data);
       if (data.type === 'snapshot') {
+        const buffer = streamFlushRef.current;
+        if (buffer.textTimer != null) window.clearTimeout(buffer.textTimer);
+        if (buffer.thinkingTimer != null) window.clearTimeout(buffer.thinkingTimer);
+        buffer.text = '';
+        buffer.thinking = '';
+        buffer.textTimer = null;
+        buffer.thinkingTimer = null;
         setSteps(data.steps || []);
         setStatus(data.statusDetail && data.run?.status === 'running' && /Waiting for memory/i.test(String(data.statusDetail)) ? 'waiting' : (data.run?.status || ''));
         if (typeof data.streaming === 'string' && data.streaming) setStreaming(data.streaming);
@@ -403,8 +408,28 @@ export function Chat() {
       }
       if (data.type === 'token' || data.type === 'thinking') {
         const piece = String(data.text || '');
-        if (data.type === 'token') setStreaming((value) => value + piece);
-        else setThinking((value) => value + piece);
+        const buffer = streamFlushRef.current;
+        if (data.type === 'token') {
+          buffer.text += piece;
+          if (buffer.textTimer == null) {
+            buffer.textTimer = window.setTimeout(() => {
+              const pending = buffer.text;
+              buffer.text = '';
+              buffer.textTimer = null;
+              if (pending) setStreaming((value) => value + pending);
+            }, 45);
+          }
+        } else {
+          buffer.thinking += piece;
+          if (buffer.thinkingTimer == null) {
+            buffer.thinkingTimer = window.setTimeout(() => {
+              const pending = buffer.thinking;
+              buffer.thinking = '';
+              buffer.thinkingTimer = null;
+              if (pending) setThinking((value) => value + pending);
+            }, 45);
+          }
+        }
         const nowMs = performance.now();
         const m = streamMetricsRef.current;
         if (!m.startedAt) m.startedAt = nowMs;
@@ -422,10 +447,17 @@ export function Chat() {
         setSteps((value) => [...value.filter((step) => step.id !== data.step.id), data.step]);
         if (data.step.kind === 'model' && data.step.name) setLastModel(String(data.step.name));
         const cur = currentRef.current;
-        if (data.step.name === 'tasks' && data.step.status === 'completed' && cur) void api<{ plan: Plan | null }>(`/api/sessions/${cur}?limit=1`).then((fresh) => setPlan(fresh.plan)).catch(() => undefined);
+        if ((data.step.name === 'tasks' || data.step.name === 'plan') && data.step.status === 'completed' && cur) void api<{ plan: Plan | null }>(`/api/sessions/${cur}?limit=1`).then((fresh) => setPlan(fresh.plan)).catch(() => undefined);
       }
       if (data.type === 'message') {
         if (data.message?.sessionId && data.message.sessionId !== currentRef.current) return;
+        const buffer = streamFlushRef.current;
+        if (buffer.textTimer != null) window.clearTimeout(buffer.textTimer);
+        if (buffer.thinkingTimer != null) window.clearTimeout(buffer.thinkingTimer);
+        buffer.text = '';
+        buffer.thinking = '';
+        buffer.textTimer = null;
+        buffer.thinkingTimer = null;
         setMessages((value) => [...value.filter((m) => m.id !== data.message.id), data.message]);
         setStreaming('');
         setThinking('');
@@ -490,11 +522,22 @@ export function Chat() {
     // Typing with no chat open starts one, instead of silently doing nothing.
     const target = current || await createChat('chat').catch(() => undefined);
     if (!target) { toast(t('Create a persona under Agents first.'), 'info'); return; }
-    if (active) { toast(t('A reply is still running. Press Stop (Esc) first.'), 'info'); return; }
     const sentQuotes = override === undefined ? quotes : [];
     const sentMentions = override === undefined ? mentions : [];
     const tokens = sentMentions.map((m) => m.kind === 'file' ? `[file:${m.id}]` : `[@${m.root}:${m.path || '.'}${m.start ? `#L${m.start}${m.end && m.end !== m.start ? `-${m.end}` : ''}` : ''}]`);
     const content = [...sentQuotes.map((q) => quoteBlock(q.ref, q.text)), typed.trim() || (tokens.length ? 'Please look at these.' : ''), tokens.length ? tokens.join(' ') : ''].filter(Boolean).join('\n\n');
+    if (active && runId) {
+      try {
+        await post(`/api/runs/${runId}/steer`, { content });
+        if (override === undefined) { setDraft(''); setQuotes([]); setMentions([]); }
+        setMessages((value) => [...value, { id: `steer-local-${Date.now()}`, role: 'user', content, routingNote: 'Steering' }]);
+        toast(t('Steering added to the active run.'), 'info');
+      } catch (error) {
+        if (override === undefined) { setDraft(typed); setQuotes(sentQuotes); setMentions(sentMentions); }
+        toast(errorText(error, 'Could not steer the active run.'), 'error');
+      }
+      return;
+    }
     const payloadMentions = sentMentions.map((m) => m.kind === 'file' ? { kind: 'file' as const, id: m.id, ocr: ocrMode !== 'off' && IMAGE_NAME.test(m.label) ? ocrMode : undefined } : { kind: 'path' as const, root: m.root, path: m.path, start: m.start, end: m.end });
     if (payloadMentions.some((m) => m.kind === 'file' && m.ocr)) setLoadingNote(t('Reading the text in the photo…'));
     if (override === undefined) { setDraft(''); setQuotes([]); setMentions([]); }
@@ -1036,26 +1079,7 @@ export function Chat() {
               ))}
             </div>
           )}
-          {edits.map((edit) => (
-            <InlineDiffCard
-              key={edit.id}
-              edit={edit}
-              kept={keptEdits.has(edit.id)}
-              onKeep={() => setKeptEdits((prev) => {
-                const next = new Set(prev);
-                next.add(edit.id);
-                try { localStorage.setItem('la-kept-edits', JSON.stringify([...next].slice(-500))); } catch { /* ignore */ }
-                return next;
-              })}
-              onRevert={async () => {
-                try {
-                  await post(`/api/edits/${edit.id}/revert`);
-                  if (current) void openSession(current);
-                  toast(t('Reverted {0}.', [edit.label]), 'ok');
-                } catch (error) { toast(errorText(error), 'error'); }
-              }}
-            />
-          ))}
+          {edits.length > 0 && <BulkDiffCard edits={edits} onChanged={() => { if (current) void openSession(current); }} />}
           </div>
           {!nearBottom && (
             <button type="button" className="scroll-bottom-pill" onClick={() => { nearBottomRef.current = true; setNearBottom(true); box.current?.scrollTo({ top: box.current.scrollHeight, behavior: 'smooth' }); }}>
@@ -1129,7 +1153,7 @@ export function Chat() {
                 )}
               </div>
             )}
-            <textarea ref={input} dir="auto" rows={1} value={draft} aria-label={t('Message')} placeholder={mode === 'code' ? t('Ask for a plan, then an edit…') : t('Message')} onChange={(event) => {
+            <textarea ref={input} dir="auto" rows={1} value={draft} aria-label={t('Message')} placeholder={active ? t('Steer the active agent without stopping it…') : mode === 'code' ? t('Ask for a plan, then an edit…') : t('Message')} onChange={(event) => {
               const value = event.target.value;
               setDraft(value);
               const upto = value.slice(0, event.target.selectionStart ?? value.length);

@@ -333,11 +333,13 @@ export class Engine {
     if (!session) throw new Error('Chat not found.');
     const messages = this.store.listMessages(sessionId);
     const keepTail = 4;
-    const older = messages.length > keepTail ? messages.slice(0, messages.length - keepTail) : messages;
+    const existing = this.store.listSummaries(sessionId);
+    const alreadyCovered = new Set(existing.flatMap((s) => s.covers));
+    const older = (messages.length > keepTail ? messages.slice(0, messages.length - keepTail) : messages)
+      .filter((m) => !alreadyCovered.has(m.id));
     if (!older.length) {
       return { summary: '', compactedMessages: 0, breakdown: this.getSessionContextBreakdown(sessionId) };
     }
-    const existing = this.store.listSummaries(sessionId);
     const model = this.fastSummaryModel(session.activeModelId);
     const prevRoot = [...existing].reverse().find((s) => s.level === 2)?.content || '';
     const transcript = older
@@ -431,6 +433,38 @@ export class Engine {
       if (this.store.getRun(runId)?.sessionId === sessionId) return true;
     }
     return false;
+  }
+
+  /** Queue a user steering message into the active run. It is applied at the next safe model/tool boundary. */
+  steer(runId: string, content: string): RunRow {
+    const run = this.store.getRun(runId);
+    if (!run) throw new Error('Run not found.');
+    if (!['running', 'paused', 'awaiting_approval', 'awaiting_secret'].includes(run.status)) {
+      throw new Error('This run is no longer active.');
+    }
+    const agent = this.store.getAgent(run.agentId);
+    if (!agent) throw new Error('Persona disappeared.');
+    const message = this.store.insertMessage({
+      sessionId: run.sessionId,
+      role: 'user',
+      content,
+      toolCallId: null,
+      toolName: null,
+      toolCalls: null,
+      agentId: agent.id,
+      runId,
+      imageUrl: null,
+      routingNote: 'Steering',
+    });
+    const updated = this.store.updateRun(runId, {
+      cursor: {
+        ...run.cursor,
+        steering: { id: message.id, content },
+        phase: run.status === 'awaiting_approval' || run.status === 'awaiting_secret' ? run.cursor.phase : 'model',
+      },
+    })!;
+    this.bus.publish({ type: 'steering', runId, message, status: 'queued' });
+    return updated;
   }
 
   pause(runId: string) {
@@ -620,12 +654,13 @@ export class Engine {
   /** Model turns allowed: generous locally so agents can loop, test, and double-check their own work. */
   private stepCap(cursor: RunCursor, sessionMode?: string) {
     const settings = this.store.getSettings();
+    const configured = Number.isFinite(settings.maxSteps) ? settings.maxSteps : 24;
     const base = cursor.longTask
-      ? Math.max(settings.maxSteps, LONG_TASK_STEPS, 36)
+      ? LONG_TASK_STEPS
       : sessionMode === 'code' || cursor.stage
-        ? Math.max(settings.maxSteps, 32)
-        : Math.max(settings.maxSteps, 24);
-    return cursor.maxSteps ? Math.min(cursor.maxSteps, base) : base;
+        ? 24
+        : 12;
+    return cursor.maxSteps ? Math.min(cursor.maxSteps, base) : Math.min(Math.max(8, configured), base);
   }
 
   private async stepModel(run: RunRow, signal: AbortSignal) {
@@ -634,6 +669,21 @@ export class Engine {
     const sessionMode = this.store.getSession(run.sessionId)?.mode;
     const maxSteps = this.stepCap(run.cursor, sessionMode);
     let current = this.store.getRun(run.id)!;
+    if (current.cursor.steering) {
+      const steering = current.cursor.steering;
+      const steeringNote = `\n\nUSER STEERING (newest instruction; apply it without stopping the rest of the task unless it directly conflicts):\n${steering.content}`;
+      current = this.store.updateRun(run.id, {
+        cursor: {
+          ...current.cursor,
+          steering: undefined,
+          recovery: {
+            rounds: current.cursor.recovery?.rounds ?? 0,
+            note: `${current.cursor.recovery?.note ?? ''}${steeringNote}`,
+          },
+        },
+      })!;
+      this.bus.publish({ type: 'steering', runId: run.id, messageId: steering.id, status: 'applied' });
+    }
     if (current.cursor.turn >= maxSteps) {
       this.store.updateRun(run.id, { cursor: { ...current.cursor, phase: 'summarize' } });
       return;
@@ -993,6 +1043,22 @@ export class Engine {
         completed.add(call.id);
         this.bumpTools(run.id, completed);
         continue;
+      }
+      // Do not execute the exact same read-only tool call again within a run. This
+      // prevents small local models from spending turns on duplicate searches/reads.
+      if (!tool.mutates(args)) {
+        const stable = (value: unknown) => JSON.stringify(value, Object.keys(value as Record<string, unknown>).sort());
+        const prior = this.store.listSteps(run.id)
+          .filter((step) => step.kind === 'tool' && step.name === call.name && step.status === 'completed')
+          .reverse()
+          .find((step) => stable(step.input) === stable(args));
+        if (prior) {
+          const repeated = `Already completed ${call.name} with these arguments. Reusing the previous result:\n${String(prior.output ?? '').slice(0, 16_000)}`;
+          this.persistTool(run, call, repeated, 'completed', false);
+          completed.add(call.id);
+          this.bumpTools(run.id, completed);
+          continue;
+        }
       }
       if (call.name === 'shell' && String(args.command || '') && (await import('@local-agent/shared')).assessCommand(String(args.command)) === 'blocked') {
         this.persistTool(run, call, 'Blocked by guardrails.', 'failed');
@@ -1571,6 +1637,10 @@ export class Engine {
 
   private tools(agent: Agent, sessionMode?: string, stage?: 'plan' | 'implement', subset?: string[], helper = false) {
     const names = new Set(agent.toolAllowlist);
+    names.add('create_file');
+    names.add('write_file');
+    names.add('read_file');
+    names.add('list_dir');
     names.add('request_secret');
     names.add('read_output');
     names.add('run_skill_script');
@@ -1609,7 +1679,7 @@ export class Engine {
     if (helper) for (const name of HELPER_DENIED) names.delete(name);
     // Built-in connectors the owner switched off take their tools with them.
     for (const name of disabledConnectorTools(this.store)) names.delete(name);
-    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), fetchImageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl }), ...slidesTools({ dataDir: this.libraryDir, photo: async (query, ctx) => ({ fileId: (await fetchWebImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, searxngUrl: this.store.getSettings().searxngUrl || process.env.SEARXNG_URL || '' }, { query, ownerId: ctx.ownerId, sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal })).file.id }), image: async (prompt, ctx) => { try { return { fileId: (await generateImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }, { prompt, ownerId: ctx.ownerId, shape: 'landscape', sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal })).file.id }; } catch { const searxngUrl = this.store.getSettings().searxngUrl || process.env.SEARXNG_URL || ''; return { fileId: (await fetchWebImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, searxngUrl }, { query: prompt, ownerId: ctx.ownerId, sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal })).file.id }; } } }), ...this.autonomy.tools(), tasksTool(), memoryFileTool(), searchChatsTool(), proposeSkillTool(), ...CONNECTOR_TOOLS(), ...vercelTools(), ...(this.ocrReader ? [ocrTool(this.ocrReader)] : []), ...(this.imageAnalyzer ? [understandImageTool(this.imageAnalyzer)] : []), ...this.extraTools, ...mcp.map((row) => row.tool)];
+    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), fetchImageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl }),     ...slidesTools({ dataDir: this.libraryDir, photo: async (query, ctx) => ({ fileId: (await fetchWebImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, searxngUrl: this.store.getSettings().searxngUrl || process.env.SEARXNG_URL || '' }, { query, ownerId: ctx.ownerId, sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal, primaryOnly: true })).file.id }), image: async (prompt, ctx) => { try { return { fileId: (await generateImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }, { prompt, ownerId: ctx.ownerId, shape: 'landscape', sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal })).file.id }; } catch { const searxngUrl = this.store.getSettings().searxngUrl || process.env.SEARXNG_URL || ''; return { fileId: (await fetchWebImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, searxngUrl }, { query: prompt, ownerId: ctx.ownerId, sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal, primaryOnly: true })).file.id }; } } }), ...this.autonomy.tools(), tasksTool(), memoryFileTool(), searchChatsTool(), proposeSkillTool(), ...CONNECTOR_TOOLS(), ...vercelTools(), ...(this.ocrReader ? [ocrTool(this.ocrReader)] : []), ...(this.imageAnalyzer ? [understandImageTool(this.imageAnalyzer)] : []), ...this.extraTools, ...mcp.map((row) => row.tool)];
     const seen = new Set<string>();
     const chosen = catalog.filter((tool) => {
       if (!names.has(tool.name) || seen.has(tool.name)) return false;
@@ -2167,6 +2237,7 @@ const CONTRACT_ALWAYS = new Set([
   'time_now', 'tasks', 'think', 'memory_file', 'search_chats',
   'spawn_agent', 'helpers', 'propose_skill', 'read_output', 'run_skill_script',
   'find_context', 'share_file', 'make_slides', 'read_slides', 'fetch_image', 'browse', 'create_project', 'vercel', 'turbo_inspect', 'read_image_text', 'understand_image', 'generate_image', 'repo_sync',
+  'create_file', 'write_file', 'read_file', 'list_dir', 'grep', 'glob', 'apply_patch',
 ]);
 
 export function roughModelGiB(apiName: string): number {

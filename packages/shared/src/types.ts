@@ -51,6 +51,8 @@ export type RunStatus =
 
 export interface RunCursor {
   phase: RunPhase;
+  /** User steering queued while the run is active. It changes the next model step without restarting or stopping work. */
+  steering?: { id: string; content: string };
   /** Recovery rounds after a reply claimed success over a failed tool call, and the note sent back to the model. */
   recovery?: { rounds: number; note?: string };
   /** A task list with 2+ items was set: allow more model turns. taskRounds counts verify-before-done send-backs. */

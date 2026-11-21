@@ -268,6 +268,9 @@ export class Store {
     addCol('triggers', 'origin_session_id', 'origin_session_id TEXT');
     addCol('triggers', 'created_by', `created_by TEXT NOT NULL DEFAULT 'user'`);
     addCol('chat_sessions', 'helper_of', 'helper_of TEXT');
+    addCol('edit_batches', 'kept_at', 'kept_at TEXT');
+    addCol('edit_batches', 'kept_files', `kept_files TEXT NOT NULL DEFAULT '[]'`);
+    addCol('edit_batches', 'reverted_files', `reverted_files TEXT NOT NULL DEFAULT '[]'`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS helpers (
       id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL, parent_run_id TEXT, child_session_id TEXT NOT NULL, child_run_id TEXT,
       agent_id TEXT NOT NULL, owner_id TEXT NOT NULL, task TEXT NOT NULL, cli TEXT, status TEXT NOT NULL, result TEXT, error TEXT,

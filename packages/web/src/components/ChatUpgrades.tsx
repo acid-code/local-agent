@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Bot, Check, ChevronDown, ChevronRight, Cpu, FileCode2, FolderGit2, GitBranch, RotateCcw, Sparkles, Square, Terminal, Wrench, X } from 'lucide-react';
+import { Bot, Check, ChevronDown, ChevronRight, Copy, Cpu, FileCode2, FolderGit2, GitBranch, RotateCcw, Sparkles, Square, Terminal, Wrench, X } from 'lucide-react';
 import type { ContextBreakdown } from '@local-agent/shared';
 import { api, post } from '../lib/api';
 import { errorText, toast } from '../lib/toast';
@@ -32,9 +32,13 @@ export interface TraceStep {
 
 export interface DiffEdit {
   id: string;
+  runId: string | null;
   label: string;
   diff: string;
   revertedAt: string | null;
+  keptAt: string | null;
+  keptFiles: string[];
+  revertedFiles: string[];
 }
 
 export interface MentionItem {
@@ -155,26 +159,19 @@ export function ContextNudgeBanner({
   );
 }
 
-/** Cursor-style syntax-colored inline diff card with Keep / Revert actions. */
+/** Compact timeline-style file-change card. Changes remain visible; no keep/revert state is needed. */
 export function InlineDiffCard({
   edit,
-  kept,
-  onKeep,
-  onRevert,
 }: {
   edit: DiffEdit;
-  kept: boolean;
-  onKeep: () => void;
-  onRevert: () => Promise<void> | void;
 }) {
-  const [open, setOpen] = useState(!edit.revertedAt && !kept);
-  const [reverting, setReverting] = useState(false);
+  const [open, setOpen] = useState(false);
   const lines = (edit.diff || '').split('\n');
   const added = lines.filter((l) => l.startsWith('+') && !l.startsWith('+++')).length;
   const removed = lines.filter((l) => l.startsWith('-') && !l.startsWith('---')).length;
 
   return (
-    <div className={`diff-card${edit.revertedAt ? ' reverted' : ''}${kept ? ' kept' : ''}`}>
+    <div className={`diff-card${edit.revertedAt ? ' reverted' : ''}`}>
       <div className="diff-card-head">
         <button type="button" className="diff-card-title" onClick={() => setOpen((v) => !v)}>
           {open ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
@@ -183,22 +180,7 @@ export function InlineDiffCard({
           <span className="diff-stat add">+{added}</span>
           <span className="diff-stat del">-{removed}</span>
         </button>
-        <div className="row" style={{ gap: 6 }}>
-          {edit.revertedAt ? (
-            <span className="badge">{t('Reverted')}</span>
-          ) : kept ? (
-            <span className="badge ok"><Check size={12} aria-hidden /> {t('Kept')}</span>
-          ) : (
-            <>
-              <button type="button" className="btn ghost small" onClick={onKeep}>
-                <Check size={13} aria-hidden /> {t('Keep')}
-              </button>
-              <button type="button" className="btn ghost small danger" disabled={reverting} onClick={async () => { setReverting(true); try { await onRevert(); } finally { setReverting(false); } }}>
-                <RotateCcw size={13} aria-hidden /> {t('Revert')}
-              </button>
-            </>
-          )}
-        </div>
+        {edit.revertedAt && <span className="badge">{t('Reverted')}</span>}
       </div>
       {open && (
         <pre className="diff-body mono">
@@ -209,6 +191,112 @@ export function InlineDiffCard({
           {lines.length > 140 && <div className="diff-line hunk">{t('… {0} more lines', [lines.length - 140])}</div>}
         </pre>
       )}
+    </div>
+  );
+}
+
+/** One run-level summary with an expandable list of changed files. */
+export function BulkDiffCard({ edits, onChanged }: { edits: DiffEdit[]; onChanged: () => void | Promise<void> }) {
+  const [openGroup, setOpenGroup] = useState<string | null>(null);
+  const [openFile, setOpenFile] = useState<string | null>(null);
+  const groups = new Map<string, DiffEdit[]>();
+  for (const edit of edits) {
+    const key = edit.runId || `single:${edit.id}`;
+    const group = groups.get(key) || [];
+    group.push(edit);
+    groups.set(key, group);
+  }
+
+  return (
+    <div className="bulk-diff-list">
+      {[...groups.entries()].map(([key, group]) => {
+        const files = [...new Set(group.flatMap((edit) => edit.label.split(',').map((label) => label.trim()).filter(Boolean)))];
+        const lines = group.flatMap((edit) => (edit.diff || '').split('\n'));
+        const added = lines.filter((line) => line.startsWith('+') && !line.startsWith('+++')).length;
+        const removed = lines.filter((line) => line.startsWith('-') && !line.startsWith('---')).length;
+        const bulkOpen = openGroup === key;
+        const bulkKept = group.every((edit) => Boolean(edit.keptAt));
+        const bulkReverted = group.every((edit) => Boolean(edit.revertedAt));
+        return (
+          <div className="bulk-diff" key={key}>
+            <div className="bulk-diff-head">
+              <button type="button" className="bulk-diff-toggle" onClick={() => { setOpenGroup((value) => value === key ? null : key); setOpenFile(null); }}>
+                {bulkOpen ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
+                <span className="bulk-diff-title"><strong>{files.length} {files.length === 1 ? t('file') : t('files')} changed</strong></span>
+              </button>
+              <span className="diff-stat add">+{added}</span>
+              <span className="diff-stat del">-{removed}</span>
+              <div className="bulk-diff-actions">
+                {bulkKept ? (
+                  <span className="badge ok"><Check size={12} aria-hidden /> {t('Kept')}</span>
+                ) : (
+                  <button type="button" className="btn ghost small" onClick={async () => { await Promise.all(group.map((edit) => post(`/api/edits/${edit.id}/keep`, {}))); await onChanged(); }}>
+                    <Check size={13} aria-hidden /> {t('Keep')}
+                  </button>
+                )}
+                {key.startsWith('single:') ? (
+                  <button type="button" className="btn ghost small" disabled={bulkReverted} onClick={async () => { await Promise.all(group.map((edit) => post(`/api/edits/${edit.id}/revert`, {}))); await onChanged(); }}>
+                    <RotateCcw size={13} aria-hidden /> {t('Undo')}
+                  </button>
+                ) : (
+                  <button type="button" className="btn ghost small" disabled={bulkReverted} onClick={async () => { await post(`/api/runs/${key}/rollback`, {}); await onChanged(); }}>
+                    <RotateCcw size={13} aria-hidden /> {t('Undo')}
+                  </button>
+                )}
+                <button type="button" className="icon-btn" title={t('Copy file names')} aria-label={t('Copy file names')} onClick={() => { void navigator.clipboard?.writeText(files.join('\n')); }}>
+                  <Copy size={14} aria-hidden />
+                </button>
+              </div>
+            </div>
+            {bulkOpen && (
+              <div className="bulk-diff-files">
+                {group.map((edit) => {
+                  const labels = edit.label.split(',').map((label) => label.trim()).filter(Boolean);
+                  const editLines = (edit.diff || '').split('\n');
+                  const editAdded = editLines.filter((line) => line.startsWith('+') && !line.startsWith('+++')).length;
+                  const editRemoved = editLines.filter((line) => line.startsWith('-') && !line.startsWith('---')).length;
+                  return labels.map((label) => {
+                    const keptFile = Boolean(edit.keptAt) || edit.keptFiles.some((item) => item.endsWith(label) || label.endsWith(item));
+                    const revertedFile = Boolean(edit.revertedAt) || edit.revertedFiles.some((item) => item.endsWith(label) || label.endsWith(item));
+                    return (
+                      <div className="bulk-file" key={`${edit.id}:${label}`}>
+                        <div className="bulk-file-row">
+                          <button type="button" className="bulk-file-head" onClick={() => setOpenFile(openFile === `${edit.id}:${label}` ? null : `${edit.id}:${label}`)}>
+                            {openFile === `${edit.id}:${label}` ? <ChevronDown size={13} aria-hidden /> : <ChevronRight size={13} aria-hidden />}
+                            <FileCode2 size={13} aria-hidden />
+                            <span className="mono ellipsis">{label}</span>
+                            <span className="diff-stat add">+{editAdded}</span>
+                            <span className="diff-stat del">-{editRemoved}</span>
+                          </button>
+                          <div className="bulk-file-actions">
+                            {keptFile ? <span className="badge ok"><Check size={12} aria-hidden /> {t('Kept')}</span> : (
+                              <button type="button" className="btn ghost small" onClick={async () => { await post(`/api/edits/${edit.id}/keep`, { path: label }); await onChanged(); }}>
+                                <Check size={12} aria-hidden /> {t('Keep')}
+                              </button>
+                            )}
+                            <button type="button" className="btn ghost small" disabled={revertedFile} onClick={async () => { await post(`/api/edits/${edit.id}/revert-file`, { path: label }); await onChanged(); }}>
+                              <RotateCcw size={12} aria-hidden /> {t('Undo')}
+                            </button>
+                          </div>
+                        </div>
+                        {openFile === `${edit.id}:${label}` && (
+                          <pre className="diff-body mono">
+                            {editLines.slice(0, 140).map((line, index) => {
+                              const cls = line.startsWith('@@') ? 'hunk' : line.startsWith('+') && !line.startsWith('+++') ? 'add' : line.startsWith('-') && !line.startsWith('---') ? 'del' : 'ctx';
+                              return <div key={index} className={`diff-line ${cls}`}>{line || ' '}</div>;
+                            })}
+                            {editLines.length > 140 && <div className="diff-line hunk">{t('… {0} more lines', [editLines.length - 140])}</div>}
+                          </pre>
+                        )}
+                      </div>
+                    );
+                  });
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

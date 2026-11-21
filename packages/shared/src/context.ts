@@ -156,7 +156,17 @@ export function planContext(input: PlanInput): ContextPlan {
     notes.push('Shrunk the summary block to leave room for the latest turn.');
   }
 
-  const pool = input.strategy === 'pinned' ? input.messages.slice(-4) : input.messages;
+  const pool = input.strategy === 'pinned'
+    ? input.messages.slice(-4)
+    : input.strategy === 'rolling'
+      ? input.messages.slice(-8)
+      : input.strategy === 'hierarchical'
+        ? input.messages.slice(-12)
+        : input.strategy === 'hierarchical+retrieval'
+          ? input.messages.slice(-14)
+          : input.strategy === 'retrieval'
+            ? input.messages.slice(-14)
+            : input.messages.slice(-8);
   const prepared = pool.map((message) => prepareMessage(message, input.tokenizer));
   const excerpted = prepared.flatMap((item) => item.omitted ? [{ id: item.message.id, omitted: item.omitted }] : []);
   const recent: ContextSourceMessage[] = [];

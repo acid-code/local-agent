@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { MACHINE_PROFILES, autoMapFor, autoMapForPlan, planInstall, type InstallPlan, profileFor, residentGiB, FREE_TIER_OBSERVED_AT, FREE_TIER_SNAPSHOT, VERSION, geminiQuotaDay, nextCron, quotaAvailability } from '@local-agent/shared';
 import { authenticate, hashPassword, noteFailure, rateLimit, setSession, verifyPassword } from './auth.js';
 import { TEMPLATES } from './catalog.js';
-import { detectCodingClis, listEdits, readPlan, replacePlan, revertBatch, RollbackConflict, scaffoldProject, updatePlanItem } from './coding.js';
+import { detectCodingClis, keepBatch, listEdits, readPlan, replacePlan, revertBatch, revertBatchFile, RollbackConflict, scaffoldProject, updatePlanItem } from './coding.js';
 import { secretDrift, secretNames, writeSecret } from './config.js';
 import { inDockerContainer, type DockerCtl } from './docker.js';
 import { checklist, findSearxng, readGpu, scanMachine, setupPreview } from './discovery.js';
@@ -1207,6 +1207,23 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     catch (error) { if (error instanceof RollbackConflict) throw http(409, error.message); throw error; }
     return { ok: true };
   });
+  app.post('/api/edits/:id/revert-file', async (req) => {
+    const id = (req.params as { id: string }).id;
+    const batch = store.db.prepare('SELECT session_id AS s FROM edit_batches WHERE id = ?').get(id) as { s?: string } | undefined;
+    if (!batch?.s || ownerOf(store, 'session', batch.s) !== me(req)) throw http(404, 'Edit not found.');
+    const body = parse(z.object({ path: z.string().min(1).max(2000) }), req.body);
+    try { await revertBatchFile(store, id, body.path); }
+    catch (error) { if (error instanceof RollbackConflict) throw http(409, error.message); throw error; }
+    return { ok: true };
+  });
+  app.post('/api/edits/:id/keep', async (req) => {
+    const id = (req.params as { id: string }).id;
+    const batch = store.db.prepare('SELECT session_id AS s FROM edit_batches WHERE id = ?').get(id) as { s?: string } | undefined;
+    if (!batch?.s || ownerOf(store, 'session', batch.s) !== me(req)) throw http(404, 'Edit not found.');
+    const body = parse(z.object({ path: z.string().min(1).max(2000).optional() }), req.body);
+    keepBatch(store, id, body.path);
+    return { ok: true };
+  });
 
   app.get('/api/runs', async (req) => ({ runs: store.listRuns().filter((run) => ownerOf(store, 'session', run.sessionId) === me(req)) }));
   app.get('/api/runs/:id', async (req) => {
@@ -1250,6 +1267,13 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       return engine.retryFrom(id, body.checkpointId);
     }
     return { run: await engine.resume(id) };
+  });
+  app.post('/api/runs/:id/steer', async (req) => {
+    const id = (req.params as { id: string }).id;
+    mustOwn(store, req, 'run', id, 'Run not found.');
+    const body = parse(z.object({ content: z.string().min(1).max(8_000) }), req.body);
+    const run = engine.steer(id, body.content.trim());
+    return { run, steering: true };
   });
 
   app.get('/api/approvals', async (req) => ({ approvals: store.listApprovals('pending').filter((approval) => ownerOf(store, 'run', approval.runId) === me(req)) }));

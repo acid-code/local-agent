@@ -64,9 +64,16 @@ export function deckIsHebrew(spec: DeckSpec) {
 export function validateDeck(raw: unknown): DeckSpec {
   const spec = raw as DeckSpec;
   if (!spec || typeof spec !== 'object' || typeof spec.title !== 'string' || !Array.isArray(spec.slides) || !spec.slides.length) throw new Error('A deck needs a title and at least one slide.');
-  if (spec.slides.length > 60) throw new Error('Keep a deck to 60 slides or fewer.');
+  if (spec.slides.length > 24) throw new Error('Keep a deck to 24 slides or fewer.');
   for (const [index, slide] of spec.slides.entries()) {
     if (!slide || typeof slide.title !== 'string') throw new Error(`Slide ${index + 1} needs a title.`);
+    slide.title = slide.title.trim().slice(0, 70);
+    if (!slide.title) throw new Error(`Slide ${index + 1} needs a non-empty title.`);
+    if (slide.bullets) {
+      slide.bullets = slide.bullets.slice(0, 5).map((line) => line.trim().split(/\s+/).slice(0, 12).join(' ')).filter(Boolean);
+    }
+    if (slide.subtitle) slide.subtitle = slide.subtitle.trim().slice(0, 180);
+    if (slide.notes) slide.notes = slide.notes.trim().slice(0, 1200);
     if (slide.stats && (!Array.isArray(slide.stats) || slide.stats.some((tile) => !tile || typeof tile.value !== 'string' || typeof tile.label !== 'string'))) throw new Error(`Slide ${index + 1}: each stat needs a value and a label (strings).`);
     if (slide.chart) {
       const { labels, series } = slide.chart;
@@ -97,6 +104,14 @@ export function lintDeck(input: DeckSpec, images: Map<number, Picture>): string[
   if (dense.length) warnings.push(`Slides ${dense.join(', ')} are text-heavy (more than 5 bullets or a bullet over 16 words). Cut to 3-4 short bullets, use layout "cards" or "stats", and move detail into notes.`);
   if (spec.slides.some((slide) => slide.title.length > 70)) warnings.push('Some titles are over 70 characters; make titles short noun phrases.');
   if (!spec.slides.some((slide) => slide.source)) warnings.push('No slide has a "source" line; add one under every slide that states facts or numbers.');
+  if (spec.slides.length > 16) warnings.push('This deck has more than 16 slides. Split it into a shorter executive narrative or a separate appendix.');
+  const repeated = spec.slides.slice(1).filter((slide, index) => {
+    const previous = spec.slides[index];
+    const layout = slide.layout ?? (slide.chart ? 'chart' : slide.stats ? 'stats' : slide.image ? 'split' : 'bullets');
+    const previousLayout = previous.layout ?? (previous.chart ? 'chart' : previous.stats ? 'stats' : previous.image ? 'split' : 'bullets');
+    return layout === previousLayout;
+  }).length;
+  if (repeated > 4) warnings.push('Several neighboring slides repeat the same layout. Alternate title, split, cards, chart and stats layouts.');
   return warnings;
 }
 
@@ -426,6 +441,15 @@ export function slidesTools(deps: SlideDeps): Tool[] {
       const version = previous ? ` v${(Number(previous.name.match(/ v(\d+)\.pptx$/i)?.[1]) || 1) + 1}` : '';
       const file = saveFile(ctx.store, deps.dataDir, { name: `${base.replace(/ v\d+$/i, '')}${version}.pptx`, bytes, mime: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', sessionId: ctx.sessionId ?? null, agentId: ctx.agent.id, source: 'agent', ownerId });
       const rtl = deckIsHebrew(spec);
+      ctx.store.addLog('info', `PPTX created: ${file.name}; ${spec.slides.length} slides; ${images.size} resolved pictures; theme=${spec.theme ?? 'clinical'}; lang=${rtl ? 'he' : 'en'}; lint=${lint.length ? lint.join(' | ') : 'passed'}`, {
+        fileId: file.id,
+        reviseFileId: previous?.id ?? null,
+        slideCount: spec.slides.length,
+        pictureCount: images.size,
+        layouts: spec.slides.map((slide) => slide.layout ?? 'auto'),
+        imageQueries: spec.slides.map((slide) => slide.image?.query).filter(Boolean),
+        lint,
+      }, 'slides');
       return `Saved [file:${file.id}] (${spec.slides.length} slides, ${rtl ? 'Hebrew, right-to-left' : 'left-to-right'}, font ${spec.font}${images.size ? `, ${images.size} of ${spec.slides.length} slides with a picture` : ', no pictures'}). ${notes.join(' ')}${lint.length ? ` DESIGN CHECK - fix before replying (call make_slides again with revise_file_id="${file.id}"): ${lint.join(' ')}` : ' Design check passed.'} Mention [file:${file.id}] in the reply; the user can preview it and ask for changes.`;
     },
   };

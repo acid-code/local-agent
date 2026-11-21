@@ -13,7 +13,7 @@ import type { Tool, ToolContext } from './tools.js';
 import { nid, now } from './util.js';
 
 export interface PlanItem { id: string; text: string; status: string; note: string | null; position: number }
-export interface EditBatch { id: string; sessionId: string; runId: string | null; label: string; diff: string; createdAt: string; revertedAt: string | null }
+export interface EditBatch { id: string; sessionId: string; runId: string | null; label: string; diff: string; createdAt: string; revertedAt: string | null; keptAt: string | null; keptFiles: string[]; revertedFiles: string[] }
 
 const obj = (properties: Record<string, unknown>, required: string[] = []) => ({ type: 'object', properties, required, additionalProperties: false });
 
@@ -89,10 +89,12 @@ export class RollbackConflict extends Error {
  */
 export async function revertBatches(store: Store, batchIds: string[]) {
   const rows = batchIds.map((id) => {
-    const row = store.db.prepare('SELECT * FROM edit_batches WHERE id = ?').get(id) as { id: string; files: string; reverted_at: string | null } | undefined;
+    const row = store.db.prepare('SELECT * FROM edit_batches WHERE id = ?').get(id) as { id: string; files: string; reverted_at: string | null; reverted_files: string | null } | undefined;
     if (!row) throw new Error('Edit batch not found.');
     if (row.reverted_at) throw new Error('That batch was already reverted.');
-    return { id: row.id, files: JSON.parse(row.files) as BatchFile[] };
+    let revertedFiles: string[] = [];
+    try { revertedFiles = JSON.parse(row.reverted_files || '[]') as string[]; } catch { revertedFiles = []; }
+    return { id: row.id, files: (JSON.parse(row.files) as BatchFile[]).filter((file) => !revertedFiles.includes(file.path)), revertedFiles };
   });
   const current = new Map<string, string | null>();
   const conflicts = new Set<string>();
@@ -114,6 +116,37 @@ export async function revertBatches(store: Store, batchIds: string[]) {
 
 export async function revertBatch(store: Store, batchId: string) {
   await revertBatches(store, [batchId]);
+}
+
+export async function revertBatchFile(store: Store, batchId: string, path: string) {
+  const row = store.db.prepare('SELECT * FROM edit_batches WHERE id = ?').get(batchId) as { id: string; files: string; reverted_at: string | null; reverted_files: string | null } | undefined;
+  if (!row) throw new Error('Edit batch not found.');
+  if (row.reverted_at) throw new Error('That edit batch was already reverted.');
+  const files = JSON.parse(row.files) as BatchFile[];
+  const reverted = row.reverted_files ? JSON.parse(row.reverted_files) as string[] : [];
+  const match = files.find((file) => file.path === path || file.path.endsWith(path) || path.endsWith(file.path));
+  if (!match) throw new Error(`That file is not in this edit batch: ${path}`);
+  if (reverted.includes(match.path)) throw new Error('That file was already reverted.');
+  if (match.after !== undefined && await readOrNull(match.path) !== match.after) {
+    throw new RollbackConflict([match.path]);
+  }
+  if (match.before == null) await fs.rm(match.path, { force: true });
+  else { await fs.mkdir(path.dirname(match.path), { recursive: true }); await fs.writeFile(match.path, match.before, 'utf8'); }
+  reverted.push(match.path);
+  store.db.prepare('UPDATE edit_batches SET reverted_files=? WHERE id=?').run(JSON.stringify(reverted), batchId);
+  if (files.every((file) => reverted.includes(file.path))) store.db.prepare('UPDATE edit_batches SET reverted_at=? WHERE id=?').run(now(), batchId);
+}
+
+export function keepBatch(store: Store, batchId: string, filePath?: string) {
+  const row = store.db.prepare('SELECT kept_files FROM edit_batches WHERE id=?').get(batchId) as { kept_files: string | null } | undefined;
+  if (!row) throw new Error('Edit batch not found.');
+  if (!filePath) {
+    store.db.prepare('UPDATE edit_batches SET kept_at=? WHERE id=?').run(now(), batchId);
+    return;
+  }
+  const kept = row.kept_files ? JSON.parse(row.kept_files) as string[] : [];
+  if (!kept.includes(filePath)) kept.push(filePath);
+  store.db.prepare('UPDATE edit_batches SET kept_files=? WHERE id=?').run(JSON.stringify(kept), batchId);
 }
 
 export function grantFolder(store: Store, agentId: string, folder: string, mode: 'read' | 'write') {
@@ -517,5 +550,9 @@ function runCli(cli: string, prompt: string, cwd: string, signal: AbortSignal) {
 }
 
 function mapBatch(row: Record<string, unknown>): EditBatch {
-  return { id: String(row.id), sessionId: String(row.session_id), runId: row.run_id ? String(row.run_id) : null, label: String(row.label), diff: String(row.diff), createdAt: String(row.created_at), revertedAt: row.reverted_at ? String(row.reverted_at) : null };
+  let keptFiles: string[] = [];
+  let revertedFiles: string[] = [];
+  try { keptFiles = JSON.parse(String(row.kept_files || '[]')) as string[]; } catch { keptFiles = []; }
+  try { revertedFiles = JSON.parse(String(row.reverted_files || '[]')) as string[]; } catch { revertedFiles = []; }
+  return { id: String(row.id), sessionId: String(row.session_id), runId: row.run_id ? String(row.run_id) : null, label: String(row.label), diff: String(row.diff), createdAt: String(row.created_at), revertedAt: row.reverted_at ? String(row.reverted_at) : null, keptAt: row.kept_at ? String(row.kept_at) : null, keptFiles, revertedFiles };
 }

@@ -1989,12 +1989,14 @@ button.state-card:hover, a.state-card:hover { background: var(--bg-3); }
 }
 
 .diff-card {
+  position: relative;
   border: 1px solid var(--line-strong);
   border-radius: calc(12px * var(--round));
   background: var(--bg-2);
   overflow: hidden;
-  margin: 8px 0;
+  margin: 8px 0 8px 12px;
 }
+.diff-card::before { content: ''; position: absolute; inset-inline-start: -13px; top: 22px; width: 7px; height: 7px; border-radius: 50%; background: var(--brass); box-shadow: 0 0 0 3px var(--bg); }
 .diff-card.reverted { opacity: 0.65; }
 .diff-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; background: var(--bg-3); }
 .diff-card-title { flex: 1; min-width: 0; display: flex; align-items: center; gap: 7px; border: 0; background: transparent; color: var(--text); text-align: start; cursor: pointer; padding: 0; }
@@ -2006,6 +2008,20 @@ button.state-card:hover, a.state-card:hover { background: var(--bg-3); }
 .diff-line.add { background: rgba(74, 222, 128, 0.12); color: #86efac; }
 .diff-line.del { background: rgba(248, 113, 113, 0.12); color: #fca5a5; }
 .diff-line.hunk { background: rgba(124, 152, 245, 0.12); color: #93c5fd; }
+
+.bulk-diff-list { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
+.bulk-diff { position: relative; border: 1px solid var(--line-strong); border-radius: calc(12px * var(--round)); background: var(--bg-2); overflow: hidden; }
+.bulk-diff-head { width: 100%; min-height: 44px; display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--bg-3); color: var(--text); }
+.bulk-diff-toggle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; border: 0; background: transparent; color: var(--text); text-align: start; cursor: pointer; padding: 0; }
+.bulk-diff-actions { display: flex; align-items: center; gap: 6px; }
+.bulk-diff-title { flex: 1; min-width: 0; }
+.bulk-diff-files { border-top: 1px solid var(--line); }
+.bulk-file + .bulk-file { border-top: 1px solid var(--line); }
+.bulk-file-row { display: flex; align-items: center; gap: 8px; padding-inline-end: 8px; }
+.bulk-file-head { flex: 1; min-width: 0; min-height: 40px; display: flex; align-items: center; gap: 7px; border: 0; background: transparent; color: var(--text); padding: 7px 12px; text-align: start; cursor: pointer; }
+.bulk-file-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+.bulk-file-head > .ellipsis { flex: 1; }
+.bulk-file-head:hover { background: var(--bg-3); }
 
 .decision-trace {
   border: 1px solid var(--line);
@@ -2140,4 +2156,23 @@ button.state-card:hover, a.state-card:hover { background: var(--bg-3); }
 }
 @supports not selector(::-webkit-scrollbar) {
   * { scrollbar-width: thin; scrollbar-color: rgba(var(--text-rgb), 0.18) transparent; }
+}
+
+/* Windows Electron: disable expensive backdrop-filter blurs that cause compositor lag during scroll & streaming */
+:root[data-desktop="win"] * {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+:root[data-desktop="win"] *,
+:root[data-desktop="linux"] * {
+  scroll-behavior: auto;
+  animation-duration: 0.01ms !important;
+  transition-duration: 0.01ms !important;
+}
+:root[data-desktop="win"] .streaming-msg,
+:root[data-desktop="win"] .msg,
+:root[data-desktop="linux"] .streaming-msg,
+:root[data-desktop="linux"] .msg {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 220px;
 }
