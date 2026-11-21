@@ -43,6 +43,7 @@ export function applySearchReplace(before: string, search: string, replace: stri
 }
 
 export function replacePlan(store: Store, sessionId: string, items: string[], runId?: string | null) {
+  snapshotPlan(store, sessionId);
   const existing = store.db.prepare('SELECT id FROM plans WHERE session_id = ?').get(sessionId) as { id: string } | undefined;
   const id = existing?.id ?? nid('plan');
   const ts = now();
@@ -56,19 +57,49 @@ export function replacePlan(store: Store, sessionId: string, items: string[], ru
 }
 
 export function updatePlanItem(store: Store, itemId: string, patch: { text?: string; status?: string; note?: string }) {
-  const row = store.db.prepare('SELECT * FROM plan_items WHERE id = ?').get(itemId) as { text: string; status: string; note: string | null; plan_id: string } | undefined;
+  const row = store.db.prepare('SELECT i.*, p.session_id AS session_id FROM plan_items i JOIN plans p ON p.id = i.plan_id WHERE i.id = ?').get(itemId) as { text: string; status: string; note: string | null; plan_id: string; session_id: string } | undefined;
   if (!row) return null;
+  snapshotPlan(store, row.session_id);
   store.db.prepare('UPDATE plan_items SET text = ?, status = ?, note = ? WHERE id = ?').run(patch.text ?? row.text, patch.status ?? row.status, patch.note ?? row.note, itemId);
   store.db.prepare('UPDATE plans SET updated_at = ? WHERE id = ?').run(now(), row.plan_id);
   return true;
 }
 
-export function readPlan(store: Store, sessionId: string): { id: string; title: string; status: string; items: PlanItem[] } | null {
+function snapshotPlan(store: Store, sessionId: string) {
+  const plan = readPlan(store, sessionId);
+  store.db.prepare('INSERT INTO plan_history (id, session_id, payload, created_at) VALUES (?, ?, ?, ?)').run(nid('ph'), sessionId, plan ? JSON.stringify(plan) : null, now());
+  store.db.prepare('DELETE FROM plan_history WHERE id IN (SELECT id FROM plan_history WHERE session_id = ? ORDER BY created_at DESC LIMIT -1 OFFSET 20)').run(sessionId);
+}
+
+export function undoPlan(store: Store, sessionId: string): { id: string; title: string; status: string; items: PlanItem[] } | null {
+  const snapshot = store.db.prepare('SELECT id, payload FROM plan_history WHERE session_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1').get(sessionId) as { id: string; payload: string | null } | undefined;
+  if (!snapshot) return null;
+  store.db.prepare('DELETE FROM plan_history WHERE id = ?').run(snapshot.id);
+  if (!snapshot.payload) {
+    store.db.prepare('DELETE FROM plan_items WHERE plan_id IN (SELECT id FROM plans WHERE session_id = ?)').run(sessionId);
+    store.db.prepare('DELETE FROM plans WHERE session_id = ?').run(sessionId);
+    return null;
+  }
+  const saved = JSON.parse(snapshot.payload) as { id: string; title: string; status: string; items: PlanItem[] };
+  const ts = now();
+  const existing = store.db.prepare('SELECT id FROM plans WHERE session_id = ?').get(sessionId) as { id: string } | undefined;
+  const id = existing?.id ?? nid('plan');
+  if (existing) store.db.prepare('UPDATE plans SET run_id = NULL, title = ?, status = ?, updated_at = ? WHERE id = ?').run(saved.title, saved.status, ts, id);
+  else store.db.prepare('INSERT INTO plans (id, session_id, run_id, title, status, created_at, updated_at) VALUES (?, ?, NULL, ?, ?, ?, ?)').run(id, sessionId, saved.title, saved.status, ts, ts);
+  store.db.prepare('DELETE FROM plan_items WHERE plan_id = ?').run(id);
+  saved.items.forEach((item, position) => {
+    store.db.prepare('INSERT INTO plan_items (id, plan_id, position, text, status, note) VALUES (?, ?, ?, ?, ?, ?)').run(item.id, id, position, item.text, item.status, item.note);
+  });
+  return readPlan(store, sessionId);
+}
+
+export function readPlan(store: Store, sessionId: string): { id: string; title: string; status: string; items: PlanItem[]; canUndo: boolean } | null {
   const plan = store.db.prepare('SELECT * FROM plans WHERE session_id = ?').get(sessionId) as { id: string; title: string; status: string } | undefined;
   if (!plan) return null;
   const items = (store.db.prepare('SELECT * FROM plan_items WHERE plan_id = ? ORDER BY position').all(plan.id) as { id: string; text: string; status: string; note: string | null; position: number }[])
     .map((item) => ({ id: item.id, text: item.text, status: item.status, note: item.note, position: item.position }));
-  return { id: plan.id, title: plan.title, status: plan.status, items };
+  const history = store.db.prepare('SELECT COUNT(*) AS count FROM plan_history WHERE session_id = ?').get(sessionId) as { count: number };
+  return { id: plan.id, title: plan.title, status: plan.status, items, canUndo: history.count > 0 };
 }
 
 export function listEdits(store: Store, sessionId: string): EditBatch[] {

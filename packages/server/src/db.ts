@@ -181,6 +181,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS secret_captures (id TEXT PRIMARY KEY, message_id TEXT, kind TEXT NOT NULL, nonce TEXT NOT NULL, ciphertext TEXT NOT NULL, created_at TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS plans (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT, title TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS plan_items (id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, position INTEGER NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL, note TEXT);
+      CREATE TABLE IF NOT EXISTS plan_history (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, payload TEXT, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS edit_batches (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT, label TEXT NOT NULL, files TEXT NOT NULL, diff TEXT NOT NULL, created_at TEXT NOT NULL, reverted_at TEXT);
       CREATE TABLE IF NOT EXISTS folder_grants (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, path TEXT NOT NULL, mode TEXT NOT NULL, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS workshops (

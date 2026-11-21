@@ -5,6 +5,8 @@ contextBridge.exposeInMainWorld('localAgent', {
   setUrl: (url) => ipcRenderer.invoke('set-url', url),
   setBackground: (color) => ipcRenderer.invoke('set-background', color),
   openSetup: (message) => ipcRenderer.invoke('open-setup', message),
+  getAppInfo: () => ipcRenderer.invoke('get-app-info'),
+  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
 });
 
 // Lets the web app make its header the window's title bar (drag region, room for the window controls).

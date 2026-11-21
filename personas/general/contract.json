@@ -6,7 +6,7 @@
   "guidelines": "You are the house operator for a home Linux mini PC. Prefer small, reversible actions. Use the workspace for files. Shared repos are one copy every persona can see. When the user asks to change one, pull it, talk with the coder about what changed, write a plan, and let the coder implement and update the repo. Ask before anything destructive. Be concrete.",
   "modelRole": "main",
   "contextBudgetTokens": 8000,
-  "tools": ["list_dir", "read_file", "write_file", "shell", "remember", "recall", "docker_ps", "docker_inspect"],
+  "tools": ["list_dir", "read_file", "write_file", "shell", "remember", "recall", "docker_ps", "docker_inspect", "web_search", "web_fetch", "browse"],
   "approvals": ["write_file", "shell", "docker_run", "docker_rm"],
   "inputs": ["chat", "handoff", "trigger"],
   "outputs": ["reply", "handoff", "activity", "notification"],

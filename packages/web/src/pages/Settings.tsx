@@ -16,6 +16,7 @@ import { t as tr } from '../i18n';
 
 interface Secret { id: string; name: string; handle: string; scope: string; revokedAt: string | null }
 interface Audit { id: number; action: string; actor: string; createdAt: string }
+interface SecretRequest { id: string; name: string; reason: string; status: string; createdAt: string }
 interface SettingsShape { codeApproval: string; geminiTier: string; sandbox: string; autoResume: boolean; approvalForDestructive: boolean; approvalMode?: string; readOnly?: boolean; dailyTokenLimit?: number | null; killSwitch?: boolean; searxngUrl?: string }
 interface ProviderItem { id: string; kind: string; name: string; baseUrl: string | null; enabled: boolean }
 interface ModelItem { id: string; name: string; apiName: string; local: boolean; enabled: boolean; providerId: string; parameterSize?: string | null; practicalBudget?: number }
@@ -330,6 +331,7 @@ export function Settings({ role = 'owner' }: { role?: 'owner' | 'member' }) {
 
 function OwnerSettings() {
   const [secrets, setSecrets] = useState<Secret[]>([]);
+  const [secretRequests, setSecretRequests] = useState<SecretRequest[]>([]);
   const [audit, setAudit] = useState<Audit[]>([]);
   const [settings, setSettings] = useState<SettingsShape | null>(null);
   const [name, setName] = useState('GEMINI_API_KEY');
@@ -357,6 +359,12 @@ function OwnerSettings() {
     setSecrets(data.vault);
     setAudit(data.audit);
     setClis(data.clis);
+    try {
+      const vaultData = await api<{ requests: SecretRequest[] }>('/api/vault');
+      setSecretRequests(vaultData.requests);
+    } catch {
+      setSecretRequests([]);
+    }
   }
   /** Every settings change autosaves through here and shows the "Saved" tick. */
   async function patchSettings(body: Record<string, unknown>) {
@@ -441,6 +449,21 @@ function OwnerSettings() {
       )}
       {show('vault') && <Block id="vault">{null}</Block>}
       {show('vault') && <>
+      {secretRequests.length > 0 && (
+        <div className="card" id="pending-secrets">
+          <h3>{tr('Pending secret requests')}</h3>
+          {secretRequests.map((request) => (
+            <div key={request.id} className="item-row">
+              <span className="dot off" aria-hidden />
+              <span className="grow">
+                <strong className="mono">{request.name}</strong>
+                <span className="muted">{request.reason}</span>
+              </span>
+              <button className="btn" type="button" onClick={() => { setName(request.name); setValue(''); document.getElementById('vault')?.scrollIntoView({ block: 'start', behavior: 'smooth' }); }}>{tr('Provide')}</button>
+            </div>
+          ))}
+        </div>
+      )}
       <form className="card" id="vault" onSubmit={async (event) => { event.preventDefault(); await post('/api/vault', { name, value, scope: 'global' }); setValue(''); await load(); toast(tr('Saved {0}.', [name]), 'ok'); }}>
         <h3>{tr('Add a secret')}</h3>
         <div className="row">

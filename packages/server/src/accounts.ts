@@ -217,7 +217,7 @@ export const MEMBER_ROUTES = new Set([
   'GET /api/messages/:id', 'GET /api/context/search',
   'GET /api/git/roots', 'GET /api/git/:root/status', 'GET /api/git/:root/diff', 'GET /api/git/:root/tree', 'GET /api/git/:root/raw', 'GET /api/git/:root/file', 'POST /api/git/:root/action',
   'GET /api/sessions', 'POST /api/sessions', 'GET /api/sessions/:id', 'GET /api/sessions/:id/messages', 'GET /api/sessions/:id/context', 'GET /api/sessions/:id/rules', 'PUT /api/sessions/:id/rules', 'POST /api/helpers/:id/stop', 'POST /api/runs/:id/rollback', 'GET /api/agents/:id/memory-files', 'PUT /api/agents/:id/memory-files/:kind', 'PATCH /api/sessions/:id', 'DELETE /api/sessions/:id', 'POST /api/sessions/:id/messages',
-  'GET /api/sessions/:id/plan', 'PUT /api/sessions/:id/plan', 'PATCH /api/plan-items/:id', 'GET /api/sessions/:id/edits', 'POST /api/edits/:id/revert',
+  'GET /api/sessions/:id/plan', 'PUT /api/sessions/:id/plan', 'POST /api/sessions/:id/plan/undo', 'PATCH /api/plan-items/:id', 'GET /api/sessions/:id/edits', 'POST /api/edits/:id/revert',
   'GET /api/runs', 'GET /api/runs/:id', 'GET /api/runs/:id/events', 'POST /api/runs/:id/control',
   'GET /api/approvals', 'POST /api/approvals/:id',
   'GET /api/models', 'GET /api/models/usable', 'GET /api/workspaces', 'POST /api/agents/:id/open-chat', 'GET /api/sessions/:id/workspaces', 'PUT /api/sessions/:id/workspaces',

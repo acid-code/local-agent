@@ -1439,6 +1439,101 @@ table.limits tbody th { color: var(--text); font-weight: 500; }
 .chat.v2 .composer form { background: var(--bg-2); border-radius: calc(22px * var(--round)); }
 .chat.v2 .composer-bar .composer-plus { border: 0; background: var(--bg-3); }
 
+/* Clean desktop composer: compact, centred, and single-row like a modern AI chat. */
+@media (min-width: 981px) {
+  .chat.v2 .composer { padding: 10px 24px 14px; }
+  .chat.v2 .composer form,
+  .chat.v2 .composer-hint { max-width: 680px; }
+  .chat.v2 .composer form {
+    border-radius: calc(26px * var(--round));
+    padding: 8px 10px 9px;
+  }
+  .chat.v2 .composer textarea {
+    min-height: 44px;
+    padding: 8px 10px 6px;
+  }
+  .chat.v2 .composer-bar { flex-wrap: nowrap; }
+  .chat.v2 .composer-hint { display: none; }
+  :root[data-desktop="win"] .chat.v2 .composer,
+  :root[data-desktop="linux"] .chat.v2 .composer {
+    padding-bottom: 16px;
+  }
+  :root[data-desktop="win"] .chat.v2 .thread-head,
+  :root[data-desktop="linux"] .chat.v2 .thread-head {
+    min-height: 56px;
+  }
+}
+
+/* Keep every chat surface inside the viewport, including narrow and zoomed desktop windows. */
+.chat.v2,
+.chat.v2 .thread,
+.chat.v2 .messages,
+.chat.v2 .composer {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-x: hidden;
+}
+.chat.v2 .messages-inner,
+.chat.v2 .composer form {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+.chat.v2 .head-actions,
+.chat.v2 .composer-bar {
+  min-width: 0;
+}
+.chat.v2 .rail.open {
+  width: clamp(240px, 32vw, 320px);
+  max-width: calc(100vw - 48px);
+  box-sizing: border-box;
+}
+:root[data-desktop="win"] .chat.v2 .rail.open,
+:root[data-desktop="linux"] .chat.v2 .rail.open {
+  top: 40px;
+  height: calc(100dvh - 40px);
+  bottom: 0;
+  padding-top: 12px;
+}
+:root[data-desktop="win"] .chat.v2:has(.rail.open) .scrim,
+:root[data-desktop="linux"] .chat.v2:has(.rail.open) .scrim {
+  top: 40px;
+  height: calc(100dvh - 40px);
+}
+@media (min-width: 981px) and (max-width: 1180px) {
+  .app.route-chat { grid-template-columns: 220px minmax(0, 1fr); }
+  .chat.v2 .composer { padding-inline: 12px; }
+  .chat.v2 .composer form,
+  .chat.v2 .composer-hint { max-width: 620px; }
+  .chat.v2 .composer form { padding-inline: 8px; }
+  .chat.v2 .thread-head { padding-inline: 10px; }
+  .chat.v2 .persona-name { max-width: 220px; }
+  .chat.v2 .model-pill { max-width: 180px; }
+  .chat.v2 .context-meter { display: none; }
+  .chat.v2 .composer-bar { gap: 3px; }
+  .chat.v2 .head-actions [aria-label="Export chat"] { display: none; }
+}
+@media (max-width: 980px) {
+  .chat.v2 .rail.open {
+    width: min(82vw, 320px);
+  }
+  .chat.v2 .thread,
+  .chat.v2 .messages,
+  .chat.v2 .composer {
+    width: 100%;
+  }
+  .chat.v2 .composer form {
+    max-width: none;
+  }
+  .chat.v2 .head-actions {
+    gap: 3px;
+  }
+  .chat.v2 .persona-name {
+    max-width: 42vw;
+  }
+}
+
 /* Status panel: big face, text tabs with a pill, plain section titles, rounded card rows */
 .state-panel { background: var(--bg); }
 .state-hero { background: none; border-bottom: 0; padding: 20px 16px 8px; gap: 6px; }

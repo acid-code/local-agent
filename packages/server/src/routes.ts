@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { MACHINE_PROFILES, autoMapFor, autoMapForPlan, planInstall, type InstallPlan, profileFor, residentGiB, FREE_TIER_OBSERVED_AT, FREE_TIER_SNAPSHOT, VERSION, geminiQuotaDay, nextCron, quotaAvailability } from '@local-agent/shared';
 import { authenticate, hashPassword, noteFailure, rateLimit, setSession, verifyPassword } from './auth.js';
 import { TEMPLATES } from './catalog.js';
-import { detectCodingClis, keepBatch, listEdits, readPlan, replacePlan, revertBatch, revertBatchFile, RollbackConflict, scaffoldProject, updatePlanItem } from './coding.js';
+import { detectCodingClis, keepBatch, listEdits, readPlan, replacePlan, undoPlan, revertBatch, revertBatchFile, RollbackConflict, scaffoldProject, updatePlanItem } from './coding.js';
 import { secretDrift, secretNames, writeSecret } from './config.js';
 import { inDockerContainer, type DockerCtl } from './docker.js';
 import { checklist, findSearxng, readGpu, scanMachine, setupPreview } from './discovery.js';
@@ -255,7 +255,11 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   app.get('/api/vault', async () => ({ secrets: vault.list(), requests: vault.listRequests('pending'), audit: vault.auditLog() }));
   app.post('/api/vault', async (req) => {
     const body = parse(z.object({ name: z.string(), value: z.string().min(1), scope: z.string().optional(), scopeId: z.string().nullable().optional() }), req.body);
-    return { secret: vault.put({ name: body.name, value: body.value, scope: body.scope, scopeId: body.scopeId, actor: 'owner' }) };
+    const secret = vault.put({ name: body.name, value: body.value, scope: body.scope, scopeId: body.scopeId, actor: 'owner' });
+    for (const request of vault.listRequests('pending').filter((item) => item.name === secret.name)) {
+      engine.provideSecret(request.id, body.value);
+    }
+    return { secret };
   });
   app.post('/api/vault/:id/reveal', async (req) => {
     const body = parse(z.object({ password: z.string() }), req.body);
@@ -1191,6 +1195,12 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     mustOwn(store, req, 'session', (req.params as { id: string }).id, 'Chat not found.');
     const body = parse(z.object({ items: z.array(z.string()).max(30) }), req.body);
     return { plan: replacePlan(store, (req.params as { id: string }).id, body.items) };
+  });
+  app.post('/api/sessions/:id/plan/undo', async (req) => {
+    const id = (req.params as { id: string }).id;
+    mustOwn(store, req, 'session', id, 'Chat not found.');
+    const plan = undoPlan(store, id);
+    return { plan };
   });
   app.patch('/api/plan-items/:id', async (req) => {
     const body = parse(z.object({ text: z.string().optional(), status: z.string().optional(), note: z.string().optional() }), req.body);
@@ -2196,6 +2206,7 @@ async function runSetup(action: string, model: string | undefined, jobId: string
         HostConfig: {
           PortBindings: { '8080/tcp': [{ HostPort: '8088' }] },
           RestartPolicy: { Name: 'unless-stopped' },
+          Dns: ['1.1.1.1', '8.8.8.8'],
           Binds: ['local-agent-searxng-config:/etc/searxng'],
         },
         files: [{ dir: '/etc/searxng', name: 'settings.yml', content: config.yaml, mode: 0o644 }],

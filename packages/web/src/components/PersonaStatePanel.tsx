@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { isOwner } from '../lib/role';
 import { Link } from 'react-router-dom';
-import { AlertCircle, CalendarClock, CheckCircle2, ChevronRight, CircleDashed, FileText, X, Zap } from 'lucide-react';
+import { AlertCircle, CalendarClock, CheckCircle2, ChevronRight, CircleDashed, CircleStop, FileText, KeyRound, X, Zap } from 'lucide-react';
 import { api } from '../lib/api';
 import { humanSize } from '../lib/files';
 import { Face, type FaceAgent } from './Face';
@@ -16,7 +16,7 @@ interface FileRow { id: string; sessionId: string | null; name: string; size: nu
 interface Resources { current: { memory: { totalGiB: number; availableGiB: number }; gpu: { name?: string } | null; disk: { totalBytes: number; freeBytes: number } } }
 interface Voice { whisper: boolean; kokoro: boolean }
 
-const ACTIVE = new Set(['queued', 'running', 'awaiting_approval', 'paused']);
+const ACTIVE = new Set(['queued', 'running', 'awaiting_approval', 'awaiting_secret', 'paused']);
 const ago = (iso: string) => {
   const ms = Date.now() - new Date(iso).getTime();
   return ms < 86_400_000 ? fmt.ago(iso) : fmt.date(iso);
@@ -69,11 +69,15 @@ export function PersonaStatePanel({ agent, sessions, tick, onClose, onOpenSessio
     const session = mine.get(run.sessionId);
     const failed = run.status === 'failed';
     const done = run.status === 'completed';
-    const label = failed ? 'Run failed' : done ? 'Run finished' : ACTIVE.has(run.status) ? 'Running' : run.status.replace('_', ' ');
+    const stopped = run.status === 'stopped';
+    const waitingSecret = run.status === 'awaiting_secret';
+    const waitingApproval = run.status === 'awaiting_approval';
+    const label = failed ? 'Run failed' : done ? 'Run finished' : stopped ? 'Run stopped' : waitingSecret ? 'Waiting for secret' : waitingApproval ? 'Waiting for approval' : ACTIVE.has(run.status) ? 'Running' : run.status.replace('_', ' ');
+    const Icon = failed ? AlertCircle : done ? CheckCircle2 : stopped ? CircleStop : waitingSecret ? KeyRound : waitingApproval ? AlertCircle : CircleDashed;
     return (
       <li key={run.id}>
         <button className={`state-card state-row${failed ? ' failed' : ''}`} onClick={() => onOpenSession(run.sessionId)} title={`${label} · ${ago(run.startedAt)}`}>
-          {failed ? <AlertCircle size={18} className="state-ico bad" aria-hidden /> : done ? <CheckCircle2 size={18} className="state-ico ok" aria-hidden /> : <CircleDashed size={18} className="state-ico live" aria-hidden />}
+          <Icon size={18} className={`state-ico${failed ? ' bad' : done ? ' ok' : ACTIVE.has(run.status) ? ' live' : ''}`} aria-hidden />
           <span className="grow"><span className="ellipsis" dir="auto">{session?.title || t('Chat')}</span><small className="faint">{label} · <span className="run-no">#{runNumber(run)}</span></small></span>
           <ChevronRight size={16} className="faint" aria-hidden />
         </button>

@@ -48,6 +48,8 @@
         </div>
       </form>
       <p class="hint">The login cookie stays in this app.</p>
+      <p class="hint" id="app-version">Checking app version…</p>
+      <button type="button" class="chip" id="check-update">Check for updates</button>
     </main>
     <script>
       const input = document.querySelector('#url');
@@ -56,6 +58,18 @@
       if (params.get('error')) note.textContent = params.get('error');
       window.localAgent.getUrl().then((url) => {
         if (url) input.value = url;
+      });
+      window.localAgent.getAppInfo().then((info) => {
+        document.querySelector('#app-version').textContent = `local-agent ${info.version}${info.packaged ? '' : ' · development build'}`;
+      }).catch(() => {});
+      document.querySelector('#check-update').addEventListener('click', async (event) => {
+        const button = event.currentTarget;
+        button.disabled = true;
+        button.textContent = 'Checking…';
+        const result = await window.localAgent.checkForUpdates();
+        button.disabled = false;
+        button.textContent = 'Check for updates';
+        if (!result.ok) note.textContent = result.error || 'Update check failed.';
       });
       const go = document.querySelector('#go');
       document.querySelectorAll('.chip').forEach((chip) => chip.addEventListener('click', () => { input.value = chip.dataset.url; input.focus(); }));

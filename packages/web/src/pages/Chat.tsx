@@ -32,7 +32,7 @@ interface Session { id: string; title: string; agentId: string | null; mode: 'ch
 type Agent = PanelAgent & FaceAgent;
 interface Message { id: string; role: string; content: string; createdAt?: string; agentId?: string | null; toolName?: string | null; routingNote?: string | null; thinking?: string | null; toolCalls?: { name: string }[] | null }
 interface Step { id: string; kind: string; name: string; status: string; latencyMs?: number; output?: unknown; error?: string | null }
-interface Plan { id: string; items: { id: string; text: string; status: string; note?: string | null }[] }
+interface Plan { id: string; items: { id: string; text: string; status: string; note?: string | null }[]; canUndo?: boolean }
 interface Edit { id: string; runId: string | null; label: string; diff: string; revertedAt: string | null; keptAt: string | null; keptFiles: string[]; revertedFiles: string[] }
 interface Offer { id: string; kind: string; masked: string }
 interface CheckItem { id: string; title: string; ok: boolean; detail: string; optional: boolean }
@@ -1068,7 +1068,18 @@ export function Chat() {
           )}
           {plan && plan.items.length > 0 && (
             <div className="card task-list">
-              <h3>{mode === 'code' ? t('Plan') : t('Tasks')} <span className="faint small">{plan.items.filter((item) => item.status === 'done').length}/{plan.items.length}</span></h3>
+              <h3>
+                {mode === 'code' ? t('Plan') : t('Tasks')} <span className="faint small">{plan.items.filter((item) => item.status === 'done').length}/{plan.items.length}</span>
+                {plan.canUndo && current && (
+                  <button type="button" className="btn ghost small" style={{ float: 'inline-end' }} onClick={async () => {
+                    try {
+                      const res = await post<{ plan: Plan | null }>(`/api/sessions/${current}/plan/undo`, {});
+                      setPlan(res.plan);
+                      toast(t('Plan change undone.'), 'ok');
+                    } catch (error) { toast(errorText(error), 'error'); }
+                  }}><RotateCcw size={12} aria-hidden /> {t('Undo plan')}</button>
+                )}
+              </h3>
               {plan.items.map((item) => (
                 <label key={item.id} className="row" title={item.note ?? undefined}>
                   <input type="checkbox" checked={item.status === 'done'} onChange={async (event) => { await api(`/api/plan-items/${item.id}`, { method: 'PATCH', body: JSON.stringify({ status: event.target.checked ? 'done' : 'pending' }) }); if (current) void openSession(current); }} />

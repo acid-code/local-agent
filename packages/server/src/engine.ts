@@ -1653,6 +1653,8 @@ export class Engine {
     names.add('read_slides');
     names.add('fetch_image');
     names.add('browse');
+    names.add('web_search');
+    names.add('web_fetch');
     if ((agent.ownerId || OWNER_ID) === OWNER_ID) {
       names.add('create_project');
       names.add('vercel');
@@ -2234,7 +2236,7 @@ function quotaDay(date = new Date()) {
 /** Personal and platform tools every persona keeps whatever its contract lists (they still go through approval tiers and member restrictions): reminders, triggers, time, task list, memory, skills, helpers. */
 const CONTRACT_ALWAYS = new Set([
   'request_secret', 'kb_search', 'load_skill', 'manage_timer', 'manage_trigger',
-  'time_now', 'tasks', 'think', 'memory_file', 'search_chats',
+  'time_now', 'tasks', 'think', 'memory_file', 'search_chats', 'web_search', 'web_fetch',
   'spawn_agent', 'helpers', 'propose_skill', 'read_output', 'run_skill_script',
   'find_context', 'share_file', 'make_slides', 'read_slides', 'fetch_image', 'browse', 'create_project', 'vercel', 'turbo_inspect', 'read_image_text', 'understand_image', 'generate_image', 'repo_sync',
   'create_file', 'write_file', 'read_file', 'list_dir', 'grep', 'glob', 'apply_patch',

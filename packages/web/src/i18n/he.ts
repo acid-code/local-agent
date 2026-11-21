@@ -1468,6 +1468,8 @@ export const he: Record<string, string> = {
   "Steering added to the active run.": "ההכוונה נוספה לריצה הפעילה.",
   "Copy file names": "העתקת שמות הקבצים",
   "Undo": "ביטול",
+  "Undo plan": "ביטול שינוי התוכנית",
+  "Plan change undone.": "שינוי התוכנית בוטל.",
   "file": "קובץ",
   "files": "קבצים",
 };

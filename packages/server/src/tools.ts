@@ -106,6 +106,9 @@ export async function searxngHealth(base: string, fetchImpl: typeof fetch): Prom
   if (!base.trim()) return { ok: false, detail: 'SearXNG is not configured. Start it from Setup.' };
   try {
     const result = await searxngQuery(base, 'local-agent health check', fetchImpl, undefined, 3);
+    if (!result.hits.length) {
+      return { ok: false, detail: `SearXNG answered at ${base.replace(/\/$/, '')}, but returned no search results.${result.unresponsive.length ? ` ${result.unresponsive.length} engine${result.unresponsive.length === 1 ? '' : 's'} did not answer.` : ''}` };
+    }
     const partial = result.partial ? ` ${result.unresponsive.length} engine${result.unresponsive.length === 1 ? '' : 's'} did not answer.` : '';
     return { ok: true, detail: `SearXNG answered JSON at ${base.replace(/\/$/, '')} with ${result.hits.length} result${result.hits.length === 1 ? '' : 's'}.${partial}` };
   } catch (error) {

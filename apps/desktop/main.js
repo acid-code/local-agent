@@ -1,8 +1,8 @@
-const { app, BrowserWindow, Menu, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require('electron');
 // Downloads (Save in the file viewer) ask where to put the file with the native save dialog.
 const fs = require('fs');
 const path = require('path');
-const { startUpdates } = require('./updater');
+const { startUpdates, checkUpdates } = require('./updater');
 
 const SETUP = path.join(__dirname, 'setup.html');
 
@@ -144,6 +144,10 @@ function createWindow() {
             else win.webContents.reload();
           },
         },
+        {
+          label: `Check for updates…  (v${app.getVersion()})`,
+          click: () => { void checkUpdates(win).catch((error) => dialog.showErrorBox('Update check failed', error.message)); },
+        },
         { type: 'separator' },
         { role: 'quit' },
       ],
@@ -168,6 +172,19 @@ function createWindow() {
 }
 
 ipcMain.handle('get-url', () => readUrl());
+
+ipcMain.handle('get-app-info', () => ({
+  name: app.getName(),
+  version: app.getVersion(),
+  packaged: app.isPackaged,
+  platform: process.platform,
+}));
+
+ipcMain.handle('check-for-updates', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win) return { ok: false, error: 'Window unavailable.' };
+  return checkUpdates(win).then((result) => ({ ok: true, result })).catch((error) => ({ ok: false, error: error.message }));
+});
 
 ipcMain.handle('open-setup', (event, message) => {
   const win = BrowserWindow.fromWebContents(event.sender);
