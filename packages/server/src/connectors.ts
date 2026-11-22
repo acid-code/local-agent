@@ -503,7 +503,10 @@ export function browseTool(): Tool {
             fileRef = `Screenshot saved: [file:${saved.id}] (call understand_image with file_id="${saved.id}" to inspect its visual look, layout, and colors).\n`;
           }
           const actionSummary = result.log.length ? `Actions: ${result.log.join(' → ')}\n` : '';
-          const loginHint = result.loginDetected ? '\n[Note: a password field is on this page. Do not type passwords; ask the owner to take over to sign in.]' : '';
+          if (result.loginDetected && ctx.computer && ctx.runId) {
+            await ctx.computer.pauseForLogin(ctx.runId, ctx.agent.name, result.href || url, ctx.signal);
+          }
+          const loginHint = result.loginDetected ? '\n[Note: a password field is on this page. Owner took over to sign in and returned control.]' : '';
           return `Title: ${result.title || '(untitled)'}\nURL: ${result.href || url}\n${fileRef}${actionSummary}\n${result.text || '(empty page)'}${loginHint}`;
         } catch (error) {
           if (/Refused:|blocked|private|loopback|Password/i.test((error as Error).message)) throw error;
