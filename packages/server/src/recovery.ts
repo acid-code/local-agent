@@ -43,7 +43,7 @@ export function recoveryHint(tool: string, error: string): string {
 }
 
 /** Checks a final reply. `retry` means send it back to the model with `note`; `footer` means append it to the reply. */
-export function checkFinalReply(steps: StepRow[], reply: string, rounds: number, turnsLeft: number, hebrew = false, availableTools: string[] = []): { action: 'ok' } | { action: 'retry'; note: string; reason: string } | { action: 'footer'; footer: string; reason: string } {
+export function checkFinalReply(steps: StepRow[], reply: string, rounds: number, turnsLeft: number, hebrew = false, availableTools: string[] = [], acceptance: string[] = []): { action: 'ok' } | { action: 'retry'; note: string; reason: string } | { action: 'footer'; footer: string; reason: string } {
   const missed = falseInability(reply, availableTools);
   if (missed && rounds < MAX_RECOVERY_ROUNDS && turnsLeft > 1) {
     return {
@@ -53,7 +53,7 @@ export function checkFinalReply(steps: StepRow[], reply: string, rounds: number,
     };
   }
   const verdict = falseSuccess(steps, reply, 'completed');
-  if (!verdict.flagged) return doneCheck(steps, reply, rounds, turnsLeft, availableTools);
+  if (!verdict.flagged) return doneCheck(steps, reply, rounds, turnsLeft, availableTools, acceptance);
   const failed = steps.filter((step) => verdict.failedTools.includes(step.name) && (step.status === 'failed' || step.error));
   const detail = failed.slice(-3).map((step) => `${step.name}: ${String(step.error ?? step.output ?? 'failed').slice(0, 200)}`).join('\n');
   if (rounds < MAX_RECOVERY_ROUNDS && turnsLeft > 1) {
@@ -103,7 +103,7 @@ function alreadyAsked(steps: Pick<StepRow, 'kind' | 'name' | 'output'>[], marker
 }
 
 /** After the honesty checks: no promise-only endings, and code edits get verified before the run ends (once each). */
-export function doneCheck(steps: StepRow[], reply: string, rounds: number, turnsLeft: number, availableTools: string[] = []): { action: 'ok' } | { action: 'retry'; note: string; reason: string } {
+export function doneCheck(steps: StepRow[], reply: string, rounds: number, turnsLeft: number, availableTools: string[] = [], acceptance: string[] = []): { action: 'ok' } | { action: 'retry'; note: string; reason: string } {
   if (turnsLeft <= 1 || rounds >= MAX_RECOVERY_ROUNDS) return { action: 'ok' };
   if (promiseOnly(reply) && !alreadyAsked(steps, 'Promised')) {
     return {
@@ -118,5 +118,33 @@ export function doneCheck(steps: StepRow[], reply: string, rounds: number, turns
       note: `\n\nVERIFY BEFORE ANSWERING: you changed ${edited.join(', ')} but ran nothing since. Run the project's tests, typecheck or build (or execute the changed code) with shell, fix what fails, then answer with what you ran and its result. If nothing can be run here, say so plainly in your answer.`,
     };
   }
+  const pending = acceptance.length ? unmetChecks(steps, acceptance, availableTools.includes('shell')) : [];
+  if (pending.length && !alreadyAsked(steps, 'Acceptance checks')) {
+    return {
+      action: 'retry', reason: `Acceptance checks not verified (${pending.length})`,
+      note: `\n\nACCEPTANCE CHECKS: your plan said the work is done when these hold, and they are not verified yet:\n${pending.map((item) => `- ${item}`).join('\n')}\nRun the commands (after your last edit) and check the rest, fix what fails, then answer with each check and its result (pass/fail).`,
+    };
+  }
   return { action: 'ok' };
+}
+
+/** Commands named in backticks inside a check, e.g. "`npm test` passes" -> ["npm test"]. */
+export function checkCommands(check: string): string[] {
+  return [...check.matchAll(/`([^`]+)`/g)].map((match) => match[1]!.trim()).filter(Boolean);
+}
+
+/**
+ * Checks not verified yet. A check with a command needs a successful shell run containing that command after the
+ * last edit; a check without one needs the run to have done something after the plan (any completed tool step).
+ */
+export function unmetChecks(steps: Pick<StepRow, 'kind' | 'name' | 'status' | 'input' | 'output' | 'error' | 'index'>[], checks: string[], canRun: boolean): string[] {
+  const done = steps.filter((step) => step.kind === 'tool' && step.status === 'completed' && !step.error);
+  const lastEdit = Math.max(-1, ...done.filter((step) => EDIT_TOOLS.has(step.name)).map((step) => step.index));
+  const planAt = Math.max(-1, ...done.filter((step) => step.name === 'plan' && Array.isArray((step.input as { checks?: unknown })?.checks)).map((step) => step.index));
+  const okShell = done.filter((step) => step.name === 'shell' && step.index > lastEdit && !/^exit [1-9]\d*\b/m.test(typeof step.output === 'string' ? step.output : ''));
+  return checks.filter((check) => {
+    const commands = checkCommands(check);
+    if (commands.length) return canRun && !commands.every((command) => okShell.some((step) => String((step.input as { command?: unknown })?.command ?? '').includes(command)));
+    return !done.some((step) => step.index > planAt && step.name !== 'plan');
+  });
 }

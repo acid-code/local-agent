@@ -44,6 +44,7 @@ const toolSchemas: Record<string, z.ZodTypeAny> = {
     itemId: z.string().min(1).optional().describe('Id of one plan item to update instead of replacing the plan.'),
     status: z.string().optional().describe('New status for itemId: pending, doing, done, or blocked.'),
     text: z.string().optional().describe('New text for itemId.'),
+    checks: z.array(z.string().min(1)).max(10).optional().describe('Acceptance checks that prove the work is done, e.g. "`npm test` passes" or "README lists the new flag". Commands in backticks are run-verified before the run may finish.'),
   }),
   git: z.object({
     action: z.enum(['status', 'diff', 'log', 'fetch', 'branch', 'checkout', 'commit', 'pull', 'push', 'force-push', 'revert', 'open_pr']),

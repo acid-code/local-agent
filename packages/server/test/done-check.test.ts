@@ -34,3 +34,29 @@ describe('done check', () => {
     expect(doneCheck([], "I'll run the build now.", 2, 5).action).toBe('ok');
   });
 });
+
+describe('acceptance checks from the plan', () => {
+  it('needs a passing run of each named command after the last edit', async () => {
+    const { unmetChecks, checkCommands } = await import('../src/recovery.js');
+    expect(checkCommands('`npm test` and `npm run typecheck` pass')).toEqual(['npm test', 'npm run typecheck']);
+    const checks = ['`npm test` passes', 'README mentions the flag'];
+    const base = [step(1, 'plan', { items: ['x'], checks }), step(2, 'write_file', { path: 'src/a.ts' })];
+    expect(unmetChecks(base, checks, true)).toEqual(['`npm test` passes']);
+    expect(unmetChecks([...base, step(3, 'shell', { command: 'npm test' }, 'tool', 'completed', 'exit 1\nfail')], checks, true)).toEqual(['`npm test` passes']);
+    expect(unmetChecks([...base, step(3, 'shell', { command: 'cd api && npm test' }, 'tool', 'completed', 'exit 0\nok')], checks, true)).toEqual([]);
+    // A later edit needs a fresh run.
+    expect(unmetChecks([...base, step(3, 'shell', { command: 'npm test' }), step(4, 'apply_patch', { patch: 'src/b.ts' })], checks, true)).toEqual(['`npm test` passes']);
+    // Without shell nothing can be run, so command checks do not block.
+    expect(unmetChecks(base, ['`npm test` passes'], false)).toEqual([]);
+    expect(unmetChecks([step(1, 'plan', { items: ['x'], checks })], ['README mentions the flag'], true)).toEqual(['README mentions the flag']);
+  });
+
+  it('the done check sends back unverified acceptance checks once', () => {
+    const steps = [step(1, 'plan', { items: ['x'], checks: ['`npm test` passes'] }), step(2, 'shell', { command: 'ls' })];
+    const first = doneCheck(steps, 'All done.', 0, 5, ['shell'], ['`npm test` passes']);
+    expect(first).toMatchObject({ action: 'retry' });
+    expect((first as { note: string }).note).toMatch(/ACCEPTANCE CHECKS/);
+    const asked = [...steps, step(3, 'verify', {}, 'contract', 'completed', 'Sent back: Acceptance checks not verified (1)')];
+    expect(doneCheck(asked, 'All done.', 1, 5, ['shell'], ['`npm test` passes']).action).toBe('ok');
+  });
+});

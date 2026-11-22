@@ -85,3 +85,22 @@ describe('loop breaker', () => {
     await built.app.close();
   });
 });
+
+describe('plan acceptance checks in a run', () => {
+  it('a plan with checks blocks the first "done" until the check was looked at', async () => {
+    const built = await setup();
+    built.store.updateSession(built.session.id, { mode: 'code' } as never);
+    built.provider.steps = [
+      { toolCalls: [call('p1', 'plan', { items: ['Update notes'], checks: ['notes.txt says first'] })] },
+      { text: 'All done.' },
+      { toolCalls: [call('r1', 'read_file', { path: 'notes.txt' })] },
+      { text: 'Done: notes.txt says first (pass).' },
+    ];
+    const row = await built.engine.startTurn({ sessionId: built.session.id, agentId: built.agent.id, content: 'check notes' });
+    const run = await finished(built, row.id);
+    expect(run.status).toBe('completed');
+    expect(run.cursor.acceptance).toEqual(['notes.txt says first']);
+    expect(built.store.listSteps(row.id).some((s) => s.kind === 'contract' && /Acceptance checks/.test(String(s.output)))).toBe(true);
+    await built.app.close();
+  });
+});

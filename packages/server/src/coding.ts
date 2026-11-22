@@ -266,8 +266,8 @@ export async function scaffoldProject(input: {
 export const CODING_TOOLS: Tool[] = [
   {
     name: 'plan',
-    description: 'Replace or update the visible plan for this coding session. The owner can edit it too.',
-    parameters: obj({ items: { type: 'array', items: { type: 'string' } }, itemId: { type: 'string' }, status: { type: 'string' }, text: { type: 'string' } }),
+    description: 'Replace or update the visible plan for this coding session. The owner can edit it too. With items, also pass checks: 1-5 acceptance checks that prove it is done (put commands in backticks, e.g. "`npm test` passes"); the run cannot finish until they are verified.',
+    parameters: obj({ items: { type: 'array', items: { type: 'string' } }, itemId: { type: 'string' }, status: { type: 'string' }, text: { type: 'string' }, checks: { type: 'array', items: { type: 'string' } } }),
     mutates: () => false,
     approval: () => null,
     async execute(args, ctx) {
@@ -275,7 +275,13 @@ export const CODING_TOOLS: Tool[] = [
       if (!sessionId) throw new Error('No session.');
       if (Array.isArray(args.items)) {
         const plan = replacePlan(ctx.store, sessionId, (args.items as unknown[]).map(String).slice(0, 20), ctx.runId);
-        return (plan?.items ?? []).map((item, index) => `${index + 1}. [${item.status}] ${item.text}`).join('\n') || 'Plan cleared.';
+        const checks = Array.isArray(args.checks) ? (args.checks as unknown[]).map(String).map((item) => item.trim()).filter(Boolean).slice(0, 10) : [];
+        if (checks.length && ctx.runId) {
+          const run = ctx.store.getRun(ctx.runId);
+          if (run) ctx.store.updateRun(run.id, { cursor: { ...run.cursor, acceptance: checks } });
+        }
+        const listed = (plan?.items ?? []).map((item, index) => `${index + 1}. [${item.status}] ${item.text}`).join('\n') || 'Plan cleared.';
+        return checks.length ? `${listed}\nAcceptance checks (verified before you finish):\n${checks.map((item) => `- ${item}`).join('\n')}` : listed;
       }
       if (args.itemId) {
         updatePlanItem(ctx.store, String(args.itemId), { status: args.status ? String(args.status) : undefined, text: args.text ? String(args.text) : undefined });

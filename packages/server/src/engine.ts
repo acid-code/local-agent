@@ -1137,7 +1137,7 @@ export class Engine {
     }
     if (!toolCalls?.length && text.trim()) {
       const rounds = current.cursor.recovery?.rounds ?? 0;
-      const check = checkFinalReply(this.store.listSteps(run.id), text, rounds, maxSteps - current.cursor.turn, this.replyLang(agent, this.userText(run)) === 'he', tools.map((t) => t.name));
+      const check = checkFinalReply(this.store.listSteps(run.id), text, rounds, maxSteps - current.cursor.turn, this.replyLang(agent, this.userText(run)) === 'he', tools.map((t) => t.name), this.store.getRun(run.id)?.cursor.acceptance ?? []);
       if (check.action === 'retry') {
         this.store.updateStep(step.id, { status: 'completed', output: { text, discarded: check.reason }, tokensIn: usage.inputTokens, tokensOut: usage.outputTokens, costUsd: cost, latencyMs: Date.now() - started, endedAt: now() });
         this.store.addStep({ runId: run.id, kind: 'contract', name: 'verify', status: 'completed', input: { round: rounds + 1 }, output: `Sent back: ${check.reason}`, toolCallId: null, turn: current.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now() });

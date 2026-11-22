@@ -114,6 +114,8 @@ export interface RunCursor {
   toolFallback?: boolean;
   /** Tool calls with malformed arguments so far in this run (capped). */
   badArgs?: number;
+  /** Acceptance checks from the plan; the done check verifies them before the run may finish. */
+  acceptance?: string[];
   /** Model the run left for the uncensored fallback, and the turn the fallback answers; the run returns after it. */
   uncensoredFrom?: string;
   uncensoredAt?: number;
