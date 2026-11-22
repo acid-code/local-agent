@@ -270,6 +270,7 @@ export function PersonaStatePanel({ agent, sessions, tick, onClose, onOpenSessio
                     <span className={`computer-thumb${wbActive ? ' awake' : ''}`} aria-hidden><Face agent={agent} size={26} /></span>
                   </div>
                   {resources && <p className="faint state-detail">{t('Disk')}{' '}{(resources.current.disk.freeBytes / 1024 ** 3).toFixed(0)}{' '}{t('GB free')}{resources.current.gpu?.name ? ` · ${resources.current.gpu.name}` : t(' · no GPU')}</p>}
+                  {isOwner() && <Link className="link-btn state-more" to="/computer">{t('Open live view')}</Link>}
                 </>
               );
             })()}

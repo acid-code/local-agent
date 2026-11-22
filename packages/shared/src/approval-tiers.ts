@@ -28,6 +28,20 @@ export function riskOf(tool: string, args: Record<string, unknown>, declared: st
     return { tier: 'low', why: `Shell command: ${command.slice(0, 160)}` };
   }
   if (tool === 'docker_rm') return { tier: 'high', why: declared ?? 'Remove a container' };
+  if (tool === 'browse') {
+    const url = String(args.url ?? '');
+    const actions = Array.isArray(args.actions) ? (args.actions as { type?: string; url?: string; selector?: string; text?: string }[]) : [];
+    const payUrl = /\/(checkout|pay(ment)?|billing|cart|order|purchase|buy)\b/i;
+    const payText = /\b(pay\s*now|buy\s*now|place\s*order|complete\s*(purchase|order|payment)|checkout|submit\s*payment|confirm\s*purchase|purchase)\b/i;
+    const onPay = payUrl.test(url) || actions.some((a) => a.type === 'navigate' && payUrl.test(String(a.url ?? '')));
+    const isPaySubmit = actions.some((a) => {
+      const target = `${a.selector ?? ''} ${a.text ?? ''}`;
+      if (a.type === 'submit') return onPay || payText.test(target);
+      if (a.type === 'click') return payText.test(target) || (onPay && /\b(submit|confirm|continue|buy|pay|order)\b/i.test(target));
+      return false;
+    });
+    if (isPaySubmit) return { tier: 'high', why: 'Submit or purchase action on a payment/checkout page' };
+  }
   // Skills keep their last versions and can be deleted, so text-only skills are reversible: a new one is low, an update
   // medium. A skill that ships a script runs code for every persona, so it always asks.
   if (tool === 'propose_skill') {

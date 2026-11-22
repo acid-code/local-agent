@@ -16,6 +16,7 @@ import { Schedules } from './pages/Schedules';
 import { Skills } from './pages/Skills';
 import { Triggers } from './pages/Triggers';
 import { Settings } from './pages/Settings';
+import { Computer } from './pages/Computer';
 import { Tools } from './pages/Tools';
 import { Workspace } from './pages/Workspace';
 import { loadAccountTheme } from './lib/theme';
@@ -103,6 +104,7 @@ export function App() {
         {owner && <Route path="/triggers" element={<Triggers />} />}
         {owner && <Route path="/setup" element={<Navigate to="/settings#system" replace />} />}
         {owner && <Route path="/resources" element={<Resources />} />}
+        {owner && <Route path="/computer" element={<Computer />} />}
         <Route path="/settings" element={<Settings role={owner ? 'owner' : 'member'} />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

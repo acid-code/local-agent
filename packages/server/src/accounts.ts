@@ -202,6 +202,7 @@ export const MEMBER_DENIED_TOOLS = new Set([
   'manage_trigger',
   // Skills are one shared catalog the owner curates.
   'propose_skill',
+  'browse',
 ]);
 
 /**

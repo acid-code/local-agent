@@ -20,6 +20,8 @@ export interface ToolContext {
   docker: DockerCtl;
   /** Shared long-lived shell container (LA_SHELL=workbench, the default). */
   workbench?: import('./workbench.js').Workbench | null;
+  browser?: import('./browser.js').ManagedBrowser | null;
+  computer?: import('./live-computer.js').ComputerControl | null;
   fetchImpl: typeof fetch;
   searxngUrl: string;
   sandbox: Settings['sandbox'];
@@ -267,7 +269,10 @@ export const BUILTIN_TOOLS: Tool[] = [
       if (ctx.sandbox !== 'host' && ctx.docker.available() && ctx.workbench && workbenchEnabled()) {
         try {
           const result = await ctx.workbench.run(command, cwd, shellTimeoutMs());
-          if (result) return `exit ${result.code}\n${clipToolOutput(result.output)}`;
+          if (result) {
+            ctx.computer?.recordShell({ runId: ctx.runId ?? null, persona: ctx.agent.name, command, output: result.output, code: result.code });
+            return `exit ${result.code}\n${clipToolOutput(result.output)}`;
+          }
         } catch (error) {
           ctx.store.addLog('warn', `Workbench unavailable, using a throwaway container: ${(error as Error).message}`, undefined, 'workbench');
         }
@@ -292,6 +297,7 @@ export const BUILTIN_TOOLS: Tool[] = [
             PidsLimit: 256,
           },
         }, shellTimeoutMs());
+        ctx.computer?.recordShell({ runId: ctx.runId ?? null, persona: ctx.agent.name, command, output: result.output, code: result.code });
         return `exit ${result.code}\n${clipToolOutput(result.output)}`;
       }
       if (ctx.sandbox === 'docker-only') throw new Error('Docker sandbox is required and the Docker socket is not available.');

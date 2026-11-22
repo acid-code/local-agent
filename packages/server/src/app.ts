@@ -3,6 +3,8 @@ import { isDiskFullError } from './resources.js';
 import { isLlamaServerProvider } from './coexist.js';
 import { MemoryBudget, budgetConfig, systemProbe, type MemoryProbe } from './memory.js';
 import { Workbench } from './workbench.js';
+import { ManagedBrowser } from './browser.js';
+import { ComputerControl, registerLiveComputer } from './live-computer.js';
 import { toHostBindPath } from './tools.js';
 import path from 'node:path';
 import { ensureFilesTable } from './files.js';
@@ -44,6 +46,8 @@ export interface BuiltApp {
   scheduler: Scheduler;
   mcp: McpRuntime;
   workbench: Workbench | null;
+  browser: ManagedBrowser | null;
+  computer: ComputerControl;
   config: ReturnType<typeof loadConfig>;
 }
 
@@ -56,6 +60,7 @@ export async function buildApp(options: {
   /** RAM probe override (tests). Without one, mocked-provider builds and unit tests skip the RAM budget. */
   memoryProbe?: MemoryProbe;
   workbench?: Workbench | null;
+  browser?: ManagedBrowser | null;
   startScheduler?: boolean;
   serveWeb?: boolean;
 }): Promise<BuiltApp> {
@@ -81,6 +86,12 @@ export async function buildApp(options: {
     ? options.workbench
     : new Workbench(docker, path.join(config.dataDir, 'workspaces'), () => engine.memory, toHostBindPath);
   engine.workbench = workbench;
+  const browser = options.browser !== undefined
+    ? options.browser
+    : new ManagedBrowser(docker, config.dataDir, () => engine.memory, toHostBindPath);
+  engine.browser = browser;
+  const computer = new ComputerControl(bus);
+  engine.computer = computer;
   const triggers = new TriggerRuntime(store, engine, vault, bus);
   const mcp = new McpRuntime(store, docker, { secretsFor: (id) => vault.mcpEnv(id), cacheDir: path.join(config.dataDir, 'mcp-cache') });
   engine.mcpTools = () => mcp.agentTools();
@@ -161,6 +172,7 @@ export async function buildApp(options: {
   });
 
   registerRoutes(app, { store, engine, bus, docker, mcp, vault, notifier, config, fetchImpl: options.fetchImpl ?? fetch, autoConnectors: options.startScheduler !== false && !process.env.VITEST });
+  registerLiveComputer(app, { control: computer, browser });
 
   if (options.serveWeb !== false && fs.existsSync(config.webDist)) {
     await app.register(fastifyStatic, {
@@ -207,10 +219,11 @@ export async function buildApp(options: {
     notifier.stop();
     triggers.stop();
     await workbench?.stop().catch(() => undefined);
+    await browser?.stop().catch(() => undefined);
     await mcp.closeAll().catch(() => undefined);
     for (const timer of background) clearInterval(timer);
     store.close();
   });
 
-  return { app, store, engine, bus, vault, scheduler, config, mcp, workbench };
+  return { app, store, engine, bus, vault, scheduler, config, mcp, workbench, browser, computer };
 }
