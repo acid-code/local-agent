@@ -246,7 +246,12 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
                 <Face agent={persona} size={36} />
                 <span className="label persona-text">
                   <span className="row persona-line"><span className="ellipsis persona-row-name" dir="auto">{persona.chat?.title && persona.chat.title !== 'New chat' ? persona.chat.title : `${persona.emoji ? `${persona.emoji} ` : ''}${persona.name}`}</span><span className="faint persona-when">{when(persona.lastMessage?.at)}</span></span>
-                  <span className="ellipsis faint persona-preview" dir="auto">{persona.lastMessage ? `${persona.lastMessage.role === 'user' ? t('You: ') : ''}${persona.lastMessage.text}` : (persona.title || t('Say hi'))}</span>
+                  <span className="ellipsis faint persona-preview" dir="auto">{(() => {
+                    if (!persona.lastMessage) return persona.title || t('Say hi');
+                    const pm = persona.lastMessage.text.match(/^\[persona-message\|[^|\]]+\|[^|\]]+\|[^|\]]+\|([^|\]]+)\|[^\]]*\]\s*/);
+                    if (pm) return `${t('From {0}', [pm[1]!])}: ${persona.lastMessage.text.slice(pm[0].length)}`;
+                    return `${persona.lastMessage.role === 'user' ? t('You: ') : ''}${persona.lastMessage.text}`;
+                  })()}</span>
                 </span>
                 {persona.unread && persona.notify !== 'mute' ? <span className="unread-dot" role="status" aria-label={`${persona.unread} unread`} /> : null}
               </button>
