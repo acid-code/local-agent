@@ -22,7 +22,9 @@ describe('risk tiers', () => {
     expect(riskOf('docker_rm', { id: 'x' }, 'Remove').tier).toBe('high');
     expect(riskOf('gmail__send_email', {}, null).tier).toBe('high');
     expect(riskOf('github__list_issues', {}, null).tier).toBe('safe');
-    expect(riskOf('propose_skill', {}, 'Save skill').tier).toBe('high');
+    expect(riskOf('propose_skill', {}, 'Save skill').tier).toBe('low');
+    expect(riskOf('propose_skill', { slug: 'build' }, 'Update skill').tier).toBe('medium');
+    expect(riskOf('propose_skill', { scriptName: 'x.sh', scriptBody: 'echo' }, 'Save skill').tier).toBe('high');
   });
   it('does not treat /dev/null or 2>&1 redirects as file writes', () => {
     const readOnly = [

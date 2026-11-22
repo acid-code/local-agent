@@ -2482,3 +2482,7 @@ button.state-card:hover, a.state-card:hover { background: var(--bg-3); }
 .trace-pane { padding: 0 12px 16px; min-width: 0; }
 .trace .faint { padding-inline: 12px; }
 .trace-step.stopped .trace-ico { color: var(--muted); }
+
+/* Text-styled button for inline actions in chips ("Saved skill X · Edit · Delete"). */
+.link-button { background: none; border: 0; padding: 0; font: inherit; color: var(--accent, inherit); text-decoration: underline; cursor: pointer; }
+.link-button:hover { opacity: 0.8; }

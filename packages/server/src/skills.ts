@@ -85,8 +85,40 @@ export async function saveSkill(store: Store, dataDir: string, raw: string, slug
   store.db.prepare('INSERT INTO skill_versions (id, slug, version, name, description, body, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
     nid('skv'), slug, version, parsed.name, parsed.description, parsed.body, ts,
   );
+  // History keeps the last few versions; older ones are dropped.
+  store.db.prepare(`DELETE FROM skill_versions WHERE slug = ? AND version NOT IN (
+    SELECT version FROM skill_versions WHERE slug = ? ORDER BY version DESC LIMIT ?)`).run(slug, slug, SKILL_VERSIONS_KEPT);
   await writeSkillFile(dataDir, slug, renderSkillMd(parsed));
   return { slug, ...parsed, version, updatedAt: ts };
+}
+
+/** How many versions of a skill stay restorable. */
+export const SKILL_VERSIONS_KEPT = 3;
+
+/** Saves an older version's text as the newest version, so history stays linear and the restore can be undone too. */
+export async function restoreSkillVersion(store: Store, dataDir: string, slug: string, version: number): Promise<SkillRecord> {
+  const row = store.db.prepare('SELECT name, description, body FROM skill_versions WHERE slug = ? AND version = ?').get(slug, version) as
+    { name: string; description: string; body: string } | undefined;
+  if (!row) throw new Error(`Skill ${slug} has no version ${version}.`);
+  return saveSkill(store, dataDir, renderSkillMd(row), slug);
+}
+
+/** Removes a skill, its history, per-persona switches and its folder (SKILL.md, scripts, assets). */
+export async function deleteSkill(store: Store, dataDir: string, slug: string): Promise<boolean> {
+  const row = store.db.prepare('SELECT slug FROM skills WHERE slug = ?').get(slug) as { slug: string } | undefined;
+  if (!row) return false;
+  store.db.exec('BEGIN IMMEDIATE');
+  try {
+    for (const table of ['skill_versions', 'agent_skills', 'skills']) store.db.prepare(`DELETE FROM ${table} WHERE slug = ?`).run(row.slug);
+    store.db.exec('COMMIT');
+  } catch (error) {
+    store.db.exec('ROLLBACK');
+    throw error;
+  }
+  const root = path.resolve(dataDir, 'skills');
+  const dir = path.resolve(root, row.slug);
+  if (dataDir && dir.startsWith(`${root}${path.sep}`)) await fs.rm(dir, { recursive: true, force: true });
+  return true;
 }
 
 export function skillVersions(store: Store, slug: string) {

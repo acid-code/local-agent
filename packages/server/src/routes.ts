@@ -33,7 +33,7 @@ import {
   KbInputError, createCollection, deleteCollection, deleteDocument, embedRoleWarning, listDocuments, formatCitations, ingestBuffer, ingestFolder, kbUsage, listCollections, ollamaEmbedder, searchKnowledge,
 } from './kb.js';
 import {
-  exportSkill, importSkill, listSkills, parseSkillMd, saveSkill, setSkillEnabled, skillFit, skillVersions,
+  deleteSkill, exportSkill, importSkill, listSkills, parseSkillMd, restoreSkillVersion, saveSkill, setSkillEnabled, skillFit, skillVersions,
 } from './skills.js';
 import {
   createTrigger, fireTrigger, getTrigger, githubSignatureOk, listTriggerEvents, listTriggers, secretEquals, triggerSecret, updateTrigger,
@@ -2082,6 +2082,18 @@ function registerLibrary(app: FastifyInstance, ctx: Ctx, ocr: ReturnType<typeof 
     const skill = listSkills(store).find((item) => item.slug === slug);
     if (!skill) throw http(404, 'Skill not found.');
     return { skill, versions: skillVersions(store, slug), markdown: `---\nname: ${skill.name}\ndescription: ${skill.description}\n---\n\n${skill.body}\n` };
+  });
+  app.delete('/api/skills/:slug', async (req) => {
+    const { slug } = req.params as { slug: string };
+    if (!(await deleteSkill(store, config.dataDir, slug))) throw http(404, 'Skill not found.');
+    store.addLog('info', `Deleted skill ${slug}.`, undefined, 'skills');
+    return { ok: true };
+  });
+  app.post('/api/skills/:slug/restore', async (req) => {
+    const { slug } = req.params as { slug: string };
+    const body = parse(z.object({ version: z.number().int().positive() }), req.body);
+    if (!listSkills(store).some((item) => item.slug === slug)) throw http(404, 'Skill not found.');
+    try { return { skill: await restoreSkillVersion(store, config.dataDir, slug, body.version) }; } catch (error) { throw http(404, error instanceof Error ? error.message : String(error)); }
   });
   app.post('/api/skills/:slug/enable', async (req) => {
     const body = parse(z.object({ agentId: z.string(), enabled: z.boolean() }), req.body);

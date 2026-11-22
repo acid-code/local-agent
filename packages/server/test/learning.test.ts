@@ -91,24 +91,30 @@ describe('capped memory files', () => {
 });
 
 describe('skill learning loop', () => {
-  it('saves a proposed skill only after approval, keeps bodies out of the catalog, and is owner-only', async () => {
+  it('saves a text-only skill without asking, asks for scripts, keeps bodies out of the catalog, and is owner-only', async () => {
     const built = await setup();
     const agent = await built.persona(built.owner, 'Ada');
     const session = built.store.createSession({ agentId: agent.id, ownerId: agent.ownerId });
     const body = 'SECRET-BODY-STEP: run tsc in shared first.';
     built.provider.steps = [{ toolCalls: [{ id: 's1', name: 'propose_skill', arguments: JSON.stringify({ name: 'Build monorepo', description: 'Build and typecheck the local-agent monorepo.', body }) }] }, { text: 'Saved.' }];
     const run = await built.engine.startTurn({ sessionId: session.id, agentId: agent.id, content: 'remember how to build' });
-    await waitFor(() => built.store.getRun(run.id)?.status === 'awaiting_approval');
-    const approval = built.store.listApprovals('pending').find((row) => row.runId === run.id)!;
-    expect(approval.reason).toMatch(/Save new skill “Build monorepo”/);
-    expect(listSkills(built.store).some((skill) => skill.name === 'Build monorepo')).toBe(false);
-    built.engine.decideApproval(approval.id, 'approved');
     await waitFor(() => built.store.getRun(run.id)?.status === 'completed');
     const skill = listSkills(built.store).find((item) => item.name === 'Build monorepo')!;
     expect(skill).toBeTruthy();
+    const saved = built.store.listMessages(session.id).find((message) => message.role === 'tool' && message.toolName === 'propose_skill')!;
+    expect(saved.content).toMatch(new RegExp(`^Saved shared skill ${skill.slug} v1\\.`));
     const catalog = skillCatalog(built.store, agent.id, 'build the monorepo');
     expect(catalog).toContain(skill.slug);
     expect(catalog).not.toContain('SECRET-BODY-STEP');
+
+    // A skill with a script runs code for every persona, so it still asks.
+    built.provider.steps = [{ toolCalls: [{ id: 's2', name: 'propose_skill', arguments: JSON.stringify({ name: 'Check box', description: 'Check the box health.', body: 'Run the check script and read its output carefully.', scriptName: 'check.sh', scriptBody: 'echo ok' }) }] }, { text: 'Saved.' }];
+    const scripted = await built.engine.startTurn({ sessionId: session.id, agentId: agent.id, content: 'save a script' });
+    await waitFor(() => built.store.getRun(scripted.id)?.status === 'awaiting_approval');
+    expect(listSkills(built.store).some((item) => item.name === 'Check box')).toBe(false);
+    const approval = built.store.listApprovals('pending').find((row) => row.runId === scripted.id)!;
+    built.engine.decideApproval(approval.id, 'denied');
+    await waitFor(() => built.store.getRun(scripted.id)?.status === 'completed');
 
     // Update proposals name the next version.
     const proposal = built.engine.tools(built.store.getAgent(agent.id)!, 'chat', undefined, undefined, false, undefined, true).find((tool) => tool.name === 'propose_skill')!;

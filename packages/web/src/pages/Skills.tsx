@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api, post } from '../lib/api';
 import { EmptyState, PageHeader } from '../components/ui';
 import { Plus, Sparkles } from 'lucide-react';
 import { t } from '../i18n';
+import { toast } from '../lib/toast';
 
 interface Skill { slug: string; name: string; description: string; version: number; enabled?: boolean }
 interface Agent { id: string; name: string }
@@ -22,6 +24,7 @@ export function Skills() {
   const [markdown, setMarkdown] = useState(STARTER);
   const [slug, setSlug] = useState('');
   const [versions, setVersions] = useState<{ version: number; createdAt: string }[]>([]);
+  const [params, setParams] = useSearchParams();
   const [sample, setSample] = useState('Summarize this paper for me.');
   const [fits, setFits] = useState<Fit[]>([]);
   const [bundle, setBundle] = useState('');
@@ -32,6 +35,28 @@ export function Skills() {
     setAgents((await api<{ agents: Agent[] }>('/api/agents')).agents);
   }
   useEffect(() => { void load(); }, []);
+  // Links from the chat ("Saved skill X · Edit") open the editor on that skill.
+  useEffect(() => {
+    const target = params.get('open');
+    if (!target) return;
+    setAdding(true);
+    void open(target).catch(() => toast(t('That skill no longer exists.'), 'error'));
+  }, [params]);
+
+  async function remove(skill: Skill) {
+    if (!window.confirm(t('Delete the skill “{0}” and its history? Personas stop loading it.', [skill.name]))) return;
+    await api(`/api/skills/${skill.slug}`, { method: 'DELETE' });
+    if (slug === skill.slug) { setAdding(false); setSlug(''); setVersions([]); }
+    toast(t('Skill deleted.'), 'ok');
+    await load();
+  }
+
+  async function restore(version: number) {
+    const saved = await post<{ skill: Skill }>(`/api/skills/${slug}/restore`, { version });
+    toast(t('Restored v{0} as v{1}.', [version, saved.skill.version]), 'ok');
+    await load();
+    await open(slug);
+  }
 
   return (
     <div className="page">
@@ -41,6 +66,17 @@ export function Skills() {
         <label className="field"><span>{t('Slug, optional')}</span><input value={slug} onChange={(event) => setSlug(event.target.value)} placeholder="summarize-a-paper" /></label>
         <label className="field"><span>{t('SKILL.md')}</span><textarea value={markdown} rows={14} onChange={(event) => setMarkdown(event.target.value)} /></label>
         <button className="btn primary">{t('Save version')}</button>
+        {versions.length > 1 && (
+          <div className="section">
+            <p className="muted">{t('Earlier versions (the last 3 are kept):')}</p>
+            {versions.slice(1).map((version) => (
+              <div key={version.version} className="row">
+                <span className="mono">v{version.version}{' · '}{new Date(version.createdAt).toLocaleString()}</span>
+                <button className="btn" type="button" onClick={() => void restore(version.version)}>{t('Restore')}</button>
+              </div>
+            ))}
+          </div>
+        )}
       </form>
       )}
       {!adding && skills.length === 0 && <EmptyState icon={Sparkles} title={t('No skills yet')} action={<button className="btn primary" onClick={() => setAdding(true)}>{t('New skill')}</button>}>{t('Write a SKILL.md: a name, when to use it, and the steps. Every persona sees the catalog.')}</EmptyState>}
@@ -55,6 +91,7 @@ export function Skills() {
               const data = await api<{ skillMd: string; files: { path: string; content: string }[] }>(`/api/skills/${skill.slug}/export`);
               setBundle(JSON.stringify(data, null, 2));
             }}>{t('Export')}</button>
+            <button className="btn danger" onClick={() => void remove(skill)}>{t('Delete')}</button>
           </div>
           {agents.map((agent) => (
             <label key={agent.id} className="field">
@@ -64,7 +101,6 @@ export function Skills() {
           ))}
         </article>
       ))}
-      {versions.length > 0 && <p className="muted">{t('Versions:')}{' '}{versions.map((version) => `v${version.version}`).join(', ')}</p>}
       <form className="card" onSubmit={async (event) => { event.preventDefault(); setFits((await post<{ fits: Fit[] }>('/api/skills/test', { text: sample })).fits); }}>
         <label className="field"><span>{t('Test a message')}</span><textarea value={sample} onChange={(event) => setSample(event.target.value)} /></label>
         <button className="btn">{t('See which skill fits')}</button>
@@ -82,5 +118,6 @@ export function Skills() {
     setSlug(next);
     setMarkdown(data.markdown);
     setVersions(data.versions);
+    if (params.get('open')) setParams({}, { replace: true });
   }
 }

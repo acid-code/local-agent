@@ -123,10 +123,14 @@ export function proposeSkillTool(): Tool {
   };
 }
 
-/** Nudge after a task that took many steps; the agent decides whether it is worth a skill. */
-export function skillNudge(turn: number, toolNames: string[]): string {
-  if (turn < 4 || !toolNames.includes('propose_skill')) return '';
-  return '\n\nThis task has taken several steps. Before your final answer, if you found a reusable way to do it, call propose_skill once (or update the skill you used). Skip it for one-off work.';
+/**
+ * Nudge after a task that took many steps and worked: once per run, skipped when a skill was already saved this run
+ * or the latest tool step failed. New text-only skills save without asking; the chat shows "Saved skill X" with Edit/Delete.
+ */
+export function skillNudge(turn: number, toolNames: string[], run: { proposed?: boolean; lastFailed?: boolean; loaded?: string[] } = {}): string {
+  if (turn < 4 || !toolNames.includes('propose_skill') || run.proposed || run.lastFailed) return '';
+  const update = run.loaded?.length ? ` You used the skill ${run.loaded.join(', ')}: if you learned something new, update it with propose_skill and its slug instead.` : '';
+  return `\n\nThis task has taken several steps. Before your final answer, if it worked and the steps would help next time, call propose_skill once with concrete steps, commands and pitfalls. The user sees a notice and can edit or delete it. Skip it for one-off work.${update}`;
 }
 
 // ── Search past chats ────────────────────────────────────────────────────────

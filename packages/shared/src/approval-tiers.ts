@@ -27,7 +27,12 @@ export function riskOf(tool: string, args: Record<string, unknown>, declared: st
     return { tier: 'low', why: `Shell command: ${command.slice(0, 160)}` };
   }
   if (tool === 'docker_rm') return { tier: 'high', why: declared ?? 'Remove a container' };
-  if (tool === 'propose_skill') return { tier: 'high', why: declared ?? 'Save a skill' };
+  // Skills keep their last versions and can be deleted, so text-only skills are reversible: a new one is low, an update
+  // medium. A skill that ships a script runs code for every persona, so it always asks.
+  if (tool === 'propose_skill') {
+    if (args.scriptName || args.scriptBody) return { tier: 'high', why: declared ?? 'Save a skill with a script' };
+    return { tier: args.slug ? 'medium' : 'low', why: declared ?? 'Save a skill' };
+  }
   if (tool === 'git' && /push|remote|open_pr/.test(String(args.action ?? ''))) return { tier: 'high', why: declared ?? `git ${String(args.action)}` };
   if (SAFE_TOOLS.has(tool)) return { tier: declared ? 'low' : 'safe', why: declared ?? `${tool} (read-only)` };
   if (LOW_TOOLS.has(tool)) return { tier: 'low', why: declared ?? `${tool} in the workspace` };
