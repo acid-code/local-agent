@@ -81,27 +81,22 @@ export class LlamaWatch {
   }
 
   async switchToUncensored(): Promise<boolean> {
-    const configured = process.env.LLAMA_FALLBACK_CONTROL_URL?.trim();
-    const url = configured
-      ? configured.replace(/\/$/, '')
-      : 'http://host.docker.internal:8082';
-    try {
-      const response = await this.fetchImpl(`${url}/switch-uncensored`, {
-        method: 'POST',
-        signal: AbortSignal.timeout(180_000),
-      });
-      return response.ok;
-    } catch {
-      return false;
-    }
+    return this.callFallbackControl('/switch-uncensored');
   }
 
   async switchToQwen(): Promise<boolean> {
+    return this.callFallbackControl('/switch-qwen');
+  }
+
+  /** POST to the host's llama fallback-control service, sending the shared token when one is configured. */
+  private async callFallbackControl(path: string): Promise<boolean> {
     const configured = process.env.LLAMA_FALLBACK_CONTROL_URL?.trim();
     const url = (configured || 'http://host.docker.internal:8082').replace(/\/$/, '');
+    const token = process.env.LLAMA_FALLBACK_TOKEN?.trim();
     try {
-      const response = await this.fetchImpl(`${url}/switch-qwen`, {
+      const response = await this.fetchImpl(`${url}${path}`, {
         method: 'POST',
+        headers: token ? { 'X-Fallback-Token': token } : undefined,
         signal: AbortSignal.timeout(180_000),
       });
       return response.ok;

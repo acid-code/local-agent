@@ -231,3 +231,29 @@ describe('llama-server context size', () => {
     expect(inkling?.practicalBudget).toBe(32768);
   });
 });
+
+describe('fallback-control auth', () => {
+  it('sends the shared token header to the host switch service when configured', async () => {
+    const seen: { url: string; token: string | null }[] = [];
+    const fetchImpl = (async (url: string, init?: RequestInit) => {
+      seen.push({ url: String(url), token: new Headers(init?.headers).get('x-fallback-token') });
+      return new Response('{"ok":true}');
+    }) as unknown as typeof fetch;
+    const watch = new LlamaWatch({} as never, fetchImpl);
+    const prevUrl = process.env.LLAMA_FALLBACK_CONTROL_URL;
+    const prevToken = process.env.LLAMA_FALLBACK_TOKEN;
+    cleanup.push(() => {
+      if (prevUrl === undefined) delete process.env.LLAMA_FALLBACK_CONTROL_URL; else process.env.LLAMA_FALLBACK_CONTROL_URL = prevUrl;
+      if (prevToken === undefined) delete process.env.LLAMA_FALLBACK_TOKEN; else process.env.LLAMA_FALLBACK_TOKEN = prevToken;
+    });
+    process.env.LLAMA_FALLBACK_CONTROL_URL = 'http://ctl:8082/';
+    process.env.LLAMA_FALLBACK_TOKEN = 'tok-1';
+    expect(await watch.switchToQwen()).toBe(true);
+    delete process.env.LLAMA_FALLBACK_TOKEN;
+    expect(await watch.switchToUncensored()).toBe(true);
+    expect(seen).toEqual([
+      { url: 'http://ctl:8082/switch-qwen', token: 'tok-1' },
+      { url: 'http://ctl:8082/switch-uncensored', token: null },
+    ]);
+  });
+});

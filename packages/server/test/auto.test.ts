@@ -58,8 +58,10 @@ describe('auto routing', () => {
     expect(decideAuto({ text: 'fix the typo in the server readme', map: DEFAULT_AUTO_MAP, models }).modelId).toBe('coder');
     const detected = decideAuto({ text: 'Please explain the workshop to a new teammate in some detail.', map: { ...DEFAULT_AUTO_MAP, main: '' }, models: [coder, model({ id: 'qwen', name: 'qwen3.6:35b-a3b', apiName: 'qwen3.6:35b-a3b' })] });
     expect(detected.modelId).toBe('qwen');
-    const gemmaFirst = decideAuto({ text: 'Please explain the workshop to a new teammate in some detail.', map: DEFAULT_AUTO_MAP, models: [model({ id: 'qwen', name: 'qwen3.6:35b-a3b', apiName: 'qwen3.6:35b-a3b' }), main] });
-    expect(gemmaFirst.modelId).toBe('main');
+    // Qwen3.6 is the main brain: with both present (and an empty saved main slot), Auto picks Qwen, never gemma4.
+    const qwenFirst = decideAuto({ text: 'Please explain the workshop to a new teammate in some detail.', map: { ...DEFAULT_AUTO_MAP, main: '' }, models: [main, model({ id: 'qwen', name: 'qwen3.6:35b-a3b', apiName: 'qwen3.6:35b-a3b' })] });
+    expect(qwenFirst.modelId).toBe('qwen');
+    expect(DEFAULT_AUTO_MAP.main).toBe('qwen3.6-35b-a3b');
   });
 
   it('summarizes large models only after half the practical budget', () => {

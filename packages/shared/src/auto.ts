@@ -13,7 +13,7 @@ export interface AutoMap {
 
 export const DEFAULT_AUTO_MAP: AutoMap = {
   fast: 'gemma3:4b',
-  main: '',
+  main: 'qwen3.6-35b-a3b',
   coder: 'gpt-oss:20b',
   thinking: '',
   cloud: '',
@@ -96,7 +96,9 @@ export function detectMain(models: AutoCandidate[]): AutoCandidate | undefined {
   const label = (model: AutoCandidate) => `${model.apiName} ${model.name}`;
   const gemma = pool.find((model) => /gemma/i.test(label(model)) && /(26b|a4b)/i.test(label(model)));
   const qwen = pool.find((model) => /qwen3\.?6/i.test(label(model)) || (/35b/i.test(label(model)) && /a3b/i.test(label(model))));
-  return gemma ?? qwen ?? pool.find((model) => model.sizeClass === 'large') ?? pool[0];
+  // Qwen3.6 on llama-server is the main brain. Preferring gemma4 here made Auto fall back to it whenever
+  // the main slot was empty, which loaded 18 GB in Ollama next to llama-server.
+  return qwen ?? gemma ?? pool.find((model) => model.sizeClass === 'large') ?? pool[0];
 }
 
 function fallbackModel(models: AutoCandidate[]): AutoCandidate {

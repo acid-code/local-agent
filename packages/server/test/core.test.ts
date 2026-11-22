@@ -132,6 +132,26 @@ describe('context, cron, guard, embeddings', () => {
     expect(assessCommand('ls')).toBe('ok');
   });
 
+  it('does not flag read-only commands with harmless redirects as destructive', () => {
+    for (const command of [
+      'ls -la; echo ---; ls node_modules 2>/dev/null | head -5; echo ---; git log --oneline -5 2>/dev/null',
+      'ls -la; echo ---; git status --short 2>/dev/null; echo ---; find . -maxdepth 2 -name ".env*" -o -maxdepth 2 -name "*.json"',
+      'git diff --stat 2>&1 | tail -3',
+      'git log -3 &>/dev/null',
+      'cat package.json >/dev/null && echo ok',
+      'ls -la /projects/fb-marketplace-scraper; ls /projects/fb-marketplace-scraper/node_modules 2>/dev/null | head -',
+    ]) expect(assessCommand(command), command).toBe('ok');
+    for (const command of [
+      'echo hi > notes.txt',
+      'ls 2>/dev/null > out.txt',
+      'cat a >> b',
+      'git push origin main',
+      'find . -name "*.tmp" -delete',
+      'rm -rf build 2>/dev/null',
+      'ls > /dev/sda',
+    ]) expect(assessCommand(command), command).not.toBe('ok');
+  });
+
   it('retrieves the closer note', () => {
     const docs = [
       { id: 'a', text: 'docker sandbox network policy for containers' },

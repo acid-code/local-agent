@@ -1,9 +1,11 @@
 #!/usr/bin/python3
+import hmac
 import json
+import os
 import subprocess
 import time
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 def run(*args, timeout=180):
@@ -90,10 +92,39 @@ def switch_qwen():
     return 503, {"ok": False, "error": "Qwen llama-server did not become healthy"}
 
 
+PORT = int(os.environ.get("FALLBACK_CONTROL_PORT", "8082"))
+TOKEN_FILE = os.environ.get("FALLBACK_CONTROL_TOKEN_FILE", "/opt/llama-server/fallback-token")
+
+
+def expected_token():
+    """Shared secret the app must send. No token file means no auth (backward compatible)."""
+    try:
+        with open(TOKEN_FILE) as handle:
+            return handle.read().strip() or None
+    except OSError:
+        return None
+
+
+def bind_addresses():
+    """Loopback plus the Docker bridge gateway (host.docker.internal) - never the LAN."""
+    extra = os.environ.get("FALLBACK_CONTROL_BIND", "").split()
+    if extra:
+        return extra
+    addrs = ["127.0.0.1"]
+    out = run("sh", "-c", "ip -4 -o addr show docker0 2>/dev/null | awk '{print $4}' | cut -d/ -f1", timeout=5)
+    docker_ip = out.stdout.strip() or "172.17.0.1"
+    addrs.append(docker_ip)
+    return addrs
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path not in ("/switch-uncensored", "/switch-qwen", "/status"):
             self.send_error(404)
+            return
+        token = expected_token()
+        if token and not hmac.compare_digest(self.headers.get("X-Fallback-Token", ""), token):
+            self.send_error(401)
             return
         with SWITCH_LOCK:
             if self.path == "/switch-uncensored":
@@ -116,4 +147,18 @@ class Handler(BaseHTTPRequestHandler):
         return
 
 
-HTTPServer(("0.0.0.0", 8082), Handler).serve_forever()
+def serve(addr):
+    # docker0 may not exist yet at boot; keep retrying instead of failing the whole service.
+    while True:
+        try:
+            ThreadingHTTPServer((addr, PORT), Handler).serve_forever()
+        except OSError:
+            time.sleep(5)
+
+
+if __name__ == "__main__":
+    threads = [threading.Thread(target=serve, args=(a,), daemon=True) for a in bind_addresses()]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()

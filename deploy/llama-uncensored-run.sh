@@ -2,6 +2,11 @@
 # Launcher for the benchmarked Inkling uncensored llama-server fallback on port 8081.
 set -euo pipefail
 
+# Optional user-owned overrides (no sudo needed); they win over /etc/default/llama-uncensored.
+LOCAL_ENV="${LLAMA_UNCENSORED_LOCAL_ENV:-/opt/llama-server/uncensored.local.env}"
+# shellcheck disable=SC1090
+[[ -r "$LOCAL_ENV" ]] && set -a && . "$LOCAL_ENV" && set +a
+
 BIN="${LLAMA_UNCENSORED_BIN:-/opt/llama-server/uncensored-bin/llama-server}"
 MODEL="${LLAMA_UNCENSORED_MODEL:-/opt/llama-server/models/Inkling-2-Mini-Uncensored-AD-Q4_K.gguf}"
 MMPROJ="${LLAMA_UNCENSORED_MMPROJ:-/opt/llama-server/models/mmproj-Inkling-2-Mini-Uncensored-F16.gguf}"
@@ -18,7 +23,7 @@ if [[ -n "$DRAFT" && -e "$DRAFT" ]]; then
 fi
 
 args+=(-ngl 999 -fit off -lm none -fa on
-       -ub "${LLAMA_UNCENSORED_UBATCH:-64}" -b "${LLAMA_UNCENSORED_BATCH:-512}"
+       -ub "${LLAMA_UNCENSORED_UBATCH:-512}" -b "${LLAMA_UNCENSORED_BATCH:-512}"
        -t "${LLAMA_UNCENSORED_THREADS:-12}" -c "${LLAMA_UNCENSORED_CTX:-32768}"
        -a "${LLAMA_UNCENSORED_ALIAS:-inkling-2-mini-uncensored}"
        --jinja --host "${LLAMA_UNCENSORED_HOST:-0.0.0.0}"

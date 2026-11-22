@@ -107,7 +107,8 @@ export function normalizeSettings(value: Partial<Settings> | null | undefined): 
   return {
     ...DEFAULT_SETTINGS,
     ...(value ?? {}),
-    autoModels: { ...DEFAULT_AUTO_MAP, ...(value?.autoModels ?? {}) },
+    // An empty saved main slot means "default" (Qwen3.6 on llama-server), not "let Auto guess" (it guessed gemma4).
+    autoModels: { ...DEFAULT_AUTO_MAP, ...(value?.autoModels ?? {}), main: value?.autoModels?.main?.trim() || DEFAULT_AUTO_MAP.main },
     toolSupport: { ...(value?.toolSupport ?? {}) },
     imageGen: { ...DEFAULT_SETTINGS.imageGen, ...(value?.imageGen ?? {}) },
     version: value?.version || DEFAULT_SETTINGS.version,

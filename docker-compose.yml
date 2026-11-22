@@ -13,6 +13,7 @@ services:
       LLAMA_SERVER_URL: ${LLAMA_SERVER_URL:-http://host.docker.internal:8080/v1}
       LLAMA_UNCENSORED_SERVER_URL: ${LLAMA_UNCENSORED_SERVER_URL:-http://host.docker.internal:8081/v1}
       LLAMA_FALLBACK_CONTROL_URL: ${LLAMA_FALLBACK_CONTROL_URL:-http://host.docker.internal:8082}
+      LLAMA_FALLBACK_TOKEN: ${LLAMA_FALLBACK_TOKEN:-}
       LA_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-local-agent}
       LA_HOST_DATA_DIR: ${DATA_DIR:-/opt/local-agent/data}
       LA_PROJECTS_DIR: /projects
