@@ -1408,7 +1408,20 @@ table.limits tbody th { color: var(--text); font-weight: 500; }
 .persona-row-name { font-weight: 560; font-size: calc(14px * var(--fs)); }
 .persona-preview { font-size: calc(12.5px * var(--fs)); }
 .persona-row.on .persona-open { background: var(--bg-3); }
-.side-alert { margin: 6px 12px 0; padding: 8px 12px; border: 1px solid rgba(var(--coral-rgb), 0.45); color: var(--coral); background: transparent; border-radius: calc(10px * var(--round)); font-size: var(--t-meta); text-align: start; }
+/* Secret-request notice: its own row above the footer (never on top of it), with a dismiss button. */
+.side-alert { flex: none; display: flex; align-items: center; gap: 2px; margin: 8px 12px; border: 1px solid rgba(var(--coral-rgb), 0.45); color: var(--coral); border-radius: calc(10px * var(--round)); font-size: var(--t-meta); }
+.side-alert-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 8px 4px 8px 12px; border: 0; background: transparent; color: inherit; text-align: start; min-height: 36px; }
+.side-alert-main .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side-alert-count { display: none; }
+.side-alert-x { flex: none; display: grid; place-items: center; width: 32px; height: 32px; margin-inline-end: 2px; border: 0; border-radius: 999px; background: transparent; color: inherit; }
+.side-alert-x:hover, .side-alert-main:hover { background: rgba(var(--coral-rgb), 0.1); }
+@media (min-width: 981px) {
+  /* Collapsed rail: a small key + count; the dismiss lives in Settings → Secrets there. */
+  .app.collapsed .side-alert { margin: 8px auto; border-radius: 999px; }
+  .app.collapsed .side-alert-main { padding: 6px 8px; gap: 4px; }
+  .app.collapsed .side-alert-count { display: inline; font-weight: 600; }
+  .app.collapsed .side-alert-x { display: none; }
+}
 .side-foot { padding: 12px 14px; border-top: 0; gap: 10px; align-items: center; }
 .side-foot .avatar { width: 34px; height: 34px; border-radius: 999px; background: #b8336a; color: #fff; font-weight: 600; font-size: 15px; display: grid; place-items: center; border: 0; }
 .side-foot .who { font-weight: 560; }

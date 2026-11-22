@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode }
 import { backoffMs } from '../lib/live-sync';
 import { createPortal } from 'react-dom';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
-import { LayoutGrid, Plus, Search, Star, Activity, Bell, BellOff, Info, MessageSquarePlus, Settings2, ArrowDown, ArrowUp, EyeOff, GitBranch, BookOpen, Box, CalendarClock, Gauge, LogOut, Menu as MenuIcon, MessageSquare, MoreHorizontal, Palette, PanelLeftClose, PanelLeftOpen, Pin, PinOff, Radio, Settings, Sparkles, Users, Wrench, X, type LucideIcon } from 'lucide-react';
+import { LayoutGrid, Plus, Search, Star, Activity, Bell, BellOff, Info, MessageSquarePlus, Settings2, ArrowDown, ArrowUp, EyeOff, GitBranch, BookOpen, Box, CalendarClock, Gauge, LogOut, Menu as MenuIcon, MessageSquare, MoreHorizontal, Palette, PanelLeftClose, PanelLeftOpen, Pin, PinOff, Radio, Settings, Sparkles, Users, Wrench, X, KeyRound, type LucideIcon } from 'lucide-react';
 import { Menu } from './ui';
 import { Toaster } from './Toaster';
 import { api, post } from '../lib/api';
@@ -54,7 +54,8 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
   const [open, setOpen] = useState(false);
   const [palette, setPalette] = useState(false);
   const [query, setQuery] = useState('');
-  const [pending, setPending] = useState(0);
+  // Secret requests a run is waiting on (the server expires ones whose run or chat ended).
+  const [secretReqs, setSecretReqs] = useState<{ id: string; name: string }[]>([]);
   const [personas, setPersonas] = useState<Persona[]>([]);
   const [restartKeys, setRestartKeys] = useState<string[]>([]);
   const [selected, setSelected] = useState(0);
@@ -128,7 +129,7 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
 
   useEffect(() => {
     const owner = role === 'owner';
-    const tick = () => { if (owner) void api<{ approvals: unknown[]; requests?: unknown[] }>('/api/vault').then((data) => setPending((data.requests?.length || 0))).catch(() => undefined); };
+    const tick = () => { if (owner) void api<{ requests?: { id: string; name: string }[] }>('/api/vault').then((data) => setSecretReqs((data.requests || []).map((row) => ({ id: row.id, name: row.name })))).catch(() => undefined); };
     tick();
     const id = owner ? setInterval(tick, 8000) : undefined;
     // Live channel: reconnects with backoff (1s → 15s) after the server restarts, the laptop sleeps or the network
@@ -149,7 +150,8 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
       };
       socket.onmessage = (event) => {
         const data = JSON.parse(event.data);
-        if (data.type === 'secret' || data.type === 'approval') tick();
+        // A run ending can expire its requests on the server; refresh the notice at once.
+        if (data.type === 'secret' || data.type === 'approval' || data.type === 'done') tick();
         // Pages listen for runs starting in the chat they show (the server only sends this account's runs).
         window.dispatchEvent(new CustomEvent('la:live', { detail: data }));
       };
@@ -163,6 +165,14 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
     window.addEventListener('online', onOnline);
     return () => { stopped = true; window.clearTimeout(retry); window.removeEventListener('online', onOnline); if (id) clearInterval(id); socket?.close(); };
   }, [role]);
+
+  async function dismissSecrets() {
+    const rows = secretReqs;
+    if (!rows.length || !window.confirm(t('Dismiss {0} secret requests? Replies waiting for them carry on without the secret.', [rows.length]))) return;
+    setSecretReqs([]);
+    await Promise.all(rows.map((row) => post(`/api/secret-requests/${row.id}`, { deny: true }).catch(() => undefined)));
+    void api<{ requests?: { id: string; name: string }[] }>('/api/vault').then((data) => setSecretReqs((data.requests || []).map((row) => ({ id: row.id, name: row.name })))).catch(() => undefined);
+  }
 
   async function move(index: number, delta: number) {
     const next = personas.slice();
@@ -254,7 +264,16 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
             </div>
           ))}
         </div>
-        {pending > 0 && <button className="side-alert" onClick={() => navigate('/settings#vault')}>{pending}{' '}{t('secret request')}{pending === 1 ? '' : 's'} waiting</button>}
+        {secretReqs.length > 0 && (
+          <div className="side-alert" role="status">
+            <button type="button" className="side-alert-main" onClick={() => navigate('/settings#vault')} title={secretReqs.map((row) => row.name).join(', ')}>
+              <KeyRound size={15} aria-hidden />
+              <span className="label">{secretReqs.length === 1 ? t('1 secret request waiting') : t('{0} secret requests waiting', [secretReqs.length])}</span>
+              <span className="side-alert-count" aria-hidden>{secretReqs.length}</span>
+            </button>
+            <button type="button" className="side-alert-x" aria-label={t('Dismiss secret requests')} title={t('Dismiss secret requests')} onClick={() => void dismissSecrets()}><X size={14} aria-hidden /></button>
+          </div>
+        )}
         <div className="side-foot">
           <span className="user-chip" title={`${username} · ${role === 'member' ? 'Member' : 'Owner'}`}>
             <span className="avatar" aria-hidden>{initials || '?'}</span>

@@ -843,7 +843,7 @@ export class Store {
     return rows.map(mapApproval);
   }
 
-  resolveApproval(id: string, status: 'approved' | 'denied') {
+  resolveApproval(id: string, status: 'approved' | 'denied' | 'expired') {
     this.db.prepare('UPDATE approvals SET status = ?, resolved_at = ? WHERE id = ?').run(status, now(), id);
     return this.getApproval(id);
   }

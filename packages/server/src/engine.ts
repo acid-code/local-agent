@@ -66,6 +66,11 @@ import { CONNECTOR_TOOLS, disabledConnectorTools } from './connectors.js';
 import { memoryBrief, memoryFileTool, projectRules, proposeSkillTool, searchChatsTool, skillNudge } from './learning.js';
 import { LlamaWatch, isLlamaServerProvider, isNonChatModel, isOllamaProvider, isUncensoredProvider } from './coexist.js';
 
+/** A run in one of these states can still use the answer to a secret request or approval. */
+const WAITING_RUN_STATUSES = new Set(['running', 'paused', 'awaiting_approval', 'awaiting_secret']);
+/** Unanswered secret requests are denied after a day, so the run carries on and the notice clears. */
+export const SECRET_REQUEST_TTL_MS = 24 * 60 * 60 * 1000;
+
 export class Engine {
   private readonly inflight = new Map<string, { abort: AbortController; paused: boolean; resumePause: () => void }>();
   private readonly liveStreams = new Map<string, { text: string; thinking: string; status: string; detail?: string; waitInfo?: unknown }>();
@@ -258,6 +263,7 @@ export class Engine {
         releaseRepoLocks(this.store, runId);
         const ended = this.store.getRun(runId);
         this.bus.publish({ type: 'done', runId, run: ended });
+        this.sweepStaleWaits();
         // Helper results are delivered from the run's own record, so they survive a restart (no in-memory callback needed).
         if (ended?.cursor.helperId && ['completed', 'failed', 'stopped', 'interrupted', 'cancelled'].includes(ended.status)) this.autonomy.deliver(ended);
         if (ended && ended.status === 'completed' && !ended.cursor.helperId && !process.env.VITEST) {
@@ -580,11 +586,47 @@ export class Engine {
     if (state?.paused) state.resumePause();
     this.store.updateRun(runId, { status: 'stopped', endedAt: now(), error: 'Stopped.' });
     this.bus.publish({ type: 'status', runId, status: 'stopped' });
+    this.sweepStaleWaits();
     return this.store.getRun(runId);
   }
 
+  /**
+   * Clears waits nobody can answer any more, so "secret request waiting" and approval notices never stick:
+   * a secret request or approval whose run ended (stopped, failed, cancelled, interrupted, completed), whose run
+   * is gone, or whose chat was deleted is marked expired. A secret request older than SECRET_REQUEST_TTL_MS is
+   * denied, so a run still waiting on it carries on without the secret. Publishes 'secret'/'approval' events so
+   * open clients refresh at once. Returns how many were cleared.
+   */
+  sweepStaleWaits(nowMs = Date.now()): number {
+    const live = (runId: string) => {
+      const run = this.store.getRun(runId);
+      if (!run || !WAITING_RUN_STATUSES.has(run.status)) return false;
+      const session = this.store.getSession(run.sessionId);
+      return Boolean(session && !session.archived);
+    };
+    let cleared = 0;
+    for (const request of this.vault.listRequests('pending')) {
+      if (!live(request.runId)) {
+        this.vault.resolveRequest(request.id, 'expired');
+        this.secretWaiters.get(request.id)?.('denied');
+        this.bus.publish({ type: 'secret', runId: request.runId, requestId: request.id, status: 'expired' });
+        cleared += 1;
+      } else if (nowMs - Date.parse(request.createdAt) > SECRET_REQUEST_TTL_MS) {
+        this.provideSecret(request.id, null);
+        cleared += 1;
+      }
+    }
+    for (const approval of this.store.listApprovals('pending')) {
+      if (live(approval.runId)) continue;
+      this.store.resolveApproval(approval.id, 'expired');
+      this.bus.publish({ type: 'approval', runId: approval.runId, approval: this.store.getApproval(approval.id) });
+      cleared += 1;
+    }
+    return cleared;
+  }
+
   provideSecret(id: string, value: string | null) {
-    const request = this.vault.listRequests().find((item) => item.id === id);
+    const request = this.vault.getRequest(id);
     if (!request || request.status !== 'pending') throw new Error('That secret request is not pending.');
     if (value) {
       this.vault.put({ name: request.name, value, scope: request.scope, scopeId: request.scopeId, actor: `run:${request.runId}` });

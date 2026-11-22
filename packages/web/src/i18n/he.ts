@@ -1512,4 +1512,8 @@ export const he: Record<string, string> = {
   "You are up to date.": "הגרסה שלך עדכנית.",
   "development": "פיתוח",
   "portable": "ניידת",
+  "1 secret request waiting": "בקשת סוד אחת ממתינה",
+  "Dismiss secret requests": "ביטול בקשות הסוד",
+  "Dismiss {0} secret requests? Replies waiting for them carry on without the secret.": "לבטל {0} בקשות סוד? התשובות שמחכות להן ימשיכו בלי הסוד.",
+  "{0} secret requests waiting": "{0} בקשות סוד ממתינות",
 };

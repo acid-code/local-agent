@@ -254,7 +254,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     return { settings: store.getSettings() };
   });
 
-  app.get('/api/vault', async () => ({ secrets: vault.list(), requests: vault.listRequests('pending'), audit: vault.auditLog() }));
+  app.get('/api/vault', async () => { engine.sweepStaleWaits(); return { secrets: vault.list(), requests: vault.listRequests('pending'), audit: vault.auditLog() }; });
   app.post('/api/vault', async (req) => {
     const body = parse(z.object({ name: z.string(), value: z.string().min(1), scope: z.string().optional(), scopeId: z.string().nullable().optional() }), req.body);
     const secret = vault.put({ name: body.name, value: body.value, scope: body.scope, scopeId: body.scopeId, actor: 'owner' });
@@ -285,8 +285,13 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   });
   app.post('/api/secret-requests/:id', async (req) => {
     const body = parse(z.object({ value: z.string().min(1).optional(), deny: z.boolean().optional() }), req.body);
-    engine.provideSecret((req.params as { id: string }).id, body.deny ? null : body.value || null);
-    return { ok: true };
+    const id = (req.params as { id: string }).id;
+    const request = vault.getRequest(id);
+    if (!request) throw http(404, 'Secret request not found.');
+    // Already answered, expired or dismissed elsewhere: nothing to do (a second tap is not an error).
+    if (request.status !== 'pending') return { ok: true, status: request.status };
+    engine.provideSecret(id, body.deny ? null : body.value || null);
+    return { ok: true, status: body.deny || !body.value ? 'denied' : 'provided' };
   });
 
   const me = (req: Parameters<typeof accountOf>[0]) => accountOf(req).id;
@@ -1149,6 +1154,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     if (engine.sessionBusy(id)) throw http(409, 'A reply is still running in this chat. Press Stop first, then delete it.');
     engine.autonomy.stopForSession(id);
     store.updateSession(id, { archived: true });
+    engine.sweepStaleWaits();
     return { ok: true };
   });
   app.post('/api/sessions/:id/messages', async (req) => {
@@ -1311,7 +1317,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   });
 
   // Pending approvals of this account, with the chat they belong to and a risk tier, so a phone can list them and jump to the chat.
-  app.get('/api/approvals', async (req) => ({ approvals: store.listApprovals('pending').filter((approval) => ownerOf(store, 'run', approval.runId) === me(req)).map((approval) => approvalView(store, approval)) }));
+  app.get('/api/approvals', async (req) => ({ swept: engine.sweepStaleWaits(), approvals: store.listApprovals('pending').filter((approval) => ownerOf(store, 'run', approval.runId) === me(req)).map((approval) => approvalView(store, approval)) }));
   app.get('/api/approvals/:id', async (req) => {
     const id = (req.params as { id: string }).id;
     mustOwn(store, req, 'approval', id, 'Approval not found.');
