@@ -154,10 +154,11 @@ fun MobileDiffCard(
     val removed = remember(lines) { lines.count { it.startsWith("-") && !it.startsWith("---") } }
     var open by remember(edit.id, kept, edit.revertedAt) { mutableStateOf(edit.revertedAt == null && !kept) }
 
+    val shape = RoundedCornerShape(14.dp)
     Surface(
         color = MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(14.dp),
-        modifier = Modifier.fillMaxWidth().border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(14.dp)),
+        shape = shape,
+        modifier = Modifier.fillMaxWidth().border(1.dp, MaterialTheme.colorScheme.outline, shape),
     ) {
         Column {
             Row(
@@ -165,17 +166,18 @@ fun MobileDiffCard(
                     .fillMaxWidth()
                     .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f))
                     .clickable { open = !open }
-                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                Icon(Icons.Default.Code, null, Modifier.size(16.dp), tint = AccentBlue)
+                Icon(if (open) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                Icon(Icons.Default.Code, null, Modifier.size(15.dp), tint = AccentBlue)
                 Text(edit.label, style = MaterialTheme.typography.labelMedium.copy(fontFamily = FontFamily.Monospace), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                 Text("+$added", style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace), color = DiffAddText, fontWeight = FontWeight.Bold)
                 Text("-$removed", style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace), color = DiffDelText, fontWeight = FontWeight.Bold)
             }
             AnimatedVisibility(open) {
-                Column(Modifier.fillMaxWidth().background(Color(0xFF07080A)).padding(vertical = 6.dp)) {
+                Column(Modifier.fillMaxWidth().background(Color(0xFF07080A)).padding(vertical = 4.dp)) {
                     lines.take(80).forEach { line ->
                         val (bg, fg) = when {
                             line.startsWith("@@") -> DiffHunkBg to DiffHunkText
@@ -185,8 +187,10 @@ fun MobileDiffCard(
                         }
                         Text(
                             line.ifEmpty { " " },
-                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 15.sp),
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 14.sp),
                             color = fg,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.fillMaxWidth().background(bg).padding(horizontal = 10.dp, vertical = 1.dp),
                         )
                     }
@@ -195,14 +199,27 @@ fun MobileDiffCard(
                     }
                 }
             }
-            Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 when {
                     edit.revertedAt != null -> Text("Reverted", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    kept -> Text("Kept ✓", style = MaterialTheme.typography.labelSmall, color = AccentMint, fontWeight = FontWeight.SemiBold)
+                    kept -> Text("Kept", style = MaterialTheme.typography.labelSmall, color = AccentMint, fontWeight = FontWeight.SemiBold)
                     else -> {
-                        TextButton(onClick = onKeep, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)) { Text("Keep", color = AccentMint) }
-                        Spacer(Modifier.width(4.dp))
-                        TextButton(onClick = onRevert, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)) { Text("Revert", color = AccentRed) }
+                        FilledTonalButton(
+                            onClick = onKeep,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                            modifier = Modifier.height(32.dp),
+                            colors = ButtonDefaults.filledTonalButtonColors(contentColor = AccentMint),
+                        ) { Text("Keep") }
+                        OutlinedButton(
+                            onClick = onRevert,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                            modifier = Modifier.height(32.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = AccentRed),
+                        ) { Text("Revert") }
                     }
                 }
             }

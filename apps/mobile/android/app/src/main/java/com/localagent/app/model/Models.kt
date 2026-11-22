@@ -13,6 +13,8 @@ data class Persona(
     val voiceReply: Boolean = false,
     val voiceName: String = "",
     val language: String = "auto",
+    val avatarKind: String = "initials",
+    val avatarRef: String = "",
 )
 
 data class ChatSession(
@@ -22,6 +24,7 @@ data class ChatSession(
     val modelPin: String? = null,
     val mode: String = "chat",
     val updatedAt: String = "",
+    val summary: String = "",
 )
 
 data class ChatMessage(

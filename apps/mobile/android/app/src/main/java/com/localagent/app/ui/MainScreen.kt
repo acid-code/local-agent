@@ -157,44 +157,65 @@ private fun ChatScreen(state: AppUiState, vm: ChatViewModel, onVoiceDictation: (
     var showModelSheet by remember { mutableStateOf(false) }
     var showContextSheet by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
-    val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
 
     Scaffold(
         modifier = modifier,
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
-            TopAppBar(
-                scrollBehavior = scrollBehavior,
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background,
-                    scrolledContainerColor = MaterialTheme.colorScheme.surface,
-                ),
-                title = {
-                    val persona = state.activePersona
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        if (persona != null) PersonaAvatar(persona, 36)
-                        Column(Modifier.clip(RoundedCornerShape(8.dp)).clickable { showModelSheet = true }.padding(horizontal = 2.dp)) {
+            val persona = state.activePersona
+            val thinking = state.isStreaming
+            Surface(color = MaterialTheme.colorScheme.background, shadowElevation = 0.dp) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .height(56.dp)
+                        .padding(start = 12.dp, end = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (persona != null) {
+                        PersonaAvatar(
+                            persona,
+                            32,
+                            motion = if (thinking) FaceMotion.Thinking else FaceMotion.Idle,
+                        )
+                    }
+                    Column(
+                        Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { showModelSheet = true }
+                            .padding(horizontal = 2.dp, vertical = 2.dp),
+                    ) {
+                        Text(
+                            state.currentSession?.title?.takeIf { it.isNotBlank() } ?: persona?.name ?: "New chat",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        val pinnedName = state.currentSession?.modelPin?.let { pin -> state.models.firstOrNull { it.id == pin }?.name } ?: "Auto"
+                        Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                state.currentSession?.title?.takeIf { it.isNotBlank() } ?: persona?.name ?: "New chat",
-                                style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                pinnedName,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false),
                             )
-                            val pinnedName = state.currentSession?.modelPin?.let { pin -> state.models.firstOrNull { it.id == pin }?.name } ?: "Auto"
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    listOfNotNull(persona?.name, pinnedName).joinToString(" · "),
-                                    style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                )
-                                Icon(Icons.Default.ExpandMore, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
+                            Icon(Icons.Default.ExpandMore, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
-                },
-                actions = {
                     state.breakdown?.let { bd -> ContextRingChip(breakdown = bd, onClick = { showContextSheet = true }) }
-                    IconButton(onClick = { vm.startNewChat() }) { Icon(Icons.Outlined.AddComment, contentDescription = "New chat") }
+                    IconButton(onClick = { vm.startNewChat() }, modifier = Modifier.size(40.dp)) {
+                        Icon(Icons.Outlined.AddComment, contentDescription = "New chat")
+                    }
                     Box {
-                        IconButton(onClick = { menuOpen = true }) { Icon(Icons.Default.MoreVert, contentDescription = "More") }
+                        IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(40.dp)) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "More")
+                        }
                         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                             DropdownMenuItem(
                                 text = { Text(if (state.coderMode) "Switch to chat mode" else "Switch to code mode") },
@@ -217,8 +238,8 @@ private fun ChatScreen(state: AppUiState, vm: ChatViewModel, onVoiceDictation: (
                             )
                         }
                     }
-                },
-            )
+                }
+            }
         },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding()) {
@@ -356,49 +377,77 @@ fun ChatsScreen(
                 placeholder = { Text("Search chats") }, singleLine = true,
                 leadingIcon = { Icon(Icons.Default.Search, null) },
                 shape = RoundedCornerShape(16.dp),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp).heightIn(min = 48.dp),
             )
         }
         if (state.personas.isNotEmpty()) {
             item(key = "personas") {
-                LazyRow(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                LazyRow(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     items(state.personas, key = { it.id }) { p -> PersonaTile(p, selected = state.activePersona?.id == p.id) { onOpenPersona(p.id) } }
                 }
             }
         }
         item(key = "recent") {
-            Text("Recent", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp))
+            Text("Recent", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp))
         }
         items(filtered, key = { it.id }) { session ->
             val persona = state.personas.firstOrNull { it.id == session.agentId }
             val waiting = state.pendingApprovals.count { it.sessionId == session.id }
-            ListItem(
-                modifier = Modifier.clickable { onOpenSession(session.id) }.padding(horizontal = 4.dp),
-                colors = ListItemDefaults.colors(
-                    containerColor = if (state.currentSession?.id == session.id) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.background,
-                ),
-                leadingContent = { if (persona != null) PersonaAvatar(persona, 40) else Icon(Icons.Outlined.ChatBubbleOutline, null) },
-                headlineContent = { Text(session.title.ifBlank { "Untitled chat" }, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium) },
-                supportingContent = {
-                    Text(
-                        if (waiting > 0) "Waiting for your approval" else persona?.name ?: "",
-                        maxLines = 1, color = if (waiting > 0) AccentAmber else MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                },
-                trailingContent = {
-                    var confirm by remember { mutableStateOf(false) }
-                    IconButton(onClick = { confirm = true }) { Icon(Icons.Outlined.DeleteOutline, contentDescription = "Delete chat", tint = MaterialTheme.colorScheme.onSurfaceVariant) }
-                    if (confirm) {
-                        AlertDialog(
-                            onDismissRequest = { confirm = false },
-                            title = { Text("Delete this chat?") },
-                            text = { Text(session.title) },
-                            confirmButton = { TextButton(onClick = { confirm = false; onDelete(session.id) }) { Text("Delete", color = MaterialTheme.colorScheme.error) } },
-                            dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } },
+            val selected = state.currentSession?.id == session.id
+            val preview = when {
+                waiting > 0 -> "Waiting for your approval"
+                session.summary.isNotBlank() -> session.summary
+                else -> persona?.name.orEmpty()
+            }
+            val whenLabel = SessionTime.relative(session.updatedAt)
+            var confirm by remember { mutableStateOf(false) }
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(if (selected) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.background)
+                    .clickable { onOpenSession(session.id) }
+                    .padding(start = 16.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                if (persona != null) PersonaAvatar(persona, 36) else Icon(Icons.Outlined.ChatBubbleOutline, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            session.title.ifBlank { "Untitled chat" },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            fontWeight = FontWeight.Medium,
+                            style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (whenLabel.isNotBlank()) {
+                            Text(whenLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                    if (preview.isNotBlank()) {
+                        Text(
+                            preview,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (waiting > 0) AccentAmber else MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                },
-            )
+                }
+                IconButton(onClick = { confirm = true }, modifier = Modifier.size(40.dp)) {
+                    Icon(Icons.Outlined.DeleteOutline, contentDescription = "Delete chat", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if (confirm) {
+                    AlertDialog(
+                        onDismissRequest = { confirm = false },
+                        title = { Text("Delete this chat?") },
+                        text = { Text(session.title) },
+                        confirmButton = { TextButton(onClick = { confirm = false; onDelete(session.id) }) { Text("Delete", color = MaterialTheme.colorScheme.error) } },
+                        dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } },
+                    )
+                }
+            }
         }
         if (filtered.isEmpty()) {
             item(key = "none") {
@@ -419,7 +468,9 @@ private fun PersonaTile(persona: Persona, selected: Boolean, onClick: () -> Unit
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        BadgedBox(badge = { if (persona.unread > 0) Badge { Text("${persona.unread}") } }) { PersonaAvatar(persona, 52) }
+        BadgedBox(badge = { if (persona.unread > 0) Badge { Text("${persona.unread}") } }) {
+            PersonaAvatar(persona, 52, motion = if (selected) FaceMotion.Idle else FaceMotion.None)
+        }
         Text(
             persona.name, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
@@ -440,7 +491,7 @@ private fun EmptyWelcomeCard(persona: Persona?, onPickPrompt: (String) -> Unit) 
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        if (persona != null) PersonaAvatar(persona, 72)
+        if (persona != null) PersonaAvatar(persona, 72, motion = FaceMotion.Idle)
         Text(persona?.let { "Chat with ${it.name}" } ?: "Start a conversation", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
         if (!persona?.description.isNullOrBlank()) {
             Text(persona!!.description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
