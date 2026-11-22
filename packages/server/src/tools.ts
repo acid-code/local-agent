@@ -18,6 +18,7 @@ export interface ToolContext {
   signal: AbortSignal;
   docker: DockerCtl;
   browser?: import('./browser.js').ManagedBrowser | null;
+  computer?: import('./live-computer.js').ComputerControl | null;
   fetchImpl: typeof fetch;
   searxngUrl: string;
   sandbox: Settings['sandbox'];
@@ -279,6 +280,7 @@ export const BUILTIN_TOOLS: Tool[] = [
             PidsLimit: 256,
           },
         }, shellTimeoutMs());
+        ctx.computer?.recordShell({ runId: ctx.runId ?? null, persona: ctx.agent.name, command, output: result.output, code: result.code });
         return `exit ${result.code}\n${clipToolOutput(result.output)}`;
       }
       if (ctx.sandbox === 'docker-only') throw new Error('Docker sandbox is required and the Docker socket is not available.');

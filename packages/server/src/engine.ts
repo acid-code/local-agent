@@ -99,6 +99,8 @@ export class Engine {
   memory: MemoryBudget | null = null;
   /** Managed real browser container (la-browser). Set by buildApp. */
   browser: import('./browser.js').ManagedBrowser | null = null;
+  /** Live Computer view + take-over + shell tail controller. Set by buildApp. */
+  computer: import('./live-computer.js').ComputerControl | null = null;
 
   constructor(
     private readonly store: Store,
@@ -2258,7 +2260,7 @@ export class Engine {
     const settings = this.store.getSettings();
     const member = agent.ownerId !== OWNER_ID;
     return {
-      agent, workspace: agent.workspacePath, signal, docker: this.docker, browser: this.browser, fetchImpl: this.fetchImpl, searxngUrl: settings.searxngUrl || process.env.SEARXNG_URL || '',
+      agent, workspace: agent.workspacePath, signal, docker: this.docker, browser: this.browser, computer: this.computer, fetchImpl: this.fetchImpl, searxngUrl: settings.searxngUrl || process.env.SEARXNG_URL || '',
       sandbox: settings.sandbox, store: this.store, depth: run.cursor.depth ?? 0,
       sessionId: run.sessionId, runId: run.id, codeApproval: settings.codeApproval,
       secretEnv: () => (member ? {} : this.vault.envFor(agent.id, `run:${run.id}`)),
