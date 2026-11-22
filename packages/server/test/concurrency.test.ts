@@ -308,3 +308,25 @@ describe('side work off the llama-server slot', () => {
     try { expect(internals.sideModel(qwen).id).toBe('llama_qwen'); } finally { delete process.env.LA_SIDE_MODEL; }
   });
 });
+
+describe('tool-capable routing', () => {
+  it('moves a tool-needing turn off a model that cannot call tools, to the main model', async () => {
+    const { dir, store } = newStore();
+    store.upsertProvider({ id: 'prov_ollama', kind: 'openai_compat', name: 'Ollama', baseUrl: 'http://127.0.0.1:11434/v1', enabled: true });
+    store.upsertModel(model('ollama_phi', 'prov_ollama', 'phi3:mini', 2.2, 'small'));
+    store.upsertModel(model('ollama_gemma3', 'prov_ollama', 'gemma3:4b', 3.4, 'small'));
+    const settings = store.getSettings();
+    store.saveSettings({ ...settings, toolSupport: { ...settings.toolSupport, 'phi3:mini': false }, autoModels: { ...settings.autoModels, main: 'gemma3:4b' } }, 'test', {});
+    const used: string[] = [];
+    const engine = engineWith(store, uncensoredUp, (m) => { used.push(m.apiName); return new ScriptedProvider([{ text: 'Here is what I found.' }]); });
+    const agent = store.createAgent({ name: 'House', description: '', systemPrompt: 'Be brief.', modelId: 'ollama_phi', routing: 'pinned', strategy: 'rolling', toolAllowlist: [], memoryEnabled: false, workspacePath: dir });
+    const session = store.createSession({ agentId: agent.id, title: 'Chat' });
+    const run = await engine.startTurn({ sessionId: session.id, agentId: agent.id, content: 'Search the web for the latest Node.js release and read the changelog', wait: true });
+    expect(used).toEqual(['gemma3:4b']);
+    expect(store.getRun(run.id)?.routingNote).toMatch(/cannot call tools/);
+
+    used.length = 0;
+    const chat = await engine.startTurn({ sessionId: session.id, agentId: agent.id, content: 'hi', wait: true });
+    expect(store.getRun(chat.id)?.cursor.toolFallback).toBeFalsy();
+  });
+});

@@ -110,6 +110,8 @@ export interface RunCursor {
   missingRetry?: boolean;
   /** One automatic retry on the uncensored local llama-server after a clear refusal. */
   uncensoredRetry?: boolean;
+  /** Switched once to a tool-capable model because the chosen one cannot call tools. */
+  toolFallback?: boolean;
   /** Model the run left for the uncensored fallback, and the turn the fallback answers; the run returns after it. */
   uncensoredFrom?: string;
   uncensoredAt?: number;

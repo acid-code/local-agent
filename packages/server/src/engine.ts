@@ -839,6 +839,18 @@ export class Engine {
     }
     let model = this.store.getModel(current.cursor.modelId!);
     if (!model) throw new Error('Selected model is gone.');
+    // A turn that needs tools never runs tool-less on a model that cannot call them: move to the main model once.
+    if (this.toolSupportOf(model) === false && !current.cursor.noTools && !current.cursor.toolFallback) {
+      const sessionRow = this.store.getSession(run.sessionId);
+      const needsTools = current.cursor.turn > 0 || likelyNeedsTools(this.userText(current), { kb: this.hasKnowledge(run.agentId), code: sessionRow?.mode === 'code' || Boolean(current.cursor.stage) });
+      const capable = needsTools ? this.toolCapableModel(settings, run.agentId, model.id) : undefined;
+      if (capable) {
+        const reason = `Switched to ${capable.name} — ${model.name} cannot call tools and this turn needs them.`;
+        this.store.addLog('warn', reason, undefined, 'router');
+        current = this.store.updateRun(run.id, { cursor: { ...current.cursor, modelId: capable.id, toolFallback: true, switched: true, routingReason: reason }, modelId: capable.id, switched: true, routingNote: reason })!;
+        model = capable;
+      }
+    }
     let built = await this.buildMessages(current, agent, model);
     if (!this.reserveGemini(model, built.plan.estimatedTokens)) {
       const fallback = this.candidates(settings, run.agentId).find((item) => item.local && item.providerKind !== 'rehearsal');
@@ -2063,6 +2075,17 @@ export class Engine {
       if (ok) return;
       await sleep(Math.min(2000, Math.max(50, delayMs)));
     }
+  }
+
+  /** The main model (Auto's "main" role, else llama-server's model, else any candidate) that is known or assumed to call tools. */
+  private toolCapableModel(settings: Settings, agentId: string, excludeId: string): ModelRow | undefined {
+    const ok = (item: ModelRow | null | undefined): item is ModelRow => Boolean(item && item.id !== excludeId && item.enabled && !item.embedding && this.toolSupportOf(item) !== false);
+    const candidates = this.candidates(settings, agentId).map((item) => this.store.getModel(item.id)).filter(ok);
+    const mainName = (settings.autoModels?.main || '').trim().toLowerCase();
+    const llama = this.llama.isActive() ? this.llama.model() : undefined;
+    return candidates.find((item) => item.apiName.toLowerCase() === mainName || item.name.toLowerCase() === mainName)
+      ?? (ok(llama) && candidates.some((item) => item.id === llama.id) ? llama : undefined)
+      ?? candidates.find((item) => item.providerId !== 'prov_rehearsal');
   }
 
   /** Every tool this persona may use in this run (allowlist, member and helper limits, disabled connectors). */
