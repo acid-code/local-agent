@@ -1716,6 +1716,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       }
     }
     const workbench = engine.workbench ? await engine.workbench.status() : null;
+    const browser = engine.browser ? await engine.browser.status() : null;
     const memUsage = engine.memory ? await engine.memory.usage().catch(() => null) : null;
     const gtt = memUsage?.gtt ?? readGtt();
     const llamaProviders = store.listProviders().filter((provider) => provider.enabled && isLlamaServerProvider(provider));
@@ -1724,7 +1725,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       return m?.name || provider.name;
     });
     const residentModels = [...new Set([...loadedModels.map((m) => m.name), ...llamaModels])];
-    return { current: { ...current, loadedModels, flags, gtt, residentModels, workbench } };
+    return { current: { ...current, loadedModels, flags, gtt, residentModels, workbench, browser } };
   });
   app.get('/api/workbench', async () => ({ workbench: engine.workbench ? await engine.workbench.status() : null }));
   app.get('/api/browser', async () => ({ browser: engine.browser ? await engine.browser.status() : null }));

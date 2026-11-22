@@ -23,14 +23,19 @@ interface WorkbenchInfo {
   lastUsedAt: string | null;
   tools?: { node: string | null; python: string | null; uv: string | null };
 }
+interface BrowserInfo {
+  enabled: boolean;
+  state: 'running' | 'idle' | 'stopped' | 'missing' | 'unavailable';
+  image: string;
+  memoryBytes: number | null;
+  memoryLimitBytes: number;
+  lastUsedAt: string | null;
+  activePersona: string | null;
+}
 interface Resources {
   current: {
-    memory: { totalGiB: number; availableGiB: number };
-    gpu: { name?: string } | null;
-    disk: { totalBytes: number; freeBytes: number };
-    gtt?: { usedBytes: number; totalBytes: number } | null;
-    residentModels?: string[];
     workbench?: WorkbenchInfo | null;
+    browser?: BrowserInfo | null;
   };
 }
 interface Voice { whisper: boolean; kokoro: boolean }
@@ -104,7 +109,6 @@ export function PersonaStatePanel({ agent, sessions, tick, onClose, onOpenSessio
   const codingIds = new Set(allCodingRuns.map((run) => run.id));
   const working = runs.filter((run) => ACTIVE.has(run.status) && !codingIds.has(run.id)).slice(0, 3);
   const upcoming = [...schedules.filter((row) => row.enabled).sort((a, b) => String(a.nextRunAt).localeCompare(String(b.nextRunAt))), ...triggers.filter((row) => row.enabled)].slice(0, 6);
-  const memory = resources?.current.memory;
 
   // "#2" = the second run in that chat, like the reference's "Run failed · #1".
   const runNumber = (run: Run) => runs.filter((row) => row.sessionId === run.sessionId && row.startedAt <= run.startedAt).length;
@@ -224,43 +228,43 @@ export function PersonaStatePanel({ agent, sessions, tick, onClose, onOpenSessio
             <h4>{t('Computer')}</h4>
             {(() => {
               const wb = resources?.current.workbench;
-              const gtt = resources?.current.gtt;
-              const resident = resources?.current.residentModels ?? [];
-              const wbStateLabel = !wb ? (busy ? t('Running') : t('Stopped'))
-                : !wb.enabled ? t('Ephemeral mode')
-                : wb.state === 'running' ? t('Running')
-                : wb.state === 'idle' ? t('Idle')
-                : wb.state === 'unavailable' ? t('Docker unavailable')
+              const br = resources?.current.browser;
+              const stateText = (s?: WorkbenchInfo['state'], enabled = true) => !enabled ? t('Ephemeral mode')
+                : s === 'running' ? t('Running')
+                : s === 'idle' ? t('Idle')
+                : s === 'unavailable' ? t('Docker unavailable')
                 : t('Stopped');
+              const wbStateLabel = wb ? stateText(wb.state, wb.enabled) : (busy ? t('Running') : t('Stopped'));
               const wbActive = wb ? (wb.state === 'running' || wb.state === 'idle') : busy;
-              const wbStats: string[] = [];
-              if (wb?.cpuPercent != null) wbStats.push(`${wb.cpuPercent.toFixed(0)}% CPU`);
-              if (wb?.memoryBytes != null) wbStats.push(`${(wb.memoryBytes / 1024 ** 3).toFixed(1)} / ${(wb.memoryLimitBytes / 1024 ** 3).toFixed(0)} GB`);
+              const wbLimitGiB = wb ? wb.memoryLimitBytes / 1024 ** 3 : 6;
+              const wbUsedGiB = wb?.memoryBytes != null ? wb.memoryBytes / 1024 ** 3 : null;
+              const wbPct = wbUsedGiB != null && wbLimitGiB > 0 ? Math.min(100, Math.round((wbUsedGiB / wbLimitGiB) * 100)) : 0;
               const toolParts = wb?.tools ? [
                 wb.tools.node ? `node ${wb.tools.node}` : null,
                 wb.tools.python ? `python ${wb.tools.python}` : null,
                 wb.tools.uv ? `uv ${wb.tools.uv}` : null,
               ].filter(Boolean) : [];
+              const brStateLabel = br ? stateText(br.state, br.enabled) : null;
+              const brUsed = br?.memoryBytes != null ? `${(br.memoryBytes / 1024 ** 3).toFixed(1)} / ${(br.memoryLimitBytes / 1024 ** 3).toFixed(0)} GB` : null;
               return (
                 <>
                   <div className="state-card computer-card">
                     <span className="grow">
                       <span className="ellipsis">{t('Shared workbench')}</span>
                       <small className="faint">
-                        {wbStateLabel}{wbStats.length ? ` · ${wbStats.join(' · ')}` : ''}
+                        {wbStateLabel}{wb?.cpuPercent != null ? ` · ${wb.cpuPercent.toFixed(0)}% CPU` : ''}
                       </small>
-                      {memory && (
-                        <>
-                          <small className="faint">{t('RAM free: {0} / {1} GB', [memory.availableGiB.toFixed(1), memory.totalGiB.toFixed(0)])}</small>
-                          <span className="state-meter" role="meter" aria-label={t('Memory in use')} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(100 - (memory.availableGiB / memory.totalGiB) * 100)}><span style={{ width: `${Math.round(100 - (memory.availableGiB / memory.totalGiB) * 100)}%` }} /></span>
-                        </>
-                      )}
-                      {gtt && (
-                        <small className="faint">{t('GTT: {0} / {1} GB', [(gtt.usedBytes / 1024 ** 3).toFixed(1), (gtt.totalBytes / 1024 ** 3).toFixed(0)])}</small>
-                      )}
-                      {resources && (
-                        <small className="faint ellipsis" title={resident.join(', ')}>
-                          {resident.length ? `${t('Resident models')}: ${resident.join(', ')}` : t('No resident models')}
+                      <small className="faint">
+                        {wbUsedGiB != null
+                          ? `RAM: ${wbUsedGiB.toFixed(1)} / ${wbLimitGiB.toFixed(0)} GB`
+                          : `RAM: 0 / ${wbLimitGiB.toFixed(0)} GB`}
+                      </small>
+                      <span className="state-meter" role="meter" aria-label={t('Memory in use')} aria-valuemin={0} aria-valuemax={100} aria-valuenow={wbPct}>
+                        <span style={{ width: `${wbPct}%` }} />
+                      </span>
+                      {br && (
+                        <small className="faint ellipsis">
+                          {t('Browser')}: {brStateLabel}{brUsed ? ` · ${brUsed}` : ` · ${(br.memoryLimitBytes / 1024 ** 3).toFixed(0)} GB cap`}{br.activePersona ? ` (${br.activePersona})` : ''}
                         </small>
                       )}
                       {toolParts.length > 0 && (
@@ -269,7 +273,11 @@ export function PersonaStatePanel({ agent, sessions, tick, onClose, onOpenSessio
                     </span>
                     <span className={`computer-thumb${wbActive ? ' awake' : ''}`} aria-hidden><Face agent={agent} size={26} /></span>
                   </div>
-                  {resources && <p className="faint state-detail">{t('Disk')}{' '}{(resources.current.disk.freeBytes / 1024 ** 3).toFixed(0)}{' '}{t('GB free')}{resources.current.gpu?.name ? ` · ${resources.current.gpu.name}` : t(' · no GPU')}</p>}
+                  {wb && (
+                    <p className="faint state-detail" dir="ltr">
+                      {wb.image}{wb.lastUsedAt ? ` · ${ago(wb.lastUsedAt)}` : ''}
+                    </p>
+                  )}
                   {isOwner() && <Link className="link-btn state-more" to="/computer">{t('Open live view')}</Link>}
                 </>
               );
