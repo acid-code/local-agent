@@ -131,8 +131,8 @@ export class Engine {
       this.bus.publish({ type: 'status', runId, status: 'waiting', detail, waitInfo } as never);
       while (others().length) {
         if (signal.aborted) throw new StopError();
-        if (Date.now() - started > LARGE_WAIT_MS) {
-          throw new Error(`Gave up after ${Math.round(LARGE_WAIT_MS / 60_000)} min waiting for ${label} to finish in another chat. Your chat is kept; send again when the other chat is done, or press Stop there.`);
+        if (Date.now() - started > llamaWaitMs()) {
+          throw new Error(`Gave up after ${Math.max(1, Math.round(llamaWaitMs() / 60_000))} min waiting for ${label} to finish in another chat. Your chat is kept; send again when the other chat is done, press Stop there, or pick another model for this chat.`);
         }
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
@@ -806,6 +806,19 @@ export class Engine {
         },
       })!;
       this.bus.publish({ type: 'steering', runId: run.id, messageId: steering.id, status: 'applied' });
+    }
+    // Runs that switched to the uncensored model before the one-step rule (no uncensoredFrom) stayed on it for hours,
+    // holding llama-server's uncensored slot so Qwen chats queued behind them. Send them back to the main model too.
+    if (current.cursor.uncensoredRetry && !current.cursor.uncensoredFrom && current.cursor.modelId) {
+      const onModel = this.store.getModel(current.cursor.modelId);
+      const provider = onModel ? this.store.getProvider(onModel.providerId) : undefined;
+      const answered = onModel ? this.store.listSteps(run.id).some((step) => step.kind === 'model' && step.status === 'completed' && step.name === onModel.name) : false;
+      if (onModel && provider && isUncensoredProvider(provider) && answered) {
+        const qwen = this.llama.model();
+        const qwenProvider = qwen ? this.store.getProvider(qwen.providerId) : undefined;
+        const back = (qwen && qwenProvider && !isUncensoredProvider(qwenProvider) ? qwen : undefined) ?? this.toolCapableModel(settings, run.agentId, onModel.id);
+        if (back && back.id !== onModel.id) current = this.store.updateRun(run.id, { cursor: { ...current.cursor, uncensoredFrom: back.id, uncensoredAt: current.cursor.turn - 1 } })!;
+      }
     }
     // The uncensored fallback answers one step after a refusal; then the run goes back to the model it came from.
     if (current.cursor.uncensoredFrom && current.cursor.uncensoredAt !== undefined && current.cursor.turn > current.cursor.uncensoredAt) {
@@ -2630,6 +2643,8 @@ function turnRoots(store: Store, run: RunRow, dataDir = '') {
 const SCRIPT_DENIED = new Set(['run_tool_script', 'spawn_agent', 'helpers', 'manage_timer', 'manage_trigger', 'request_secret', 'request_folder', 'propose_skill', 'handoff_cli']);
 const SCRIPT_MAX_STEPS = 10;
 /** How long a chat waits in the big-model queue (or for the other llama-server model) before failing clearly. */
+/** How long a run waits for the other llama-server model's chat (one step on the uncensored model is a few minutes). */
+function llamaWaitMs() { return Number(process.env.LA_LLAMA_WAIT_MS ?? 2 * 60_000); }
 const LARGE_WAIT_MS = Number(process.env.LA_LARGE_WAIT_MS || 15 * 60_000);
 
 /**
