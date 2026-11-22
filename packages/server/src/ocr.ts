@@ -1,5 +1,5 @@
 import { inDockerContainer, type DockerCtl } from './docker.js';
-import type { MemoryBudget } from './memory.js';
+import { GiB, readGtt, type MemoryBudget } from './memory.js';
 import { isHebrewText, scriptStats } from '@local-agent/shared';
 import { OCR_CONTAINER, OCR_DOCKERFILE, OCR_IMAGE, OCR_PORT, OCR_SERVER, PIPER_CONTAINER, PIPER_DOCKERFILE, PIPER_IMAGE, PIPER_PORT, PIPER_SERVER } from './service-images.js';
 
@@ -255,17 +255,88 @@ export async function startService(docker: DockerCtl, id: ServiceId, log: (line:
 
 export const IMAGE_EXT = /\.(jpe?g|png|webp|heic|heif|tiff?|bmp|gif)$/i;
 
-export interface OcrDeps { fetchImpl: typeof fetch; memory?: MemoryBudget | null; ollamaRoot: string; cloudAllowed: boolean; geminiKey?: string; visionModel?: string; preferLightweight?: boolean }
+export interface OcrDeps {
+  fetchImpl: typeof fetch;
+  memory?: MemoryBudget | null;
+  ollamaRoot: string;
+  cloudAllowed: boolean;
+  geminiKey?: string;
+  visionModel?: string;
+  preferLightweight?: boolean;
+  /** Optional llama-server (Inkling mmproj) base URL, used for vision only when GTT has enough headroom. */
+  inklingVisionUrl?: string | null;
+  inklingVisionModel?: string;
+  /** Optional GTT override for unit tests; defaults to readGtt(). */
+  gtt?: { usedBytes: number; totalBytes: number } | null;
+}
 
-/** Real runners for this account: Tesseract when the service answers; Gemini vision (if allowed and keyed), else a local vision model. */
+export const VISION_MIN_GTT_BYTES = () => Math.max(1, Number(process.env.LA_VISION_MIN_GTT_GIB ?? 4)) * GiB;
+
+/** Only allow Inkling mmproj vision when GTT has at least LA_VISION_MIN_GTT_GIB (default 4 GiB) free. */
+export function hasEnoughGttForVision(gtt: { usedBytes: number; totalBytes: number } | null | undefined): boolean {
+  if (!gtt || !gtt.totalBytes) return false;
+  return (gtt.totalBytes - gtt.usedBytes) >= VISION_MIN_GTT_BYTES();
+}
+
+async function inklingHealthy(fetchImpl: typeof fetch, baseUrl: string): Promise<boolean> {
+  const root = baseUrl.replace(/\/v1\/?$/, '').replace(/\/$/, '');
+  try {
+    const res = await fetchImpl(`${root}/health`, { signal: AbortSignal.timeout(2000) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export function inklingVisionRunner(fetchImpl: typeof fetch, baseUrl: string, model = 'inkling-2-mini-uncensored'): NonNullable<OcrRunners['vision']> {
+  const root = baseUrl.replace(/\/v1\/?$/, '').replace(/\/$/, '');
+  return async (image, prompt) => {
+    const started = Date.now();
+    const mime = image[0] === 0x89 && image[1] === 0x50 ? 'image/png' : 'image/jpeg';
+    const dataUrl = `data:${mime};base64,${image.toString('base64')}`;
+    const res = await fetchImpl(`${root}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        max_tokens: 1024,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt },
+            { type: 'image_url', image_url: { url: dataUrl } },
+          ],
+        }],
+      }),
+      signal: AbortSignal.timeout(120_000),
+    });
+    if (!res.ok) throw new Error(`Inkling vision HTTP ${res.status}`);
+    const json = await res.json() as { choices?: { message?: { content?: string } }[] };
+    const text = json.choices?.[0]?.message?.content?.trim() ?? '';
+    return { text, model, ms: Date.now() - started };
+  };
+}
+
+/** Real runners for this account: Tesseract when the service answers; Gemini vision (if allowed and keyed), else Inkling mmproj when GTT allows, else a local Ollama vision model. */
 export async function liveRunners(deps: OcrDeps): Promise<OcrRunners> {
   const ocrFound = await resolveServiceUrl(deps.fetchImpl, 'ocr');
   const tesseract = ocrFound ? tesseractRunner(deps.fetchImpl, ocrFound.url) : null;
   let vision: OcrRunners['vision'] = null;
   if (deps.cloudAllowed && deps.geminiKey) vision = geminiVisionRunner(deps.fetchImpl, deps.geminiKey);
   else {
-    const model = await pickLocalVision(deps.fetchImpl, deps.ollamaRoot, deps.visionModel, Boolean(deps.preferLightweight));
-    if (model) vision = ollamaVisionRunner(deps.fetchImpl, deps.ollamaRoot, model, deps.memory);
+    const ollamaModel = await pickLocalVision(deps.fetchImpl, deps.ollamaRoot, deps.visionModel, Boolean(deps.preferLightweight));
+    const ollamaFallback = ollamaModel ? ollamaVisionRunner(deps.fetchImpl, deps.ollamaRoot, ollamaModel, deps.memory) : null;
+    const gtt = deps.gtt !== undefined ? deps.gtt : readGtt();
+    if (deps.inklingVisionUrl && hasEnoughGttForVision(gtt) && (await inklingHealthy(deps.fetchImpl, deps.inklingVisionUrl))) {
+      const inkling = inklingVisionRunner(deps.fetchImpl, deps.inklingVisionUrl, deps.inklingVisionModel || 'inkling-2-mini-uncensored');
+      vision = ollamaFallback
+        ? async (image, prompt) => {
+            try { return await inkling(image, prompt); } catch { return ollamaFallback(image, prompt); }
+          }
+        : inkling;
+    } else {
+      vision = ollamaFallback;
+    }
   }
   return { tesseract, vision };
 }

@@ -11,6 +11,7 @@ import { filePath, getFile } from './files.js';
 import { cleanupHebrew } from './hebrew-cleanup.js';
 import { getLanguage } from './language.js';
 import { ollamaRoot } from './ollama.js';
+import { isUncensoredProvider } from './coexist.js';
 import { buildService, IMAGE_EXT, liveRunners, recognize, serviceStatus, startService, understandImage, type OcrMode, type OcrResult, type ServiceId } from './ocr.js';
 import { preChangeBackup } from './ops.js';
 
@@ -25,7 +26,15 @@ export function registerOcr(app: FastifyInstance, deps: { store: Store; engine: 
   async function runnersFor(ownerId: string) {
     const account = getAccount(store, ownerId);
     const cloudAllowed = !account || account.role === 'owner' || account.limits.cloud !== false;
-    return liveRunners({ fetchImpl, memory: engine.memory, ollamaRoot: ollamaRoot(), cloudAllowed, geminiKey: process.env.GEMINI_API_KEY, visionModel: process.env.OCR_VISION_MODEL, preferLightweight: engine.llama.isActive() });
+    const uncensoredProvider = store.listProviders().find((p) => p.enabled && isUncensoredProvider(p));
+    const uncensoredModel = uncensoredProvider ? store.listModels().find((m) => m.providerId === uncensoredProvider.id && m.enabled && !m.embedding) : undefined;
+    return liveRunners({
+      fetchImpl, memory: engine.memory, ollamaRoot: ollamaRoot(), cloudAllowed,
+      geminiKey: process.env.GEMINI_API_KEY, visionModel: process.env.OCR_VISION_MODEL,
+      preferLightweight: engine.llama.isActive(),
+      inklingVisionUrl: uncensoredProvider?.baseUrl || null,
+      inklingVisionModel: uncensoredModel?.apiName || 'inkling-2-mini-uncensored',
+    });
   }
 
   /** Best local Hebrew writer that fits the RAM budget, for the OCR cleanup pass. */

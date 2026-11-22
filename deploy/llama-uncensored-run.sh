@@ -23,8 +23,9 @@ if [[ -n "$DRAFT" && -e "$DRAFT" ]]; then
 fi
 
 args+=(-ngl 999 -fit off -lm none -fa on
+       -ctk "${LLAMA_UNCENSORED_CACHE_K:-q8_0}" -ctv "${LLAMA_UNCENSORED_CACHE_V:-q8_0}"
        -ub "${LLAMA_UNCENSORED_UBATCH:-512}" -b "${LLAMA_UNCENSORED_BATCH:-512}"
-       -t "${LLAMA_UNCENSORED_THREADS:-12}" -c "${LLAMA_UNCENSORED_CTX:-32768}"
+       -t "${LLAMA_UNCENSORED_THREADS:-12}" -c "${LLAMA_UNCENSORED_CTX:-65536}"
        -a "${LLAMA_UNCENSORED_ALIAS:-inkling-2-mini-uncensored}"
        --jinja --host "${LLAMA_UNCENSORED_HOST:-0.0.0.0}"
        --port "${LLAMA_UNCENSORED_PORT:-8081}")

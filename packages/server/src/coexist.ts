@@ -15,8 +15,9 @@ export function isOllamaProvider(provider: Pick<ProviderRow, 'id' | 'name' | 'ki
   return provider.id === 'prov_ollama' || provider.name === 'Ollama' || /:11434(\/|$)/.test(provider.baseUrl || '');
 }
 
-export function isLlamaServerProvider(provider: Pick<ProviderRow, 'id' | 'name' | 'kind'>): boolean {
+export function isLlamaServerProvider(provider: Pick<ProviderRow, 'id' | 'name' | 'kind'> & { baseUrl?: string | null }): boolean {
   if (provider.kind !== 'openai_compat') return false;
+  if (isUncensoredProvider({ ...provider, baseUrl: provider.baseUrl ?? null })) return false;
   return provider.id === 'prov_llama' || /llama[-_ ]?server/i.test(provider.name);
 }
 
