@@ -2435,20 +2435,50 @@ button.state-card:hover, a.state-card:hover { background: var(--bg-3); }
   .bulk-diff-head .diff-stat.add { margin-inline-start: 22px; }
   .bulk-diff-actions { margin-inline-start: auto; }
 }
-/* Phones: the composer row must always fit, Send included. Icon buttons keep their size; the persona and model
-   pills shrink with an ellipsis and the context ring drops its percentage (the ring still shows it). */
-@media (max-width: 520px) {
-  .chat.v2 .composer-bar > * { flex: none; min-width: 0; }
-  .chat.v2 .composer-bar > .pill, .chat.v2 .composer-bar > .model-trigger,
-  .chat.v2 .composer-bar > :not(button):not(.spacer):not(.repo-picker-wrap) { flex: 0 1 auto; min-width: 0; }
-  .chat.v2 .composer-bar > :not(button):not(.spacer):not(.repo-picker-wrap) { display: flex; }
-  .chat.v2 .composer-bar .model-trigger, .chat.v2 .composer-bar .pill { max-width: 100%; min-width: 0; overflow: hidden; }
-  .chat.v2 .composer-bar .ctx-ring-btn { padding: 3px; gap: 0; }
-  .chat.v2 .composer-bar .ctx-ring-btn > :not(svg) { display: none; }
-  .chat.v2 .composer-bar .spacer { flex: 1 1 0; }
+/* The composer row always fits inside its card, Send/Stop included, at any window width (the card can be narrow
+   on a wide window when the sidebar and side panel are open, so this keys off the card's own width). Icon buttons
+   keep their size; the persona and model pills shrink with an ellipsis; then the context ring drops its
+   percentage; then the persona name and the chevrons give way (the face already names the persona). */
+.chat.v2 .composer form { container-type: inline-size; container-name: composer; }
+.chat.v2 .composer-bar { flex-wrap: nowrap; }
+.chat.v2 .composer-bar > * { flex: none; min-width: 0; }
+.chat.v2 .composer-bar > .pill, .chat.v2 .composer-bar > .model-trigger,
+.chat.v2 .composer-bar > :not(button):not(.spacer):not(.repo-picker-wrap) { flex: 0 1 auto; min-width: 0; }
+.chat.v2 .composer-bar > :not(button):not(.spacer):not(.repo-picker-wrap) { display: flex; }
+.chat.v2 .composer-bar .model-trigger, .chat.v2 .composer-bar .pill { max-width: 100%; min-width: 0; overflow: hidden; }
+.chat.v2 .composer-bar .spacer { flex: 1 1 0; }
+@container composer (max-width: 600px) {
+  .composer-bar .ctx-ring-btn { padding: 3px; gap: 0; }
+  .composer-bar .ctx-ring-btn > :not(svg) { display: none; }
 }
-/* The face already names the persona; on small phones its name gives way so the model label stays readable. */
-@media (max-width: 420px) {
-  .chat.v2 .composer-bar .persona-chip .menu-trigger-text, .chat.v2 .composer-bar .lucide-chevron-down { display: none; }
-  .chat.v2 .composer-bar .pill, .chat.v2 .composer-bar .model-trigger { padding-inline: 6px; gap: 4px; }
+@container composer (max-width: 480px) {
+  .composer-bar .persona-chip .menu-trigger-text, .composer-bar .lucide-chevron-down { display: none; }
+  .composer-bar .pill, .composer-bar .model-trigger { padding-inline: 6px; gap: 4px; }
+  .composer-bar .pause-btn { padding-inline: 10px; }
 }
+/* No box inside the box: the textarea never draws its own border or focus ring; the card shows focus instead. */
+.composer textarea, .composer textarea:focus, .composer textarea:focus-visible { border: 0; outline: none; box-shadow: none; }
+.chat.v2 .composer form:focus-within { border-color: color-mix(in srgb, var(--persona, var(--brass)) 45%, var(--line-strong)); box-shadow: none; }
+/* Run trace: summary header, then think → do pairs; one full-width row per step, errors underneath. */
+.trace-summary { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 10px 12px; margin: 10px 0; border: 1px solid var(--line); border-radius: calc(12px * var(--round)); background: var(--bg-2); font-size: var(--t-meta, 13px); }
+.trace-summary .bad strong { color: var(--coral); }
+.trace-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.trace-pair { border: 1px solid var(--line); border-radius: calc(12px * var(--round)); background: var(--bg-2); overflow: hidden; }
+.trace-step + .trace-step { border-top: 1px solid var(--line); }
+.trace-step.tool .trace-row { padding-inline-start: 30px; }
+.trace-row { width: 100%; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border: 0; background: transparent; color: var(--text); text-align: start; cursor: pointer; }
+.trace-row:hover { background: var(--bg-3); }
+.trace-ico { flex: none; color: var(--faint); }
+.trace-step.model .trace-ico { color: var(--brass); }
+.trace-step.failed .trace-ico, .trace-step.failed .trace-label { color: var(--coral); }
+.trace-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trace-detail { color: var(--muted); font-size: calc(12px * var(--fs)); }
+.trace-chip { flex: none; font-size: calc(11px * var(--fs)); color: var(--faint); border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px; font-variant-numeric: tabular-nums; }
+.trace-time { flex: none; color: var(--faint); font-size: calc(12px * var(--fs)); font-variant-numeric: tabular-nums; }
+.trace-error { margin: -2px 12px 8px 54px; color: var(--coral); font-size: calc(12px * var(--fs)); overflow-wrap: anywhere; }
+.trace-body { position: relative; margin: 0 12px 10px; }
+.trace-body pre { margin: 0; max-height: 360px; overflow: auto; padding: 10px 12px; border-radius: calc(8px * var(--round)); background: var(--code-bg); white-space: pre-wrap; word-break: break-word; font-size: calc(12px * var(--fs)); }
+.trace-copy { position: absolute; top: 4px; inset-inline-end: 4px; }
+.trace-pane { padding: 0 12px 16px; min-width: 0; }
+.trace .faint { padding-inline: 12px; }
+.trace-step.stopped .trace-ico { color: var(--muted); }

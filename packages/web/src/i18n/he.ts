@@ -1521,4 +1521,11 @@ export const he: Record<string, string> = {
   "Dismiss secret requests": "ביטול בקשות הסוד",
   "Dismiss {0} secret requests? Replies waiting for them carry on without the secret.": "לבטל {0} בקשות סוד? התשובות שמחכות להן ימשיכו בלי הסוד.",
   "{0} secret requests waiting": "{0} בקשות סוד ממתינות",
+  "You: ": "את/ה: ",
+  "Run summary": "סיכום הריצה",
+  "total": "סה״כ",
+  "steps": "שלבים",
+  "failed": "נכשלו",
+  "tokens": "טוקנים",
+  "stopped": "נעצר",
 };

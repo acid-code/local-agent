@@ -330,12 +330,17 @@ export class DockerCtl {
     });
     try {
       await container.start();
+      let timer: ReturnType<typeof setTimeout> | undefined;
       const result = await Promise.race([
-        container.wait(),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Container timed out.')), timeoutMs)),
-      ]);
+        container.wait() as Promise<{ StatusCode?: number }>,
+        new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), timeoutMs); }),
+      ]).finally(() => clearTimeout(timer));
+      // Timed out: stop it and still return what it printed, so the model sees how far it got (exit 124 like `timeout`).
+      if (!result) { try { await container.kill(); } catch { /* already stopped */ } }
       const raw = await container.logs({ stdout: true, stderr: true });
-      return { output: demux(Buffer.isBuffer(raw) ? raw : Buffer.from(raw)).slice(0, 64_000), code: result.StatusCode ?? 1 };
+      const output = demux(Buffer.isBuffer(raw) ? raw : Buffer.from(raw)).slice(0, 64_000);
+      if (!result) return { output: `${output}\n[timed out after ${Math.round(timeoutMs / 1000)}s and was stopped]`, code: 124 };
+      return { output, code: result.StatusCode ?? 1 };
     } finally {
       try { await container.remove({ force: true }); } catch { /* already removed */ }
     }

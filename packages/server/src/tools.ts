@@ -277,7 +277,7 @@ export const BUILTIN_TOOLS: Tool[] = [
             Binds: [`${hostCwd}:/work`],
             PidsLimit: 256,
           },
-        });
+        }, shellTimeoutMs());
         return `exit ${result.code}\n${clipToolOutput(result.output)}`;
       }
       if (ctx.sandbox === 'docker-only') throw new Error('Docker sandbox is required and the Docker socket is not available.');
@@ -521,4 +521,10 @@ export function clipToolOutput(text: string, maxChars = 12_000): string {
   const tail = Math.floor(maxChars * 0.45);
   const omitted = text.length - head - tail;
   return `${text.slice(0, head)}\n\n... [${omitted.toLocaleString('en-US')} characters omitted to protect context] ...\n\n${text.slice(-tail)}`;
+}
+
+/** Shell commands (tests, builds, installs) often need minutes; 30s killed them. LA_SHELL_TIMEOUT_MS to change. */
+export function shellTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const value = Number(env.LA_SHELL_TIMEOUT_MS);
+  return Number.isFinite(value) && value >= 5_000 ? Math.min(value, 60 * 60_000) : 5 * 60_000;
 }
