@@ -37,6 +37,19 @@ export interface PlanInput {
   retrieved: RetrievedChunk[];
   messages: ContextSourceMessage[];
   tokenizer: TokenizerId;
+  /**
+   * Run-aware mode. Every message of the current run (from its user turn on) is kept, tool results in full up to a
+   * large cap; older chat history fills the remaining token budget. Tool results already shown as a digest stay a
+   * digest, and the oldest history message in this run stays fixed, so the prompt only grows at the end (prompt cache).
+   */
+  run?: {
+    /** Ids of the messages that belong to the current run, the user turn included. */
+    messageIds: string[];
+    /** Tool results of this run already shown as digests. Monotonic within a run. */
+    digestIds?: string[];
+    /** Oldest pre-run message kept in this run (fixed after the first step). '' = none; undefined = first step. */
+    historyFloorId?: string;
+  };
   /** Optional token breakdown hints from the caller for the Cursor-style context indicator. */
   breakdownHints?: {
     systemPrompt?: number;
@@ -61,6 +74,30 @@ export interface ContextPlan {
   trimmed: string[];
   excerpted: { id: string; omitted: string }[];
   breakdown: ContextBreakdown;
+  /** Run-aware mode: digested tool results (old plus new) and the fixed history floor, to store on the run. */
+  digestIds?: string[];
+  historyFloorId?: string;
+}
+
+/** Largest tool result kept whole inside the current run (about 6K tokens). */
+export const RUN_TOOL_CAP_CHARS = 24_000;
+/** Size of a tool-result digest (head, outline of the middle, tail). */
+export const DIGEST_CHARS = 1_800;
+const OUTLINE = /^\s*(?:\d+:\s*)?(?:export\s|async\s|function\s|class\s|interface\s|type\s|enum\s|def\s|struct\s|impl\s|fn\s|pub\s|public\s|private\s|protected\s|const\s+\w+\s*=\s*(?:async\s*)?\(|#{1,3}\s|describe\(|it\(|test\(|@@\s|diff --git|error|Error|FAIL|✗|exit\s+\d)/;
+
+/**
+ * A compact, deterministic stand-in for a long tool result: the head, an outline of what the middle holds (declarations,
+ * headings, errors, with their line numbers when the tool printed them), the tail, and how to read the rest.
+ */
+export function digestToolOutput(content: string, messageId: string, maxChars = DIGEST_CHARS): string {
+  const chars = codePoints(content);
+  if (chars.length <= maxChars) return content;
+  const head = chars.slice(0, Math.floor(maxChars * 0.45)).join('');
+  const tail = chars.slice(-Math.floor(maxChars * 0.2)).join('');
+  const middle = chars.slice(Math.floor(maxChars * 0.45), chars.length - Math.floor(maxChars * 0.2)).join('');
+  const outline = middle.split('\n').filter((line) => OUTLINE.test(line)).map((line) => line.trim().slice(0, 100)).slice(0, 24);
+  const lines = content.split('\n').length;
+  return `${head}\n…[digest: ${chars.length - maxChars} of ${chars.length} characters (${lines} lines) not shown${outline.length ? '; outline of the hidden part:' : ''}]\n${outline.join('\n')}${outline.length ? '\n' : ''}…[read the hidden part with read_output message=${messageId}, or re-read a slice of the file with startLine/endLine]…\n${tail}`;
 }
 
 function tokens(text: string, tokenizer: TokenizerId) {
@@ -156,6 +193,9 @@ export function planContext(input: PlanInput): ContextPlan {
     notes.push('Shrunk the summary block to leave room for the latest turn.');
   }
 
+  if (input.run) {
+    return planRunAware(input, { system, pinnedBlock, summaryText, summaryTokens, room, budgetTokens, summaryNodes, notes, trimmed });
+  }
   const pool = input.strategy === 'pinned'
     ? input.messages.slice(-4)
     : input.strategy === 'rolling'
@@ -283,4 +323,131 @@ export function foldCandidates(
   const cost = older.reduce((sum, message) => sum + tokens(message.content, tokenizer) + 4, 0);
   if (cost < triggerTokens) return null;
   return older.map((message) => message.id);
+}
+
+function planRunAware(
+  input: PlanInput,
+  ctx: { system: string; pinnedBlock: string; summaryText: string; summaryTokens: number; room: number; budgetTokens: number; summaryNodes: SummaryNode[]; notes: string[]; trimmed: string[] },
+): ContextPlan {
+  const run = input.run!;
+  const runIds = new Set(run.messageIds);
+  const digests = new Set(run.digestIds ?? []);
+  const excerpted: { id: string; omitted: string }[] = [];
+  const notes = ctx.notes;
+  const cost = (message: ContextSourceMessage) => tokens(message.content, input.tokenizer) + 4;
+  const firstRun = input.messages.findIndex((message) => runIds.has(message.id));
+  const runMessages = firstRun >= 0 ? input.messages.slice(firstRun) : [];
+  const before = firstRun >= 0 ? input.messages.slice(0, firstRun) : input.messages.slice();
+
+  const render = (message: ContextSourceMessage): ContextSourceMessage => {
+    if (message.role === 'tool') {
+      if (digests.has(message.id)) return { ...message, content: digestToolOutput(message.content, message.id) };
+      if (codePoints(message.content).length > RUN_TOOL_CAP_CHARS) {
+        const fit = headTailExcerpt(message.content, RUN_TOOL_CAP_CHARS);
+        excerpted.push({ id: message.id, omitted: fit.omitted });
+        return { ...message, content: `${fit.excerpt}\nRead more with read_output message=${message.id} offset=0.` };
+      }
+      return message;
+    }
+    if (codePoints(message.content).length > 12_000) {
+      const fit = headTailExcerpt(message.content, 12_000);
+      excerpted.push({ id: message.id, omitted: fit.omitted });
+      return { ...message, content: fit.excerpt };
+    }
+    return message;
+  };
+
+  // 1. The current run, whole. Over budget: turn the oldest full tool results into digests (never the newest two).
+  let rendered = runMessages.map(render);
+  let runCost = rendered.reduce((sum, message) => sum + cost(message), 0);
+  const newDigests: string[] = [];
+  if (runCost > ctx.room) {
+    const toolIds = runMessages.filter((message) => message.role === 'tool' && !digests.has(message.id)).map((message) => message.id);
+    for (const id of toolIds.slice(0, Math.max(0, toolIds.length - 2))) {
+      if (runCost <= ctx.room) break;
+      digests.add(id);
+      newDigests.push(id);
+      rendered = runMessages.map(render);
+      runCost = rendered.reduce((sum, message) => sum + cost(message), 0);
+    }
+    if (newDigests.length) notes.push(`Condensed ${newDigests.length} older tool result${newDigests.length === 1 ? '' : 's'} of this run into digests.`);
+  }
+  let truncated = excerpted.length > 0;
+  if (runCost > ctx.room && rendered.length) {
+    // Still too big: cut the middle of the largest message of the run, head and tail kept.
+    const largest = rendered.reduce((best, message, index) => (cost(message) > cost(rendered[best]!) ? index : best), 0);
+    const over = runCost - ctx.room;
+    const target = Math.max(240, codePoints(rendered[largest]!.content).length - (over + 64) * 3);
+    const fit = headTailExcerpt(rendered[largest]!.content, target);
+    excerpted.push({ id: rendered[largest]!.id, omitted: fit.omitted });
+    rendered[largest] = { ...rendered[largest]!, content: fit.excerpt };
+    runCost = rendered.reduce((sum, message) => sum + cost(message), 0);
+    truncated = true;
+    notes.push('This run is larger than the budget; the middle of its largest message was cut.');
+  }
+
+  // 2. Earlier history: from the fixed floor (or newest-first by tokens on the first step), older tool results as digests.
+  let room = ctx.room - runCost;
+  const maxOlder = input.strategy === 'pinned' ? 4 : 60;
+  const olderRendered = before.map((message) => (message.role === 'tool' ? { ...message, content: digestToolOutput(message.content, message.id) } : render(message)));
+  let start = before.length;
+  const floorIndex = run.historyFloorId ? before.findIndex((message) => message.id === run.historyFloorId) : -1;
+  if (floorIndex >= 0) {
+    start = floorIndex;
+    let olderCost = olderRendered.slice(start).reduce((sum, message) => sum + cost(message), 0);
+    while (start < before.length && olderCost > room) { olderCost -= cost(olderRendered[start]!); start += 1; }
+  } else if (run.historyFloorId !== '') {
+    let used = 0;
+    while (start > 0 && before.length - start < maxOlder) {
+      const next = cost(olderRendered[start - 1]!);
+      if (used + next > room) break;
+      used += next;
+      start -= 1;
+    }
+  }
+  // Never open with a tool result whose call was cut off.
+  while (start < before.length && before[start]!.role === 'tool') start += 1;
+  const older = olderRendered.slice(start);
+  room -= older.reduce((sum, message) => sum + cost(message), 0);
+  const recent = [...older, ...rendered];
+  const recentIds = new Set(recent.map((message) => message.id));
+  const droppedIds = input.messages.filter((message) => !recentIds.has(message.id)).map((message) => message.id);
+  const preamble = [ctx.system, ctx.pinnedBlock, ctx.summaryText ? `Earlier in this conversation:\n${ctx.summaryText}` : ''].filter(Boolean).join('\n\n');
+  const estimatedTokens = tokens(preamble, input.tokenizer) + recent.reduce((sum, message) => sum + cost(message), 0);
+  if (droppedIds.length && input.strategy !== 'pinned') notes.push(`${droppedIds.length} older messages sit outside this call.`);
+  const hints = input.breakdownHints ?? {};
+  const pinnedToks = tokens(ctx.pinnedBlock, input.tokenizer);
+  const fileMessageToks = recent.reduce((sum, message) => (message.role === 'tool' || /\[file:|\[Attached|<!--context-->/i.test(message.content) ? sum + cost(message) : sum), 0);
+  const recentToks = recent.reduce((sum, message) => sum + cost(message), 0);
+  const memoryToks = (hints.memory ?? 0) + pinnedToks;
+  const totalUsed = estimatedTokens + (hints.personaAndTools ?? 0);
+  return {
+    strategy: input.strategy,
+    budgetTokens: ctx.budgetTokens,
+    estimatedTokens,
+    outputReserve: input.outputReserve,
+    preamble,
+    recent,
+    droppedIds,
+    summaryIds: ctx.summaryNodes.map((node) => node.id),
+    overflow: droppedIds.length > 0 && input.strategy !== 'pinned',
+    truncated,
+    notes,
+    trimmed: ctx.trimmed,
+    excerpted,
+    breakdown: {
+      budget: ctx.budgetTokens,
+      used: totalUsed,
+      remaining: Math.max(0, ctx.budgetTokens - totalUsed),
+      outputReserve: input.outputReserve,
+      systemPrompt: Math.max(0, hints.systemPrompt ?? Math.max(0, tokens(ctx.system, input.tokenizer) - memoryToks - (hints.files ?? 0))),
+      personaAndTools: Math.max(0, hints.personaAndTools ?? 0),
+      memory: Math.max(0, memoryToks),
+      history: Math.max(0, ctx.summaryTokens + recentToks - fileMessageToks),
+      files: Math.max(0, (hints.files ?? 0) + fileMessageToks),
+    },
+    digestIds: [...digests],
+    // '' means "no earlier history in this run", so later steps do not start adding some (that would change the prefix).
+    historyFloorId: older[0]?.id ?? '',
+  };
 }

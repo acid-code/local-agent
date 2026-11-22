@@ -136,16 +136,37 @@ export function locatePath(input: {
   return null;
 }
 
-export function projectPath(roots: { label: string; path: string }[], project: string | undefined, workspace: string): string {
+export function projectPath(roots: { label: string; path: string }[], project: string | undefined, workspace: string, hint = ''): string {
   if (project === 'workspace') return workspace;
   if (project) {
-    const hit = roots.find((root) => root.label === project || path.resolve(root.path) === path.resolve(project));
+    const hit = roots.find((root) => root.label === project || path.resolve(root.path) === path.resolve(project))
+      // A path inside a project (or "label/sub/dir") means that project.
+      ?? roots.find((root) => (path.isAbsolute(project) && safeInside(root.path, path.resolve(project))) || project.startsWith(`${root.label}/`));
     if (!hit) throw new Error(`Unknown project "${project}". Use ${[...roots.map((root) => root.label), 'workspace'].join(', ')}.`);
     return hit.path;
   }
   if (roots.length === 1) return roots[0]!.path;
-  if (roots.length > 1) throw new Error(`Name the project: ${[...roots.map((root) => root.label), 'workspace'].join(', ')}.`);
+  if (roots.length > 1) {
+    const inferred = inferProject(roots, hint);
+    if (inferred) return roots.find((root) => root.label === inferred)!.path;
+    throw new Error(`Name the project: ${[...roots.map((root) => root.label), 'workspace'].join(', ')}.`);
+  }
   return workspace;
+}
+
+const escapeRe = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** The one project a command clearly points at: an absolute path inside it, or `cd <label>` / `-C <label>`. */
+export function inferProject(roots: { label: string; path: string }[], text: string): string | undefined {
+  if (!text.trim()) return undefined;
+  const hits = new Set<string>();
+  for (const root of roots) {
+    const base = escapeRe(path.resolve(root.path));
+    const absolute = new RegExp(`(?:^|[\\s'"=:(])${base}(?:$|[\\s'"/;&|)])`);
+    const relative = new RegExp(`(?:^|[\\s;&|(])(?:cd|pushd|-C|--prefix|--cwd|--dir)\\s+['"]?(?:\\./)?${escapeRe(root.label)}(?:$|['"/\\s;&|)])`);
+    if (absolute.test(text) || relative.test(text)) hits.add(root.label);
+  }
+  return hits.size === 1 ? [...hits][0] : undefined;
 }
 
 function inside(root: string, relative: string): string | null {

@@ -1,0 +1,13 @@
+{
+  "id": "slides-by-slide",
+  "persona": "Presenter",
+  "prompt": "Make an 8-slide deck about honey bees for a school class, with speaker notes.",
+  "expect": {
+    "toolsUsed": ["make_slides"],
+    "toolsAnyOf": ["slide_draft"],
+    "replyMatches": ["\\[file:"],
+    "noMalformedArgs": true,
+    "maxSteps": 20,
+    "maxSeconds": 900
+  }
+}

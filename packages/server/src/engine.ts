@@ -30,18 +30,19 @@ import {
 } from '@local-agent/shared';
 import { Bus } from './bus.js';
 import { vercelTools } from './vercel.js';
-import type { Agent, ModelRow, RunRow, Store } from './db.js';
+import type { Agent, ModelRow, ProviderRow, RunRow, Store } from './db.js';
 import type { DockerCtl } from './docker.js';
 import { indexText, retrieve, type VectorIndex } from './embeddings.js';
-import { countGeminiTokens, ollamaNumCtx, providerFor, type ModelProvider } from './providers.js';
+import { countGeminiTokens, maxTokensFor, ollamaNumCtx, providerFor, samplingFor, type ModelProvider } from './providers.js';
 import type { Settings } from './settings.js';
 import { CODING_TOOLS } from './coding.js';
 import { formatCitations, searchKnowledge } from './kb.js';
 import { kbSearchTool, loadSkillTool, toolsFor, type Tool, type ToolContext } from './tools.js';
+import { CORE_TOOLS, LEAN_MIN_TOOLS, SEED_TOOLS, findToolsTool, leanMenuEnabled, rankTools } from './toolsearch.js';
 import { runSkillScript, skillCatalog } from './skills.js';
 import { getWorkshop, workshopBrief } from './workshops.js';
 import { chatWorkspaceBrief, chatWorkspacePaths, getChatWorkspaces, setChatWorkspaces } from './chat-workspaces.js';
-import { checkOrRepair, contractForAgent, pickAutoRole, toolArgumentsSchema, toolParameters } from './contracts.js';
+import { checkOrRepair, contractForAgent, mergeToolParameters, pickAutoRole, toolArgumentsSchema } from './contracts.js';
 import { addProjectNote, changesSince, ensureTaskBranch, isSmallEdit, listSharedRepos, matchRepos, refreshRepo, releaseRepoLocks, repoSyncTool, sharedRepoBrief, taskBranchName, tryLockRepo, type GitIdentity } from './repos.js';
 import { isMissingModelError, isToolUnsupportedError, ollamaCapabilities, ollamaRoot } from './ollama.js';
 import { scanMachine } from './discovery.js';
@@ -250,8 +251,10 @@ export class Engine {
       try {
         const ended = this.store.getRun(runId);
         const endedSession = ended ? this.store.getSession(ended.sessionId) : null;
-        if (ended?.modelId && endedSession && !ended.cursor.helperId && endedSession.activeModelId !== ended.modelId && this.store.getModel(ended.modelId)) {
-          this.store.updateSession(endedSession.id, { activeModelId: ended.modelId });
+        // The uncensored fallback is for one step only: the chat keeps the model the run came from.
+        const keep = ended?.cursor.uncensoredFrom && this.store.getModel(ended.cursor.uncensoredFrom) ? ended.cursor.uncensoredFrom : ended?.modelId;
+        if (keep && endedSession && !ended?.cursor.helperId && endedSession.activeModelId !== keep && this.store.getModel(keep)) {
+          this.store.updateSession(endedSession.id, { activeModelId: keep });
         }
       } catch { /* the store closed while shutting down */ }
       // No automatic switch back to Qwen here: the next run that needs Qwen switches lazily under its lease.
@@ -804,6 +807,17 @@ export class Engine {
       })!;
       this.bus.publish({ type: 'steering', runId: run.id, messageId: steering.id, status: 'applied' });
     }
+    // The uncensored fallback answers one step after a refusal; then the run goes back to the model it came from.
+    if (current.cursor.uncensoredFrom && current.cursor.uncensoredAt !== undefined && current.cursor.turn > current.cursor.uncensoredAt) {
+      const back = this.store.getModel(current.cursor.uncensoredFrom);
+      if (back && back.enabled !== false) {
+        const reason = `Back to ${back.name} after one step on the uncensored fallback.`;
+        this.store.addLog('info', reason, undefined, 'router');
+        current = this.store.updateRun(run.id, { cursor: { ...current.cursor, modelId: back.id, uncensoredFrom: undefined, uncensoredAt: undefined, routingReason: reason }, modelId: back.id, routingNote: reason })!;
+      } else {
+        current = this.store.updateRun(run.id, { cursor: { ...current.cursor, uncensoredFrom: undefined, uncensoredAt: undefined } })!;
+      }
+    }
     if (current.cursor.turn >= maxSteps) {
       this.store.updateRun(run.id, { cursor: { ...current.cursor, phase: 'summarize' } });
       return;
@@ -815,7 +829,7 @@ export class Engine {
         runId: run.id, kind: 'config', name: 'config', status: 'completed', input: { from: current.cursor.configVersion, to: settings.version },
         output: 'Applied the new config between steps.', toolCallId: null, turn: current.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now(),
       });
-      current = this.store.updateRun(run.id, { cursor: { ...current.cursor, modelId: undefined, agentUpdatedAt: agent.updatedAt, configVersion: settings.version } })!;
+      current = this.store.updateRun(run.id, { cursor: { ...current.cursor, modelId: undefined, frozen: undefined, agentUpdatedAt: agent.updatedAt, configVersion: settings.version } })!;
     }
     if (!current.cursor.modelId) {
       await this.ensureSomeModel(agent.id);
@@ -825,6 +839,18 @@ export class Engine {
     }
     let model = this.store.getModel(current.cursor.modelId!);
     if (!model) throw new Error('Selected model is gone.');
+    // A turn that needs tools never runs tool-less on a model that cannot call them: move to the main model once.
+    if (this.toolSupportOf(model) === false && !current.cursor.noTools && !current.cursor.toolFallback) {
+      const sessionRow = this.store.getSession(run.sessionId);
+      const needsTools = current.cursor.turn > 0 || likelyNeedsTools(this.userText(current), { kb: this.hasKnowledge(run.agentId), code: sessionRow?.mode === 'code' || Boolean(current.cursor.stage) });
+      const capable = needsTools ? this.toolCapableModel(settings, run.agentId, model.id) : undefined;
+      if (capable) {
+        const reason = `Switched to ${capable.name} — ${model.name} cannot call tools and this turn needs them.`;
+        this.store.addLog('warn', reason, undefined, 'router');
+        current = this.store.updateRun(run.id, { cursor: { ...current.cursor, modelId: capable.id, toolFallback: true, switched: true, routingReason: reason }, modelId: capable.id, switched: true, routingNote: reason })!;
+        model = capable;
+      }
+    }
     let built = await this.buildMessages(current, agent, model);
     if (!this.reserveGemini(model, built.plan.estimatedTokens)) {
       const fallback = this.candidates(settings, run.agentId).find((item) => item.local && item.providerKind !== 'rehearsal');
@@ -872,7 +898,7 @@ export class Engine {
       else await this.llama.switchToQwen();
     }
     const toolless = Boolean(current.cursor.noTools) || this.toolSupportOf(model) === false;
-    const tools = toolless ? [] : this.tools(agent, this.store.getSession(run.sessionId)?.mode, current.cursor.stage, current.cursor.toolSubset, Boolean(current.cursor.helperId)).map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
+    const tools = toolless ? [] : this.tools(agent, this.store.getSession(run.sessionId)?.mode, current.cursor.stage, current.cursor.toolSubset, Boolean(current.cursor.helperId), current).map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
     const sessionForCtx = this.store.getSession(run.sessionId);
     const repoTask = Boolean(sessionForCtx?.mode === 'code' || sessionForCtx?.workshopId || current.cursor.stage || turnRoots(this.store, current, this.libraryDir).length > 0);
     const roleForCtx = current.cursor.autoRole || contractForAgent(agent.name)?.modelRole || 'main';
@@ -902,6 +928,8 @@ export class Engine {
     });
     this.bus.publish({ type: 'step', runId: run.id, step });
     const started = Date.now();
+    // llama-server models think unless told not to; Ollama models only when the route asked for reasoning.
+    const thinkingOn = !current.cursor.noThink && (Boolean(current.cursor.reasoning) || Boolean(providerRow && (isLlamaServerProvider(providerRow) || isUncensoredProvider(providerRow))));
     let text = '';
     let reasoningText = '';
     this.liveStreams.set(run.id, { text: '', thinking: '', status: 'running' });
@@ -916,6 +944,8 @@ export class Engine {
         keepAlive: model.local ? keepAliveFor(model) : undefined,
         think: Boolean(current.cursor.reasoning) && !current.cursor.noThink,
         noThink: Boolean(current.cursor.noThink),
+        sampling: samplingFor(`${model.apiName} ${model.name}`, { thinking: thinkingOn, task: repoTask ? 'code' : 'general' }),
+        maxTokens: maxTokensFor({ thinking: thinkingOn }),
       })) {
         if (signal.aborted) throw new StopError();
         if (event.type === 'token') {
@@ -957,7 +987,7 @@ export class Engine {
           this.store.addLog('warn', reason, undefined, 'router');
           this.store.updateStep(step.id, { status: 'failed', error: 'The selected model refused the request.', endedAt: now(), latencyMs: Date.now() - started });
           this.store.updateRun(run.id, {
-            cursor: { ...current.cursor, modelId: fallback.id, uncensoredRetry: true, phase: 'model', switched: true, routingReason: reason },
+            cursor: { ...current.cursor, modelId: fallback.id, uncensoredRetry: true, uncensoredFrom: model.id, uncensoredAt: current.cursor.turn, phase: 'model', switched: true, routingReason: reason },
             modelId: fallback.id,
             switched: true,
             routingNote: reason,
@@ -1031,6 +1061,18 @@ export class Engine {
         })!;
         return;
       }
+      // llama-server restarted or dropped the connection mid-stream: back off, wait for /health, retry the same step.
+      if (!signal.aborted && isTransientModelError(message) && (current.cursor.transientRetries ?? 0) < transientRetryCap()) {
+        const attempt = (current.cursor.transientRetries ?? 0) + 1;
+        const delay = transientDelayMs(attempt);
+        this.store.updateStep(step.id, { status: 'failed', error: message, endedAt: now(), latencyMs: Date.now() - started });
+        this.store.addLog('warn', `${model.name} connection dropped (${message.slice(0, 120)}). Retry ${attempt}/${transientRetryCap()} in ${Math.round(delay / 1000)}s.`, undefined, 'providers');
+        await this.waitForModelServer(providerRow, delay, signal);
+        if (signal.aborted) throw new StopError();
+        const fresh = this.store.getRun(run.id) ?? current;
+        current = this.store.updateRun(run.id, { cursor: { ...fresh.cursor, transientRetries: attempt, phase: 'model' } })!;
+        return;
+      }
       if (isProviderOutage(message) && !current.cursor.providerFallback) {
         const localCandidates = this.candidates(this.store.getSettings(), run.agentId).filter((item) => item.local && item.id !== model.id);
         const local = localCandidates.filter((item) => item.contextWindow >= 16_384).sort((a, b) => b.contextWindow - a.contextWindow)[0]
@@ -1095,7 +1137,7 @@ export class Engine {
     }
     if (!toolCalls?.length && text.trim()) {
       const rounds = current.cursor.recovery?.rounds ?? 0;
-      const check = checkFinalReply(this.store.listSteps(run.id), text, rounds, maxSteps - current.cursor.turn, this.replyLang(agent, this.userText(run)) === 'he', tools.map((t) => t.name));
+      const check = checkFinalReply(this.store.listSteps(run.id), text, rounds, maxSteps - current.cursor.turn, this.replyLang(agent, this.userText(run)) === 'he', tools.map((t) => t.name), this.store.getRun(run.id)?.cursor.acceptance ?? []);
       if (check.action === 'retry') {
         this.store.updateStep(step.id, { status: 'completed', output: { text, discarded: check.reason }, tokensIn: usage.inputTokens, tokensOut: usage.outputTokens, costUsd: cost, latencyMs: Date.now() - started, endedAt: now() });
         this.store.addStep({ runId: run.id, kind: 'contract', name: 'verify', status: 'completed', input: { round: rounds + 1 }, output: `Sent back: ${check.reason}`, toolCallId: null, turn: current.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now() });
@@ -1165,12 +1207,31 @@ export class Engine {
       if (completed.has(call.id)) continue;
       await this.waitIfPaused(run.id, signal);
       if (signal.aborted) throw new StopError();
-      const tools = this.tools(this.store.getAgent(run.agentId)!, this.store.getSession(run.sessionId)?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId));
+      const tools = this.tools(this.store.getAgent(run.agentId)!, this.store.getSession(run.sessionId)?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId), run, true);
       const tool = tools.find((item) => item.name === call.name);
+      // A permitted tool called before find_tools surfaced it still runs, and stays on the menu from now on.
+      if (tool && run.cursor.extraTools !== undefined && call.name !== 'find_tools' && !run.cursor.extraTools.includes(call.name)) this.addRunTools(run, [call.name]);
+      // Malformed arguments go back to the model as a fixable error instead of running the tool with {}.
+      const badAttempt = (this.store.getRun(run.id)?.cursor.badArgs ?? 0) + 1;
+      const badJson = argumentsError(call.name, call.arguments, badAttempt);
+      if (badJson) {
+        const latestRun = this.store.getRun(run.id)!;
+        run.cursor.badArgs = badAttempt;
+        // Past the cap the run stops calling tools and answers with what it has (one more model step, no tools).
+        const stop = badAttempt >= BAD_ARGS_CAP;
+        if (stop) run.cursor.noTools = true;
+        this.store.updateRun(run.id, { cursor: { ...latestRun.cursor, badArgs: badAttempt, ...(stop ? { noTools: true } : {}) } });
+        if (stop) this.store.addLog('warn', `Run ${run.id}: ${badAttempt} malformed tool calls; finishing without tools.`, undefined, 'engine');
+        this.store.addStep({ runId: run.id, kind: 'contract', name: call.name, status: 'failed', input: { raw: call.arguments.slice(0, 2000) }, output: badJson, toolCallId: call.id, turn: run.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: badJson, startedAt: now() });
+        this.persistTool(run, call, stop ? `${badJson}\nThat was the last try: no more tool calls in this run. Answer now with what you have and say what you could not do.` : badJson, 'failed', false);
+        completed.add(call.id);
+        this.bumpTools(run.id, completed);
+        continue;
+      }
       let args = parseArgs(call.arguments);
       const speaker = this.store.getAgent(run.agentId);
       const contract = speaker ? contractForAgent(speaker.name) : null;
-      if (contract && contract.tools.length && !contract.tools.includes(call.name) && !CONTRACT_ALWAYS.has(call.name)) {
+      if (contract && speaker && !contractAllows(contract, call.name, this.allowedTools(speaker, this.store.getSession(run.sessionId)?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId)).servers)) {
         const message = `${contract.name} is not allowed to call ${call.name}.`;
         this.store.addStep({ runId: run.id, kind: 'contract', name: call.name, status: 'failed', input: args, output: message, toolCallId: call.id, turn: run.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: message, startedAt: now() });
         this.persistTool(run, call, message, 'failed');
@@ -1223,16 +1284,38 @@ export class Engine {
         this.bumpTools(run.id, completed);
         continue;
       }
-      // Do not execute the exact same read-only tool call again within a run. This
-      // prevents small local models from spending turns on duplicate searches/reads.
+      // Loop breaker: the same call (name + arguments) again and again. 3rd in a row: nudge. 4th: refuse it and let the
+      // model answer once more without tools, so the run ends cleanly instead of burning every step.
+      const sig = `${call.name}:${stableJson(args)}`;
+      const latest = this.store.getRun(run.id)!;
+      const loop = latest.cursor.loop?.sig === sig ? { sig, count: latest.cursor.loop.count + 1 } : { sig, count: 1 };
+      run.cursor.loop = loop;
+      this.store.updateRun(run.id, { cursor: { ...latest.cursor, loop } });
+      if (loop.count >= LOOP_STOP) {
+        const message = `Stopped: this is the ${loop.count}th identical ${call.name} call in a row and nothing changed. No more tool calls in this run. Answer now: what you found, what did not work, and what the user can do next.`;
+        this.store.addStep({ runId: run.id, kind: 'contract', name: 'loop', status: 'failed', input: { tool: call.name, count: loop.count }, output: message, toolCallId: call.id, turn: run.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: message, startedAt: now() });
+        this.store.addLog('warn', `Run ${run.id}: ${call.name} repeated ${loop.count} times with the same arguments. Asking for a final answer without tools.`, undefined, 'engine');
+        this.persistTool(run, call, message, 'failed', false);
+        const fresh = this.store.getRun(run.id)!;
+        run.cursor.noTools = true;
+        this.store.updateRun(run.id, { cursor: { ...fresh.cursor, noTools: true } });
+        completed.add(call.id);
+        this.bumpTools(run.id, completed);
+        continue;
+      }
+      const loopNote = loop.count >= LOOP_NUDGE ? `\n[loop] This is call ${loop.count} in a row of ${call.name} with the same arguments. Repeating it will not change the result: use what you have, try a different approach, or answer.` : '';
+      // A read-only call repeated with nothing changed since: point at the earlier result instead of running (and pasting)
+      // it again. After a write, shell command or other change, it runs fresh (the file or state may differ now).
       if (!tool.mutates(args)) {
-        const stable = (value: unknown) => JSON.stringify(value, Object.keys(value as Record<string, unknown>).sort());
-        const prior = this.store.listSteps(run.id)
+        const history = this.store.listSteps(run.id);
+        const prior = history
           .filter((step) => step.kind === 'tool' && step.name === call.name && step.status === 'completed')
           .reverse()
-          .find((step) => stable(step.input) === stable(args));
-        if (prior) {
-          const repeated = `Already completed ${call.name} with these arguments. Reusing the previous result:\n${String(prior.output ?? '').slice(0, 16_000)}`;
+          .find((step) => stableJson(step.input) === stableJson(args));
+        const changedSince = prior ? history.some((step) => step.index > prior.index && step.kind === 'tool' && step.status === 'completed' && Boolean(tools.find((item) => item.name === step.name)?.mutates((step.input ?? {}) as Record<string, unknown>))) : false;
+        if (prior && !changedSince) {
+          const output = String(prior.output ?? '');
+          const repeated = `Already ran ${call.name} with these arguments in this run and nothing has changed since; the result is above.${output.length > 1500 ? ` First part again:\n${output.slice(0, 1500)}\n… (use read_output or narrower arguments for more)` : `\n${output}`}${loopNote || '\nDo not repeat it: use that result or try something different.'}`;
           this.persistTool(run, call, repeated, 'completed', false);
           completed.add(call.id);
           this.bumpTools(run.id, completed);
@@ -1297,13 +1380,13 @@ export class Engine {
       try {
         const output = this.vault.redact(clampText(await tool.execute(args, { ...this.contextFor(run, signal), toolCallId: call.id }), 200_000));
         this.store.updateStep(step.id, { status: 'completed', output, latencyMs: Date.now() - started, endedAt: now() });
-        this.persistTool(run, call, output, 'completed', false);
+        this.persistTool(run, call, `${output}${loopNote}`, 'completed', false);
         this.bus.publish({ type: 'step', runId: run.id, step: this.store.getStep(step.id) });
       } catch (error) {
         if (error instanceof CrashError || error instanceof StopError || error instanceof InterruptedToolError) throw error;
         const message = error instanceof Error ? error.message : String(error);
         this.store.updateStep(step.id, { status: 'failed', error: message, endedAt: now(), latencyMs: Date.now() - started });
-        this.persistTool(run, call, `Error: ${message}${recoveryHint(call.name, message)}`, 'failed', false);
+        this.persistTool(run, call, `Error: ${message}${recoveryHint(call.name, message)}${loopNote}`, 'failed', false);
       }
       if (call.name === 'plan' && Array.isArray(args.items) && args.items.length && run.cursor.stage === 'plan') handoff = true;
       if (call.name === 'tasks' && args.action === 'set' && Array.isArray(args.items) && args.items.length >= 2) {
@@ -1540,7 +1623,8 @@ export class Engine {
     // Hermes-style context: capped memory files, the project's own rule files, and a nudge to save a skill after hard tasks.
     const memoryNote = agent.memoryEnabled ? memoryBrief(this.store, agent.id) : '';
     const rulesNote = session ? projectRules(chatWorkspacePaths(this.store, run.sessionId, session.ownerId || OWNER_ID), disabledRules(this.store, run.sessionId)) : '';
-    const offeredTools = this.tools(agent, session?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId));
+    // Everything this persona can reach (found or not): notes about skills and teammates name what find_tools can surface.
+    const offeredTools = this.tools(agent, session?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId), run, true);
     const toolNames = offeredTools.map((tool) => tool.name);
     const nudge = run.cursor.helperId ? '' : skillNudge(run.cursor.turn, toolNames);
     const languageNote = languageHint(this.replyLang(agent, user?.content ?? ''));
@@ -1576,8 +1660,10 @@ export class Engine {
       ? '\n\nWeb lookup rule: always call web_search (SearXNG) first before calling web_fetch or browse; never invent URLs.'
       : '';
     const sharedRepoNote = sharedRepoBrief(this.store);
-    // llama-server reuses the longest cached prompt prefix. Keep the system prompt identical across turns and
-    // carry the per-turn parts (workspace changes, stage, nudges, KB passages, skills) on the newest user message.
+    // llama-server reuses the longest cached prompt prefix, and the hybrid Qwen3.6 cannot roll back into the middle of
+    // it. So for these models the prompt only ever grows within a run: the preamble and the per-run context are frozen
+    // at the first step, and notes (recovery, steering, nudges) are pinned once after the message that was last when
+    // they appeared, instead of being rewritten into an earlier message each step.
     const cacheFriendly = this.cacheFriendly(model);
     const system = cacheFriendly
       ? `${agent.systemPrompt}${sharedRepoNote}${rulesNote}${memoryNote}${teamNote}${searchFirstNote}${kbHint}${CITE_HINT}${HONESTY_RULE}${run.cursor.helperId ? '' : TASKS_HINT}${languageNote}`
@@ -1595,20 +1681,39 @@ export class Engine {
       ? estimateTokens(JSON.stringify(offeredTools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }))), tok)
       : 0;
     const optionalParts = [{ label: 'knowledge base passages', text: kbNote }, { label: 'workshop brief', text: workshopNote }, { label: 'skills catalog', text: skillNote }].filter((part) => part.text.trim());
+    const frozen = cacheFriendly && run.cursor.frozen?.modelId === model.id ? run.cursor.frozen : undefined;
     let turnContext = '';
     if (cacheFriendly) {
-      const parts = [`${chatWorkspaces}${stageNote}${roleNote}${nudge}${recoveryNote}`.trim(), ...optionalParts.map((part) => part.text.trim())];
-      const cap = (run.cursor.budgetOverride || budget) * 0.4;
-      while (parts.length > 1 && estimateTokens(parts.join('\n\n'), tok) > cap) parts.pop();
-      turnContext = parts.filter(Boolean).join('\n\n');
+      if (frozen) {
+        turnContext = frozen.turnContext;
+      } else {
+        const parts = [chatWorkspaces.trim(), ...optionalParts.map((part) => part.text.trim())];
+        const cap = (run.cursor.budgetOverride || budget) * 0.4;
+        while (parts.length > 1 && estimateTokens(parts.join('\n\n'), tok) > cap) parts.pop();
+        turnContext = parts.filter(Boolean).join('\n\n');
+      }
     }
+    // Pin new notes once (split on blank lines so a growing recovery note does not repeat its earlier paragraphs).
+    const pinnedNotes = [...(run.cursor.notes ?? [])];
+    if (cacheFriendly) {
+      const seen = new Set(pinnedNotes.map((note) => note.text));
+      const anchorId = messages.at(-1)?.id ?? user?.id ?? '';
+      for (const piece of [stageNote, roleNote, nudge, recoveryNote].flatMap((text) => text.split(/\n{2,}/)).map((text) => text.trim()).filter(Boolean)) {
+        if (seen.has(piece)) continue;
+        seen.add(piece);
+        pinnedNotes.push({ anchorId, text: piece });
+      }
+    }
+    const notesTokens = pinnedNotes.reduce((sum, note) => sum + estimateTokens(note.text, tok) + 8, 0);
     const turnContextTokens = turnContext ? estimateTokens(turnContext, tok) + 16 : 0;
+    const runMessageIds = messages.filter((message) => message.runId === run.id || message.id === user?.id).map((message) => message.id);
     const plan = planContext({
-      strategy, contextWindow: model.contextWindow, practicalBudget: (run.cursor.budgetOverride || budget) - turnContextTokens, outputReserve: settings.outputReserveTokens,
+      strategy, contextWindow: model.contextWindow, practicalBudget: (run.cursor.budgetOverride || budget) - turnContextTokens - notesTokens - (toolSchemaTokens <= (run.cursor.budgetOverride || budget) * 0.35 ? toolSchemaTokens : 0), outputReserve: settings.outputReserveTokens,
       system, optional: cacheFriendly ? [] : optionalParts,
       pinned: notes.filter((note) => note.pinned).map((note) => note.content),
       summaries, retrieved, tokenizer: tok,
       messages: this.uncoveredMessages(messages, summaries).map((message) => ({ id: message.id, role: message.role as 'user', content: message.content })),
+      run: { messageIds: runMessageIds, digestIds: run.cursor.digestIds, historyFloorId: run.cursor.historyFloorId },
       breakdownHints: {
         systemPrompt: estimateTokens(`${CITE_HINT}${HONESTY_RULE}${TASKS_HINT}${searchFirstNote}${languageNote}${stageNote}${roleNote}${recoveryNote}`, tok),
         personaAndTools: estimateTokens(`${agent.systemPrompt}${teamNote}${skillNote}`, tok) + toolSchemaTokens,
@@ -1616,6 +1721,24 @@ export class Engine {
         files: estimateTokens(`${sharedRepoNote}${chatWorkspaces}${rulesNote}${workshopNote}`, tok),
       },
     });
+    if (frozen) plan.preamble = frozen.system;
+    const digestsBefore = run.cursor.digestIds?.length ?? 0;
+    // Keep the run's context decisions on the run, so every later step renders the same prefix.
+    const patch: Partial<RunCursor> = {
+      digestIds: plan.digestIds,
+      historyFloorId: plan.historyFloorId,
+      ...(cacheFriendly ? { notes: pinnedNotes, frozen: frozen ?? { modelId: model.id, system: plan.preamble, turnContext } } : {}),
+    };
+    Object.assign(run.cursor, patch);
+    const stored = this.store.getRun(run.id);
+    if (stored) this.store.updateRun(run.id, { cursor: { ...stored.cursor, ...patch } });
+    if ((plan.digestIds?.length ?? 0) > digestsBefore) {
+      this.store.addStep({
+        runId: run.id, kind: 'context', name: 'digest', status: 'completed', input: { digestIds: plan.digestIds },
+        output: plan.notes.find((note) => note.startsWith('Condensed')) || 'Condensed older tool results.', toolCallId: null,
+        turn: run.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now(),
+      });
+    }
     if (plan.trimmed.length) {
       this.store.addStep({
         runId: run.id, kind: 'context', name: 'trim', status: 'completed', input: { trimmed: plan.trimmed },
@@ -1639,7 +1762,9 @@ export class Engine {
     this.lastContext.set(run.sessionId, plan.breakdown);
     this.bus.publish({ type: 'context', runId: run.id, used: plan.breakdown.used, budget: plan.breakdown.budget, breakdown: plan.breakdown });
     const recent = new Map(messages.map((message) => [message.id, message]));
+    const runIds = new Set(runMessageIds);
     const chat: ChatMessage[] = [{ role: 'system', content: plan.preamble }];
+    const chatIds: string[] = [''];
     for (const item of plan.recent) {
       const message = recent.get(item.id);
       if (!message) continue;
@@ -1647,16 +1772,24 @@ export class Engine {
       chat.push({
         role: message.role as ChatMessage['role'], content: spoken, toolCallId: message.toolCallId ?? undefined,
         name: message.toolName ?? undefined, toolCalls: (message.toolCalls as ToolCall[] | null) ?? undefined, imageUrl: message.imageUrl ?? undefined,
+        // This run's reasoning goes back to llama-server (the template keeps it after the last user turn).
+        reasoning: cacheFriendly && message.role === 'assistant' && runIds.has(message.id) ? message.thinking ?? undefined : undefined,
       });
+      chatIds.push(message.id);
     }
     if (turnContext) {
-      const lastUser = chat.map((message) => message.role).lastIndexOf('user');
-      if (lastUser > 0) {
-        const target = chat[lastUser]!;
-        chat[lastUser] = { ...target, content: `<turn_context>\n${turnContext}\n</turn_context>\n\n${target.content}` };
+      const userIndex = user ? chatIds.indexOf(user.id) : -1;
+      const target = userIndex > 0 ? userIndex : chat.map((message) => message.role).lastIndexOf('user');
+      if (target > 0) {
+        chat[target] = { ...chat[target]!, content: `<turn_context>\n${turnContext}\n</turn_context>\n\n${chat[target]!.content}` };
       } else {
         chat[0] = { ...chat[0]!, content: `${chat[0]!.content}\n\n${turnContext}` };
       }
+    }
+    for (const note of cacheFriendly ? pinnedNotes : []) {
+      let index = chatIds.indexOf(note.anchorId);
+      if (index <= 0) index = chat.length - 1;
+      chat[index] = { ...chat[index]!, content: `${chat[index]!.content}\n\n<note>\n${note.text}\n</note>` };
     }
     return { plan, messages: chat, cutNote };
   }
@@ -1725,26 +1858,62 @@ export class Engine {
     const setting = agent.hebrewCleanup && agent.hebrewCleanup !== 'inherit' ? agent.hebrewCleanup : member.cleanup;
     if (!wantsCleanup(setting, model)) return text;
     this.bus.publish({ type: 'status', runId: run.id, status: 'running', detail: 'Polishing the Hebrew' });
-    const result = await cleanupHebrew(text, async (prompt) => {
-      const provider = this.provider(model);
+    const side = this.sideModel(model);
+    const ask = async (target: ModelRow, prompt: string) => {
+      const provider = this.provider(target);
       let out = '';
-      for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, signal: AbortSignal.timeout(60_000), noThink: true })) {
+      for await (const event of provider.complete({ model: target.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, signal: AbortSignal.timeout(60_000), noThink: true, sampling: samplingFor(`${target.apiName} ${target.name}`, { thinking: false, task: 'general' }), maxTokens: Math.max(1536, Math.ceil(prompt.length / 2)) })) {
         if (event.type === 'token') out += event.text;
       }
       return out;
+    };
+    // Off Qwen's single llama-server slot when a small Ollama model is there; the main model if that fails.
+    const result = await cleanupHebrew(text, async (prompt) => {
+      if (side.id === model.id) return ask(model, prompt);
+      try { return await ask(side, prompt); } catch { return ask(model, prompt); }
     });
     if (result.changed) this.store.addLog('info', `Hebrew cleanup: ${result.before} → ${result.after} foreign words.`, run.id, 'router');
     else if (result.reason !== 'already clean') this.store.addLog('info', `Hebrew cleanup kept the original: ${result.reason}.`, run.id, 'router');
     return result.text;
   }
 
+  /**
+   * Side work (summaries, Hebrew polish) for a model on llama-server goes to a small Ollama model (gemma3:4b by
+   * default, LA_SIDE_MODEL to change, "off" to disable), so it does not queue behind or evict the chat on Qwen's
+   * single slot. Falls back to the main model when none is installed or llama-server would block it.
+   */
+  private sideModel(main: ModelRow): ModelRow {
+    const wanted = (process.env.LA_SIDE_MODEL ?? 'gemma3:4b').trim().toLowerCase();
+    if (wanted === 'off' || main.profileId === 'rehearsal') return main;
+    const provider = this.store.getProvider(main.providerId);
+    if (!provider || !(isLlamaServerProvider(provider) || isUncensoredProvider(provider))) return main;
+    const usable = (item: ModelRow) => {
+      const owner = this.store.getProvider(item.providerId);
+      return item.enabled && !item.embedding && item.local && owner && !isLlamaServerProvider(owner) && !isUncensoredProvider(owner) && !this.llama.blocks(item, owner);
+    };
+    const models = this.store.listModels();
+    return models.find((item) => usable(item) && (item.apiName.toLowerCase() === wanted || item.name.toLowerCase() === wanted))
+      ?? models.find((item) => usable(item) && item.sizeClass === 'small' && /gemma/i.test(item.apiName))
+      ?? main;
+  }
+
   private async trySummarize(model: ModelRow, prompt: string): Promise<string | null> {
+    const side = this.sideModel(model);
+    if (side.id !== model.id) {
+      const text = await this.summarizeOn(side, prompt);
+      if (text) return text;
+      this.store.addLog('warn', `Summary on ${side.name} failed; using ${model.name}.`, undefined, 'context');
+    }
+    return this.summarizeOn(model, prompt);
+  }
+
+  private async summarizeOn(model: ModelRow, prompt: string): Promise<string | null> {
     if (model.profileId === 'rehearsal') return prompt.split('\n').filter((line) => line.startsWith('user:') || line.startsWith('assistant:')).slice(0, 6).join(' ').slice(0, 800) || 'Summary stored.';
     try {
       const provider = this.provider(model);
       let text = '';
       const timer = AbortSignal.timeout(30_000);
-      for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, noThink: true, signal: timer })) {
+      for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, noThink: true, sampling: samplingFor(`${model.apiName} ${model.name}`, { thinking: false, task: 'general' }), maxTokens: maxTokensFor({ thinking: false, side: true }), signal: timer })) {
         if (event.type === 'token') text += event.text;
       }
       return text.trim().slice(0, 4000) || null;
@@ -1758,7 +1927,7 @@ export class Engine {
     try {
       const provider = this.provider(model);
       let text = '';
-      for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0 })) {
+      for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, noThink: true, sampling: samplingFor(`${model.apiName} ${model.name}`, { thinking: false, task: 'general' }), maxTokens: maxTokensFor({ thinking: false, side: true }) })) {
         if (event.type === 'token') text += event.text;
       }
       return text.slice(0, 4000) || 'Summary stored.';
@@ -1852,7 +2021,84 @@ export class Engine {
     return this.refreshing;
   }
 
-  private tools(agent: Agent, sessionMode?: string, stage?: 'plan' | 'implement', subset?: string[], helper = false) {
+  /**
+   * What the model is offered. Small allowlists get everything; larger ones get a lean menu (declared tools plus
+   * essentials), find_tools, and whatever this run found or was seeded with, appended in order so the prefix holds.
+   * `all` returns every permitted tool (for executing a call), plus find_tools.
+   */
+  private tools(agent: Agent, sessionMode?: string, stage?: 'plan' | 'implement', subset?: string[], helper = false, run?: RunRow, all = false): Tool[] {
+    const { tools: allowed, servers } = this.allowedTools(agent, sessionMode, stage, subset, helper);
+    // Tools the persona's contract would reject are never offered (they only cost tokens and a failed call).
+    const contract = contractForAgent(agent.name);
+    const permitted = allowed.filter((tool) => contractAllows(contract, tool.name, servers));
+    if (!leanMenuEnabled() || permitted.length <= LEAN_MIN_TOOLS) return permitted;
+    const core = new Set<string>([...agent.toolAllowlist, ...CORE_TOOLS]);
+    if (stage === 'plan') for (const name of ['plan', 'recall', 'consult_agent']) core.add(name);
+    if (core.has('make_slides')) core.add('slide_draft');
+    if (stage === 'implement' || sessionMode === 'code') for (const tool of CODING_TOOLS) core.add(tool.name);
+    const base = permitted.filter((tool) => core.has(tool.name));
+    const baseNames = new Set(base.map((tool) => tool.name));
+    const discoverable = permitted.filter((tool) => !baseNames.has(tool.name));
+    if (!discoverable.length) return permitted;
+    if (run && run.cursor.extraTools === undefined) this.seedTools(run, discoverable, servers);
+    const extras = (run?.cursor.extraTools ?? []).map((name) => discoverable.find((tool) => tool.name === name)).filter((tool): tool is Tool => Boolean(tool));
+    const finder = findToolsTool({
+      discoverable, servers,
+      offered: () => new Set([...baseNames, ...(run?.cursor.extraTools ?? [])]),
+      add: (names) => { if (run) this.addRunTools(run, names); },
+    });
+    if (all) return [...base, finder, ...discoverable];
+    return [...base, finder, ...extras];
+  }
+
+  /** First step of a run: pre-load the few tools the request obviously needs, so it skips a find_tools round trip. */
+  private seedTools(run: RunRow, discoverable: Tool[], servers: Map<string, string>) {
+    const user = run.cursor.userMessageId ? this.store.listMessages(run.sessionId).find((message) => message.id === run.cursor.userMessageId) : undefined;
+    const seeds = user?.content ? rankTools(discoverable, user.content.slice(0, 2000), servers).filter((row) => row.score >= 3).slice(0, SEED_TOOLS).map((row) => row.tool.name) : [];
+    run.cursor.extraTools = [];
+    this.addRunTools(run, seeds);
+  }
+
+  /** Append tools to this run's menu (never removed, never reordered). */
+  private addRunTools(run: RunRow, names: string[]) {
+    const current = run.cursor.extraTools ?? [];
+    const next = [...current, ...names.filter((name) => !current.includes(name))];
+    run.cursor.extraTools = next;
+    const stored = this.store.getRun(run.id);
+    if (stored) {
+      const merged = [...(stored.cursor.extraTools ?? []), ...next.filter((name) => !(stored.cursor.extraTools ?? []).includes(name))];
+      run.cursor.extraTools = merged;
+      this.store.updateRun(run.id, { cursor: { ...stored.cursor, extraTools: merged } });
+    }
+  }
+
+  /** Sleep the backoff, then (for llama-server) poll /health until it answers or a minute passes. */
+  private async waitForModelServer(provider: ProviderRow | null | undefined, delayMs: number, signal: AbortSignal) {
+    const sleep = (ms: number) => new Promise<void>((resolve) => { const timer = setTimeout(resolve, ms); signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true }); });
+    await sleep(delayMs);
+    if (!provider?.baseUrl || !(isLlamaServerProvider(provider) || isUncensoredProvider(provider))) return;
+    const root = provider.baseUrl.replace(/\/$/, '').replace(/\/v1$/, '');
+    const until = Date.now() + Math.max(delayMs, Number(process.env.LA_HEALTH_WAIT_MS || 60_000));
+    while (!signal.aborted && Date.now() < until) {
+      const ok = await this.fetchImpl(`${root}/health`, { signal: AbortSignal.timeout(2500) }).then((r) => r.ok).catch(() => false);
+      if (ok) return;
+      await sleep(Math.min(2000, Math.max(50, delayMs)));
+    }
+  }
+
+  /** The main model (Auto's "main" role, else llama-server's model, else any candidate) that is known or assumed to call tools. */
+  private toolCapableModel(settings: Settings, agentId: string, excludeId: string): ModelRow | undefined {
+    const ok = (item: ModelRow | null | undefined): item is ModelRow => Boolean(item && item.id !== excludeId && item.enabled && !item.embedding && this.toolSupportOf(item) !== false);
+    const candidates = this.candidates(settings, agentId).map((item) => this.store.getModel(item.id)).filter(ok);
+    const mainName = (settings.autoModels?.main || '').trim().toLowerCase();
+    const llama = this.llama.isActive() ? this.llama.model() : undefined;
+    return candidates.find((item) => item.apiName.toLowerCase() === mainName || item.name.toLowerCase() === mainName)
+      ?? (ok(llama) && candidates.some((item) => item.id === llama.id) ? llama : undefined)
+      ?? candidates.find((item) => item.providerId !== 'prov_rehearsal');
+  }
+
+  /** Every tool this persona may use in this run (allowlist, member and helper limits, disabled connectors). */
+  private allowedTools(agent: Agent, sessionMode?: string, stage?: 'plan' | 'implement', subset?: string[], helper = false): { tools: Tool[]; servers: Map<string, string> } {
     const names = new Set(agent.toolAllowlist);
     names.add('create_file');
     names.add('write_file');
@@ -1868,6 +2114,7 @@ export class Engine {
     names.add('share_file');
     names.add('make_slides');
     names.add('read_slides');
+    names.add('slide_draft');
     names.add('fetch_image');
     names.add('browse');
     names.add('web_search');
@@ -1904,8 +2151,9 @@ export class Engine {
       if (!names.has(tool.name) || seen.has(tool.name)) return false;
       seen.add(tool.name);
       return true;
-    }).map((tool) => ({ ...tool, parameters: toolParameters(tool.name).properties ? toolParameters(tool.name) : tool.parameters }));
-    return names.has('run_tool_script') ? [...chosen, toolScript(chosen)] : chosen;
+    }).map((tool) => ({ ...tool, parameters: mergeToolParameters(tool.name, tool.parameters) }));
+    const servers = new Map(mcp.filter((row) => names.has(row.tool.name)).map((row) => [row.tool.name, row.serverName] as [string, string]));
+    return { tools: names.has('run_tool_script') ? [...chosen, toolScript(chosen)] : chosen, servers };
   }
 
   private contextFor(run: RunRow, signal: AbortSignal): ToolContext {
@@ -2296,6 +2544,15 @@ function isToolParseError(message: string): boolean {
   return /failed to parse tool call arguments as json|json\.exception\.parse_error|invalid tool call/i.test(message);
 }
 
+/** A dropped or refused connection, or a server that is restarting: worth a retry on the same model after a pause. */
+export function isTransientModelError(message: string): boolean {
+  if (isToolParseError(message)) return false;
+  return /fetch failed|\bterminated\b|socket hang up|other side closed|ECONNRESET|ECONNREFUSED|EPIPE|ETIMEDOUT|UND_ERR_SOCKET|\(503\)|status 503|loading model/i.test(message);
+}
+function transientRetryCap() { return Math.max(0, Number(process.env.LA_TRANSIENT_RETRIES ?? 4)); }
+/** 2s, 4s, 8s, 16s… capped at 30s (LA_TRANSIENT_BASE_MS scales it). */
+export function transientDelayMs(attempt: number) { return Math.min(30_000, Number(process.env.LA_TRANSIENT_BASE_MS ?? 2000) * 2 ** (attempt - 1)); }
+
 function isProviderOutage(message: string): boolean {
   if (isToolParseError(message)) return false;
   return /\(429\)|\(5\d\d\)|status 429|status 5\d\d|rate limit|too many requests/i.test(message);
@@ -2480,6 +2737,40 @@ function requestSecretTool(): Tool {
   };
 }
 
+export const BAD_ARGS_CAP = 3;
+
+/**
+ * Null when the arguments parse to an object; otherwise a structured error the model can act on: what broke, where,
+ * how big the payload was, how many tries are left, and what to do (split big payloads; decks go through slide_draft).
+ */
+export function argumentsError(name: string, raw: string | undefined, attempt = 1, cap = BAD_ARGS_CAP): string | null {
+  const text = (raw ?? '').trim();
+  if (!text) return null;
+  let problem: string;
+  let position: number | undefined;
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return null;
+    problem = `arguments must be a JSON object like {"key": "value"}, not ${Array.isArray(parsed) ? 'an array' : typeof parsed}`;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    problem = `not valid JSON: ${detail.replace(/\s+in JSON.*$/, '')}`;
+    const found = Number(detail.match(/position (\d+)/)?.[1]);
+    if (Number.isFinite(found)) position = found;
+  }
+  const big = text.length > 6000;
+  const fix = [
+    'Call the tool again with one valid JSON object: escape double quotes and backslashes inside strings, write newlines as \\n, close every brace and bracket.',
+    big ? (name === 'make_slides' ? 'The deck is too big for one call: use slide_draft (start, then one add per slide) and make_slides {draft_id}.' : 'The payload is large: split it (write the first part, then append or apply_patch the rest in further calls).') : '',
+  ].filter(Boolean).join(' ');
+  const info = {
+    error: 'invalid_tool_arguments', tool: name, problem, length: text.length,
+    ...(position !== undefined ? { position, near: text.slice(Math.max(0, position - 40), position + 20).replace(/\s+/g, ' ') } : {}),
+    attempt, attempts_left: Math.max(0, cap - attempt), fix,
+  };
+  return `Nothing ran: the arguments for ${name} were ${problem.startsWith('not valid') ? 'not valid JSON' : 'not a JSON object'} (${text.length} characters). ${fix}\n${JSON.stringify(info)}`;
+}
+
 function parseArgs(value: string): Record<string, unknown> {
   try {
     const parsed = JSON.parse(value || '{}') as unknown;
@@ -2504,13 +2795,27 @@ function quotaDay(date = new Date()) {
 
 /** Resident size from the tag (Q4 weights ≈ 0.6 GB per billion parameters plus runtime); unknown sizes count as small. */
 /** Personal and platform tools every persona keeps whatever its contract lists (they still go through approval tiers and member restrictions): reminders, triggers, time, task list, memory, skills, helpers. */
+const LOOP_NUDGE = 3;
+const LOOP_STOP = 4;
+/** JSON with sorted keys at every level, so {a,b} and {b,a} compare equal. */
+export function stableJson(value: unknown): string {
+  const sort = (item: unknown): unknown => Array.isArray(item) ? item.map(sort) : item && typeof item === 'object' ? Object.fromEntries(Object.keys(item as Record<string, unknown>).sort().map((key) => [key, sort((item as Record<string, unknown>)[key])])) : item;
+  return JSON.stringify(sort(value ?? {}));
+}
+
 const CONTRACT_ALWAYS = new Set([
   'request_secret', 'kb_search', 'load_skill', 'manage_timer', 'manage_trigger',
   'time_now', 'tasks', 'think', 'memory_file', 'search_chats', 'web_search', 'web_fetch',
   'spawn_agent', 'helpers', 'propose_skill', 'read_output', 'run_skill_script',
-  'find_context', 'share_file', 'make_slides', 'read_slides', 'fetch_image', 'browse', 'create_project', 'vercel', 'turbo_inspect', 'read_image_text', 'understand_image', 'generate_image', 'repo_sync',
-  'create_file', 'write_file', 'read_file', 'list_dir', 'grep', 'glob', 'apply_patch',
+  'find_context', 'share_file', 'make_slides', 'read_slides', 'slide_draft', 'fetch_image', 'browse', 'create_project', 'vercel', 'turbo_inspect', 'read_image_text', 'understand_image', 'generate_image', 'repo_sync',
+  'create_file', 'write_file', 'read_file', 'list_dir', 'grep', 'glob', 'apply_patch', 'find_tools',
 ]);
+
+/** A contract limits a persona's built-in tools; connector (MCP) tools it was granted by allowlist or template stay callable. */
+function contractAllows(contract: { tools: string[] } | null, name: string, servers: Map<string, string>): boolean {
+  if (!contract || !contract.tools.length) return true;
+  return contract.tools.includes(name) || CONTRACT_ALWAYS.has(name) || servers.has(name);
+}
 
 export function roughModelGiB(apiName: string): number {
   const size = Number(apiName.toLowerCase().match(/(\d+(?:\.\d+)?)b\b/)?.[1] ?? 4);

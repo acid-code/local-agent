@@ -9,9 +9,52 @@ export interface Usage {
 
 export interface Telemetry {
   tokPerSec?: number;
+  /** Prompt tokens in this request (evaluated plus reused from the cache). */
   promptTokens?: number;
+  /** Prompt tokens llama-server reused from its slot cache. */
   cachedTokens?: number;
   cacheHitPct?: number;
+  /** Prompt tokens actually evaluated (not from the cache), the time it took, and the speed. */
+  promptEvalTokens?: number;
+  promptEvalMs?: number;
+  promptTokPerSec?: number;
+  /** Tokens generated, reasoning included. */
+  predictedTokens?: number;
+}
+
+/** Sampling sent with a request. Undefined fields are left to the server. */
+export interface Sampling {
+  temperature?: number;
+  top_p?: number;
+  top_k?: number;
+  min_p?: number;
+  presence_penalty?: number;
+  repeat_penalty?: number;
+}
+
+/**
+ * Sampling from each model card, by thinking mode and task.
+ * Qwen3.6: https://huggingface.co/Qwen/Qwen3.6-35B-A3B (thinking general / thinking precise coding / instruct).
+ * gpt-oss: temperature 1.0, top_p 1.0 (OpenAI). Gemma 3/4: temperature 1.0, top_k 64, top_p 0.95 (Google).
+ * Unknown models get nothing, so the server's own defaults apply. LA_SAMPLING=off turns this off.
+ */
+export function samplingFor(modelName: string, opts: { thinking: boolean; task: 'code' | 'general' }): Sampling | undefined {
+  if ((process.env.LA_SAMPLING || '').toLowerCase() === 'off') return undefined;
+  const name = modelName.toLowerCase();
+  if (/qwen3/.test(name)) {
+    if (!opts.thinking) return { temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0, presence_penalty: 1.5, repeat_penalty: 1 };
+    if (opts.task === 'code') return { temperature: 0.6, top_p: 0.95, top_k: 20, min_p: 0, presence_penalty: 0, repeat_penalty: 1 };
+    return { temperature: 1.0, top_p: 0.95, top_k: 20, min_p: 0, presence_penalty: 1.5, repeat_penalty: 1 };
+  }
+  if (/gpt-oss/.test(name)) return { temperature: 1.0, top_p: 1.0 };
+  if (/gemma/.test(name)) return { temperature: 1.0, top_k: 64, top_p: 0.95, min_p: 0 };
+  return undefined;
+}
+
+/** Output cap per request: room for reasoning on thinking steps, short for side calls. */
+export function maxTokensFor(opts: { thinking: boolean; side?: boolean }): number {
+  if (opts.side) return Number(process.env.LA_SIDE_MAX_TOKENS || 1536);
+  return opts.thinking ? Number(process.env.LA_THINK_MAX_TOKENS || 12_288) : Number(process.env.LA_MAX_TOKENS || 6144);
 }
 
 export type ProviderEvent =
@@ -33,6 +76,10 @@ export interface ModelProvider {
     think?: boolean;
     /** Send think:false explicitly. Used to retry a thinking model that gave no answer. */
     noThink?: boolean;
+    /** Sampling from the model card (llama-server). */
+    sampling?: Sampling;
+    /** Output token cap. */
+    maxTokens?: number;
   }): AsyncIterable<ProviderEvent>;
 }
 
@@ -83,7 +130,7 @@ export function providerFor(model: ModelRow, provider: ProviderRow, fetchImpl: t
 class OllamaProvider implements ModelProvider {
   constructor(private readonly root: string, private readonly fetchImpl: typeof fetch) {}
 
-  async *complete(req: { model: string; messages: ChatMessage[]; tools?: ToolDefinition[]; signal?: AbortSignal; numCtx?: number; keepAlive?: string | number; think?: boolean; noThink?: boolean }): AsyncIterable<ProviderEvent> {
+  async *complete(req: { model: string; messages: ChatMessage[]; tools?: ToolDefinition[]; signal?: AbortSignal; numCtx?: number; keepAlive?: string | number; think?: boolean; noThink?: boolean; maxTokens?: number }): AsyncIterable<ProviderEvent> {
     const response = await this.fetchImpl(`${this.root}/api/chat`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -95,7 +142,7 @@ class OllamaProvider implements ModelProvider {
         tools: req.tools?.length ? req.tools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.parameters } })) : undefined,
         think: req.noThink ? false : req.think || undefined,
         keep_alive: req.keepAlive ?? '30m',
-        options: { num_ctx: req.numCtx ?? 32768 },
+        options: { num_ctx: req.numCtx ?? 32768, ...(req.maxTokens ? { num_predict: req.maxTokens } : {}) },
       }),
     });
     if (!response.ok) throw new Error(`Ollama failed (${response.status}): ${(await response.text()).slice(0, 500)}`);
@@ -137,19 +184,30 @@ class OpenAIProvider implements ModelProvider {
     private readonly isLlama = false,
   ) {}
 
-  async *complete(req: { model: string; messages: ChatMessage[]; tools?: ToolDefinition[]; signal?: AbortSignal }): AsyncIterable<ProviderEvent> {
+  async *complete(req: { model: string; messages: ChatMessage[]; tools?: ToolDefinition[]; signal?: AbortSignal; think?: boolean; noThink?: boolean; sampling?: Sampling; maxTokens?: number }): AsyncIterable<ProviderEvent> {
     const headers: Record<string, string> = { 'content-type': 'application/json' };
     if (this.apiKey) headers.authorization = `Bearer ${this.apiKey}`;
     if (this.openRouter) {
       headers['http-referer'] = 'http://local-agent.local';
       headers['x-title'] = 'local-agent';
     }
+    // llama-server: thinking on/off through the chat template, model-card sampling, an output cap, and usage in the
+    // stream (without stream_options the stream carries no usage and every run showed 0 tokens out).
+    const llamaExtras: Record<string, unknown> = this.isLlama
+      ? {
+        stream_options: { include_usage: true },
+        ...(req.noThink ? { chat_template_kwargs: { enable_thinking: false } } : req.think ? { chat_template_kwargs: { enable_thinking: true } } : {}),
+        ...(req.sampling ?? {}),
+        ...(req.maxTokens ? { max_tokens: req.maxTokens } : {}),
+      }
+      : (req.maxTokens ? { max_tokens: req.maxTokens } : {});
     const payload = JSON.stringify({
       model: req.model,
       stream: true,
-      messages: req.messages.map(toOpenAI),
+      messages: req.messages.map((message) => toOpenAI(message, this.isLlama)),
       tools: req.tools?.length ? req.tools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.parameters } })) : undefined,
       ...this.extra,
+      ...llamaExtras,
     });
     const maxAttempts = this.isLlama ? 4 : 1;
     const retryMs = Number(process.env.LA_LLAMA_503_RETRY_MS ?? 4000);
@@ -389,11 +447,14 @@ async function* readOllama(response: Response): AsyncIterable<ProviderEvent> {
   yield { type: 'done', finishReason: toolCalls.length ? 'tool_calls' : 'stop', toolCalls, usage };
 }
 
-function toOpenAI(message: ChatMessage) {
+function toOpenAI(message: ChatMessage, withReasoning = false) {
   if (message.role === 'tool') return { role: 'tool', tool_call_id: message.toolCallId, content: message.content };
+  // llama-server renders reasoning_content back through the chat template, so the prompt matches the cached tokens.
+  const reasoning = withReasoning && message.role === 'assistant' && message.reasoning ? { reasoning_content: message.reasoning } : {};
   if (message.role === 'assistant' && message.toolCalls?.length) {
-    return { role: 'assistant', content: message.content || null, tool_calls: message.toolCalls.map((tool) => ({ id: tool.id, type: 'function', function: { name: tool.name, arguments: safeJsonString(tool.arguments) } })) };
+    return { role: 'assistant', content: message.content || null, ...reasoning, tool_calls: message.toolCalls.map((tool) => ({ id: tool.id, type: 'function', function: { name: tool.name, arguments: safeJsonString(tool.arguments) } })) };
   }
+  if (message.role === 'assistant' && reasoning.reasoning_content) return { role: 'assistant', content: message.content, ...reasoning };
   if (message.role === 'user' && message.imageUrl) {
     return { role: 'user', content: [{ type: 'text', text: message.content }, { type: 'image_url', image_url: { url: message.imageUrl } }] };
   }
@@ -428,6 +489,8 @@ interface LlamaTimings {
   predicted_n?: number;
   predicted_ms?: number;
   prompt_n?: number;
+  prompt_ms?: number;
+  prompt_per_second?: number;
   cache_n?: number;
 }
 
@@ -441,7 +504,20 @@ function parseTimings(t?: LlamaTimings): Telemetry | undefined {
   const totalPrompt = promptN + cacheN;
   const cacheHitPct = totalPrompt > 0 ? Math.round((cacheN / totalPrompt) * 100) : undefined;
   if (tokPerSec == null && cacheHitPct == null) return undefined;
-  return { tokPerSec, promptTokens: totalPrompt || undefined, cachedTokens: cacheN || undefined, cacheHitPct };
+  const round1 = (value: number | undefined) => (typeof value === 'number' && Number.isFinite(value) ? Math.round(value * 10) / 10 : undefined);
+  return {
+    tokPerSec, promptTokens: totalPrompt || undefined, cachedTokens: cacheN || undefined, cacheHitPct,
+    promptEvalTokens: typeof t.prompt_n === 'number' ? t.prompt_n : undefined,
+    promptEvalMs: typeof t.prompt_ms === 'number' ? Math.round(t.prompt_ms) : undefined,
+    promptTokPerSec: round1(t.prompt_per_second),
+    predictedTokens: typeof t.predicted_n === 'number' ? t.predicted_n : undefined,
+  };
+}
+
+/** Usage from llama-server timings when the stream carried no usage block. */
+function usageFromTimings(telemetry: Telemetry | undefined): Usage | undefined {
+  if (!telemetry || (telemetry.predictedTokens == null && telemetry.promptTokens == null)) return undefined;
+  return { inputTokens: telemetry.promptTokens ?? 0, outputTokens: telemetry.predictedTokens ?? 0 };
 }
 
 interface OpenAIChunk {
@@ -462,7 +538,8 @@ function* fromOpenAI(json: OpenAIResponse): Generator<ProviderEvent> {
   if (reasoning) yield { type: 'thinking', text: reasoning };
   if (message?.content) yield { type: 'token', text: message.content };
   const toolCalls = (message?.tool_calls ?? []).map((tool) => ({ id: tool.id || `call_${tool.function?.name}`, name: tool.function?.name || '', arguments: tool.function?.arguments || '{}' })).filter((tool) => tool.name);
-  yield { type: 'done', finishReason: toolCalls.length ? 'tool_calls' : 'stop', toolCalls, usage: json.usage ? { inputTokens: json.usage.prompt_tokens ?? 0, outputTokens: json.usage.completion_tokens ?? 0 } : undefined, telemetry: parseTimings(json.timings) };
+  const telemetry = parseTimings(json.timings);
+  yield { type: 'done', finishReason: toolCalls.length ? 'tool_calls' : 'stop', toolCalls, usage: json.usage ? { inputTokens: json.usage.prompt_tokens ?? 0, outputTokens: json.usage.completion_tokens ?? 0 } : usageFromTimings(telemetry), telemetry };
 }
 
 async function* readSSE(response: Response): AsyncIterable<ProviderEvent> {
@@ -506,5 +583,5 @@ async function* readSSE(response: Response): AsyncIterable<ProviderEvent> {
   }
   if (!sawEnd) throw new Error('Model stream ended unexpectedly (server disconnected mid-reply).');
   const toolCalls = [...tools.entries()].sort((a, b) => a[0] - b[0]).map(([, tool]) => ({ ...tool, id: tool.id || `call_${tool.name}` })).filter((tool) => tool.name);
-  yield { type: 'done', finishReason: toolCalls.length ? 'tool_calls' : (finishReason || 'stop'), toolCalls, usage, telemetry };
+  yield { type: 'done', finishReason: toolCalls.length ? 'tool_calls' : (finishReason || 'stop'), toolCalls, usage: usage && (usage.outputTokens || usage.inputTokens) ? usage : (usageFromTimings(telemetry) ?? usage), telemetry };
 }

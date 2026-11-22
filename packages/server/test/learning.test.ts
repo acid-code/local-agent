@@ -71,7 +71,8 @@ describe('capped memory files', () => {
     await built.engine.startTurn({ sessionId: session.id, agentId: agent.id, content: 'hi' });
     await waitFor(() => built.provider.seen.length > 0);
     expect(built.provider.seen[0]!.system).toContain('Prefers English. Lean token use.');
-    expect(built.provider.seen[0]!.tools).toEqual(expect.arrayContaining(['memory_file', 'search_chats', 'run_tool_script']));
+    // Lean menu: memory_file is core; search_chats and run_tool_script are one find_tools call away.
+    expect(built.provider.seen[0]!.tools).toEqual(expect.arrayContaining(['memory_file', 'find_tools']));
   });
 
   it('lets the owner edit memory files over HTTP, with caps, and hides them from other accounts', async () => {
@@ -110,11 +111,11 @@ describe('skill learning loop', () => {
     expect(catalog).not.toContain('SECRET-BODY-STEP');
 
     // Update proposals name the next version.
-    const proposal = built.engine.tools(built.store.getAgent(agent.id)!, 'chat').find((tool) => tool.name === 'propose_skill')!;
+    const proposal = built.engine.tools(built.store.getAgent(agent.id)!, 'chat', undefined, undefined, false, undefined, true).find((tool) => tool.name === 'propose_skill')!;
     expect(proposal.approval({ name: 'Build monorepo', description: 'd', body: 'b', slug: skill.slug }, ctxFor(built, agent.id, session.id))).toMatch(/Update skill “Build monorepo” to v2/);
 
     const mine = await built.persona(built.member, 'Mine');
-    expect(built.engine.tools(built.store.getAgent(mine.id)!, 'chat').map((tool) => tool.name)).not.toContain('propose_skill');
+    expect(built.engine.tools(built.store.getAgent(mine.id)!, 'chat', undefined, undefined, false, undefined, true).map((tool) => tool.name)).not.toContain('propose_skill');
   });
 
   it('nudges toward a skill only after several steps', async () => {
@@ -263,7 +264,7 @@ describe('tool scripts', () => {
     expect(fs.readFileSync(path.join(agent.workspacePath, 'b.txt'), 'utf8')).toContain('copy: alpha');
 
     const mine = await built.persona(built.member, 'Mine', ['read_file', 'shell']);
-    const memberScript = built.engine.tools(built.store.getAgent(mine.id)!, 'chat').find((tool) => tool.name === 'run_tool_script')!;
+    const memberScript = built.engine.tools(built.store.getAgent(mine.id)!, 'chat', undefined, undefined, false, undefined, true).find((tool) => tool.name === 'run_tool_script')!;
     await expect(memberScript.execute({ steps: [{ tool: 'shell', args: { command: 'id' } }] }, ctxFor(built, mine.id, 'none'))).rejects.toThrow(/not allowed/);
     expect(BUILTIN_TOOLS.some((tool) => tool.name === 'run_tool_script')).toBe(false);
   });

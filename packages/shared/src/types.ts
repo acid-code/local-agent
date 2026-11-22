@@ -23,6 +23,8 @@ export interface ChatMessage {
   toolCallId?: string;
   toolCalls?: ToolCall[];
   imageUrl?: string;
+  /** The model's own reasoning for this assistant turn. Sent back to llama-server so the prompt matches its cache. */
+  reasoning?: string;
 }
 
 export interface ToolCall {
@@ -108,12 +110,34 @@ export interface RunCursor {
   missingRetry?: boolean;
   /** One automatic retry on the uncensored local llama-server after a clear refusal. */
   uncensoredRetry?: boolean;
+  /** Switched once to a tool-capable model because the chosen one cannot call tools. */
+  toolFallback?: boolean;
+  /** Tool calls with malformed arguments so far in this run (capped). */
+  badArgs?: number;
+  /** Acceptance checks from the plan; the done check verifies them before the run may finish. */
+  acceptance?: string[];
+  /** Model the run left for the uncensored fallback, and the turn the fallback answers; the run returns after it. */
+  uncensoredFrom?: string;
+  uncensoredAt?: number;
   /** Snapshot of open tasks used to stop verification send-backs when the plan does not progress. */
   taskSnapshot?: string;
   /** One automatic nudge when Researcher answers a factual question without searching first. */
   researchRetried?: boolean;
   /** One automatic nudge when a high-confidence skill was not loaded. */
   skillRetried?: boolean;
+  /** Run-aware context: tool results of this run shown as digests (only grows), and the fixed oldest history message. */
+  digestIds?: string[];
+  historyFloorId?: string;
+  /** System prompt and per-run context frozen at the first model step, so the prompt prefix stays byte-identical. */
+  frozen?: { modelId: string; system: string; turnContext: string };
+  /** Notes for the model (recovery, steering, nudges), each pinned after the message that was last when it was added. */
+  notes?: { anchorId: string; text: string }[];
+  /** Tools found with find_tools during this run. Appended to the offered list, never removed. */
+  extraTools?: string[];
+  /** Retries after llama-server dropped the connection or restarted. */
+  transientRetries?: number;
+  /** Consecutive identical tool calls (name + arguments) for the loop breaker. */
+  loop?: { sig: string; count: number };
 }
 
 export interface ContextBreakdown {

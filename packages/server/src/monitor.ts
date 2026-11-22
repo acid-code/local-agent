@@ -111,6 +111,36 @@ function finalReply(store: Store, run: RunRow): string {
   return String(messages.at(-1)?.content ?? '');
 }
 
+interface StepPerf { tokPerSec?: number; promptTokens?: number; cachedTokens?: number; cacheHitPct?: number; promptEvalTokens?: number; promptEvalMs?: number; promptTokPerSec?: number; predictedTokens?: number }
+
+/** llama-server telemetry stored on a model step: prompt size, cache reuse, prompt-eval time, decode speed. */
+export function stepPerf(step: Pick<StepRow, 'kind' | 'output'>): StepPerf | undefined {
+  if (step.kind !== 'model' || !step.output || typeof step.output !== 'object') return undefined;
+  const telemetry = (step.output as { telemetry?: Record<string, unknown> }).telemetry;
+  if (!telemetry || typeof telemetry !== 'object') return undefined;
+  const out: StepPerf = {};
+  for (const key of ['tokPerSec', 'promptTokens', 'cachedTokens', 'cacheHitPct', 'promptEvalTokens', 'promptEvalMs', 'promptTokPerSec', 'predictedTokens'] as const) {
+    const value = telemetry[key];
+    if (typeof value === 'number' && Number.isFinite(value)) out[key] = value;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** Prompt-cache totals over model steps: how much of the prompt was reused and how long prompt evaluation took. */
+export function cacheStats(steps: Pick<StepRow, 'kind' | 'output'>[]) {
+  const perfs = steps.map(stepPerf).filter((perf): perf is StepPerf => Boolean(perf && typeof perf.promptTokens === 'number'));
+  if (!perfs.length) return null;
+  const promptTokens = perfs.reduce((sum, perf) => sum + (perf.promptTokens ?? 0), 0);
+  const cachedTokens = perfs.reduce((sum, perf) => sum + (perf.cachedTokens ?? 0), 0);
+  return {
+    steps: perfs.length,
+    promptTokens,
+    cachedTokens,
+    hitPct: promptTokens ? Math.round((cachedTokens / promptTokens) * 100) : 0,
+    promptEvalMs: perfs.reduce((sum, perf) => sum + (perf.promptEvalMs ?? 0), 0),
+  };
+}
+
 export function runSummary(deps: MonitorDeps, run: RunRow) {
   const steps = deps.store.listSteps(run.id);
   const reply = finalReply(deps.store, run);
@@ -124,6 +154,7 @@ export function runSummary(deps: MonitorDeps, run: RunRow) {
     toolErrors: steps.filter((step) => (step.kind === 'tool' || step.kind === 'contract') && (step.status === 'failed' || step.error)).length,
     error: run.error ? deps.redact(run.error).slice(0, 400) : null, falseSuccess: fs.flagged, falseSuccessReason: fs.flagged ? fs.reason : undefined,
     parentRunId: run.parentRunId,
+    cache: cacheStats(steps),
   };
 }
 
@@ -136,6 +167,8 @@ export function runTrace(deps: MonitorDeps, run: RunRow) {
     tokens: step.kind === 'model' ? { in: step.tokensIn, out: step.tokensOut } : undefined,
     // Model steps carry the prompt budget and estimate, not the prompt itself.
     prompt: step.kind === 'model' ? redactValue(step.input) : undefined,
+    // Cache hit %, prompt tokens evaluated vs reused, prompt-eval time, decode speed (llama-server).
+    perf: stepPerf(step),
     args: step.kind !== 'model' ? safe(step.input) : undefined,
     result: step.kind !== 'model' ? safe(step.output) : undefined,
     error: step.error ? redact(step.error).slice(0, 600) : null,
@@ -186,6 +219,7 @@ export function summarySince(deps: MonitorDeps, since: string) {
     falseSuccess: summaries.filter((row) => row.falseSuccess).map((row) => ({ runId: row.id, reason: row.falseSuccessReason })),
     toolFailures, durationMs: { p50: durations[Math.floor(durations.length / 2)] ?? null, p90: durations[Math.floor(durations.length * 0.9)] ?? null, max: durations.at(-1) ?? null },
     tokens: { in: summaries.reduce((sum, row) => sum + row.tokens.in, 0), out: summaries.reduce((sum, row) => sum + row.tokens.out, 0) },
+    cache: cacheStats(runs.flatMap((run) => deps.store.listSteps(run.id))),
     approvals: { total: approvals.length, pending: approvals.filter((item) => item.status === 'pending').length, denied: approvals.filter((item) => item.status === 'denied').length },
     errors: deps.store.db.prepare("SELECT COUNT(*) AS n FROM logs WHERE level = 'error' AND created_at >= ?").get(since),
   };

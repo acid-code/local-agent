@@ -1,0 +1,11 @@
+{
+  "id": "research-cites",
+  "persona": "Researcher",
+  "prompt": "What is the latest stable Node.js LTS version? Cite the source.",
+  "expect": {
+    "toolsAnyOf": ["web_search", "web_fetch"],
+    "replyMatches": ["https?://"],
+    "maxSteps": 10,
+    "maxSeconds": 300
+  }
+}

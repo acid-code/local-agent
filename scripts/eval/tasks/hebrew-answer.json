@@ -1,0 +1,11 @@
+{
+  "id": "hebrew-answer",
+  "persona": "House",
+  "prompt": "תסביר בשלוש שורות מה זה DNS.",
+  "expect": {
+    "replyMatches": ["[\\u0590-\\u05FF]"],
+    "toolsNone": true,
+    "maxSteps": 3,
+    "maxSeconds": 120
+  }
+}

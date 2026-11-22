@@ -257,7 +257,7 @@ export const BUILTIN_TOOLS: Tool[] = [
       if (!command) throw new Error('Missing command.');
       if (command.length > 4000) throw new Error('Command is too long.');
       if (assessCommand(command) === 'blocked') throw new Error('That command is blocked.');
-      const cwd = (ctx.roots?.length ?? 0) > 0 ? projectPath(ctx.roots!, args.cwd ? String(args.cwd) : undefined, ctx.workspace) : ctx.workspace;
+      const cwd = (ctx.roots?.length ?? 0) > 0 ? projectPath(ctx.roots!, args.cwd ? String(args.cwd) : undefined, ctx.workspace, command) : ctx.workspace;
       if (ctx.sandbox !== 'host' && ctx.docker.available()) {
         const hostCwd = toHostBindPath(cwd);
         const image = await pickShellImage(cwd, ctx.docker);

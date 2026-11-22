@@ -68,7 +68,7 @@ describe('GPU coexistence with the uncensored llama-server', () => {
 });
 
 describe('sticky chat model', () => {
-  it('stays on the uncensored model after a refusal fallback instead of re-routing to gemma', async () => {
+  it('uses the uncensored model for one step after a refusal, then the chat goes back to its model', async () => {
     const { dir, store } = newStore();
     store.upsertProvider({ id: 'prov_ollama', kind: 'openai_compat', name: 'Ollama', baseUrl: 'http://127.0.0.1:11434/v1', enabled: true });
     store.upsertProvider({ id: 'prov_uncensored', kind: 'openai_compat', name: 'llama-server (uncensored)', baseUrl: 'http://127.0.0.1:8081/v1', enabled: true });
@@ -82,22 +82,39 @@ describe('sticky chat model', () => {
         : new ScriptedProvider([{ text: "I'm sorry, I can't assist with that request because it violates the terms of service." }]);
     });
     await engine.llama.refresh();
-    const agent = agentIn(store, dir);
+    const agent = store.createAgent({ name: 'House', description: '', systemPrompt: 'Be brief.', modelId: 'ollama_gemma3', routing: 'pinned', strategy: 'rolling', toolAllowlist: [], memoryEnabled: false, workspacePath: dir });
     const session = store.createSession({ agentId: agent.id, title: 'Chat' });
     const first = await engine.startTurn({ sessionId: session.id, agentId: agent.id, content: 'Please search the marketplace listings for a used bike and save them', wait: true });
     expect(store.getRun(first.id)?.modelId).toBe('unc_inkling');
-    expect(store.getSession(session.id)?.activeModelId).toBe('unc_inkling');
+    expect(used).toContain('inkling-2-mini-uncensored');
+    // The chat keeps the model it was on, not the fallback.
+    expect(store.getSession(session.id)?.activeModelId).toBe('ollama_gemma3');
 
-    used.length = 0;
-    const second = await engine.startTurn({ sessionId: session.id, agentId: agent.id, content: 'What was your last action?', wait: true });
-    const routing = store.listSteps(second.id).find((step) => step.kind === 'routing');
-    expect(routing?.name).toBe('inkling-2-mini-uncensored');
-    expect(JSON.stringify(routing?.output)).toMatch(/this chat's model/);
-    expect(used.some((name) => name.startsWith('gemma'))).toBe(false);
-
-    // An explicit /auto re-routes.
+    // An explicit /auto still re-routes.
     await engine.startTurn({ sessionId: session.id, agentId: agent.id, content: '/auto', wait: true });
     expect(store.getSession(session.id)?.activeModelId).toBeNull();
+  });
+
+  it('returns to the original model for the step after the fallback answered', async () => {
+    const { dir, store } = newStore();
+    store.upsertProvider({ id: 'prov_ollama', kind: 'openai_compat', name: 'Ollama', baseUrl: 'http://127.0.0.1:11434/v1', enabled: true });
+    store.upsertProvider({ id: 'prov_uncensored', kind: 'openai_compat', name: 'llama-server (uncensored)', baseUrl: 'http://127.0.0.1:8081/v1', enabled: true });
+    store.upsertModel(model('ollama_gemma3', 'prov_ollama', 'gemma3:4b', 3.4, 'small'));
+    store.upsertModel(model('unc_inkling', 'prov_uncensored', 'inkling-2-mini-uncensored', 8, 'large'));
+    const used: string[] = [];
+    const gemma = new ScriptedProvider([
+      { text: "I'm sorry, I can't assist with that request because it violates the terms of service." },
+      { text: 'Here is the summary of the listings.' },
+    ]);
+    const inkling = new ScriptedProvider([{ toolCalls: [{ id: 't1', name: 'time_now', arguments: '{}' }] }]);
+    const engine = engineWith(store, uncensoredUp, (m) => { used.push(m.apiName); return m.apiName.includes('inkling') ? inkling : gemma; });
+    await engine.llama.refresh();
+    const agent = store.createAgent({ name: 'House', description: '', systemPrompt: 'Be brief.', modelId: 'ollama_gemma3', routing: 'pinned', strategy: 'rolling', toolAllowlist: [], memoryEnabled: false, workspacePath: dir });
+    const session = store.createSession({ agentId: agent.id, title: 'Chat' });
+    const run = await engine.startTurn({ sessionId: session.id, agentId: agent.id, content: 'Please search the marketplace listings for a used bike and save them', wait: true });
+    expect(used).toEqual(['gemma3:4b', 'inkling-2-mini-uncensored', 'gemma3:4b']);
+    expect(store.getRun(run.id)?.modelId).toBe('ollama_gemma3');
+    expect(store.getRun(run.id)?.status).toBe('completed');
   });
 });
 
@@ -261,5 +278,55 @@ describe('fallback-control auth', () => {
       { url: 'http://ctl:8082/switch-qwen', token: 'tok-1' },
       { url: 'http://ctl:8082/switch-uncensored', token: null },
     ]);
+  });
+});
+
+describe('side work off the llama-server slot', () => {
+  it('summaries go to gemma3:4b when the chat model is on llama-server, and fall back to it on failure', async () => {
+    const { store } = newStore();
+    store.upsertProvider({ id: 'prov_ollama', kind: 'openai_compat', name: 'Ollama', baseUrl: 'http://127.0.0.1:11434/v1', enabled: true });
+    store.upsertProvider({ id: 'prov_llama', kind: 'openai_compat', name: 'llama-server', baseUrl: 'http://127.0.0.1:8080/v1', enabled: true });
+    store.upsertModel(model('ollama_gemma3', 'prov_ollama', 'gemma3:4b', 3.4, 'small'));
+    store.upsertModel(model('llama_qwen', 'prov_llama', 'qwen3.6-35b-a3b', 23, 'large'));
+    const used: string[] = [];
+    let gemmaDown = false;
+    const engine = engineWith(store, uncensoredUp, (m) => {
+      used.push(m.apiName);
+      if (m.apiName === 'gemma3:4b' && gemmaDown) return { async *complete() { throw new Error('fetch failed'); } } as unknown as ModelProvider;
+      return new ScriptedProvider([{ text: `summary by ${m.apiName}` }]);
+    });
+    const internals = engine as unknown as { sideModel: (m: ModelRow) => ModelRow; trySummarize: (m: ModelRow, p: string) => Promise<string | null> };
+    const qwen = store.getModel('llama_qwen')!;
+    expect(internals.sideModel(qwen).apiName).toBe('gemma3:4b');
+    expect(internals.sideModel(store.getModel('ollama_gemma3')!).apiName).toBe('gemma3:4b');
+    expect(await internals.trySummarize(qwen, 'user: hi')).toBe('summary by gemma3:4b');
+    gemmaDown = true;
+    used.length = 0;
+    expect(await internals.trySummarize(qwen, 'user: hi')).toBe('summary by qwen3.6-35b-a3b');
+    expect(used).toEqual(['gemma3:4b', 'qwen3.6-35b-a3b']);
+    process.env.LA_SIDE_MODEL = 'off';
+    try { expect(internals.sideModel(qwen).id).toBe('llama_qwen'); } finally { delete process.env.LA_SIDE_MODEL; }
+  });
+});
+
+describe('tool-capable routing', () => {
+  it('moves a tool-needing turn off a model that cannot call tools, to the main model', async () => {
+    const { dir, store } = newStore();
+    store.upsertProvider({ id: 'prov_ollama', kind: 'openai_compat', name: 'Ollama', baseUrl: 'http://127.0.0.1:11434/v1', enabled: true });
+    store.upsertModel(model('ollama_phi', 'prov_ollama', 'phi3:mini', 2.2, 'small'));
+    store.upsertModel(model('ollama_gemma3', 'prov_ollama', 'gemma3:4b', 3.4, 'small'));
+    const settings = store.getSettings();
+    store.saveSettings({ ...settings, toolSupport: { ...settings.toolSupport, 'phi3:mini': false }, autoModels: { ...settings.autoModels, main: 'gemma3:4b' } }, 'test', {});
+    const used: string[] = [];
+    const engine = engineWith(store, uncensoredUp, (m) => { used.push(m.apiName); return new ScriptedProvider([{ text: 'Here is what I found.' }]); });
+    const agent = store.createAgent({ name: 'House', description: '', systemPrompt: 'Be brief.', modelId: 'ollama_phi', routing: 'pinned', strategy: 'rolling', toolAllowlist: [], memoryEnabled: false, workspacePath: dir });
+    const session = store.createSession({ agentId: agent.id, title: 'Chat' });
+    const run = await engine.startTurn({ sessionId: session.id, agentId: agent.id, content: 'Search the web for the latest Node.js release and read the changelog', wait: true });
+    expect(used).toEqual(['gemma3:4b']);
+    expect(store.getRun(run.id)?.routingNote).toMatch(/cannot call tools/);
+
+    used.length = 0;
+    const chat = await engine.startTurn({ sessionId: session.id, agentId: agent.id, content: 'hi', wait: true });
+    expect(store.getRun(chat.id)?.cursor.toolFallback).toBeFalsy();
   });
 });
