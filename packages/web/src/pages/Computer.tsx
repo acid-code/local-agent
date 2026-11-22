@@ -107,7 +107,11 @@ export function Computer() {
           <span className={`pill small${takenOver ? ' on' : ''}`}>
             {takenOver ? t('Interactive (you have control)') : t('View-only')}
           </span>
-          {state?.browser?.state && <span className="faint">{state.browser.state}</span>}
+          {state?.browser?.state && (
+            <span className="faint">
+              {state.browser.state === 'running' ? t('Running') : state.browser.state === 'idle' ? t('Idle') : t('Stopped')}
+            </span>
+          )}
           {state?.browser?.activeRunId && <span className="faint mono">{state.browser.activeRunId}</span>}
         </div>
         <div className={`computer-viewport${takenOver ? ' interactive' : ' view-only'}`} data-vnc-ws={wsPath}>
