@@ -81,21 +81,14 @@ export class Workbench {
     private readonly workspacesDir: string,
     private readonly memory: () => MemoryBudget | null,
     private readonly hostPath: (p: string) => string = (p) => p,
-    private readonly projectsDir: string | null = null,
   ) {}
 
-  /** Container path for a host cwd (/workspaces or /projects), or null when outside both (then the old path runs it). */
+  /** Container path for a host cwd inside workspacesDir, or null when outside (never mounts host paths outside workspaces). */
   containerPath(cwd: string): string | null {
     const full = path.resolve(cwd);
     const root = path.resolve(this.workspacesDir);
     if (full === root || full.startsWith(`${root}${path.sep}`)) {
       return path.posix.join('/workspaces', path.relative(root, full).split(path.sep).join('/'));
-    }
-    if (this.projectsDir) {
-      const projRoot = path.resolve(this.projectsDir);
-      if (full === projRoot || full.startsWith(`${projRoot}${path.sep}`)) {
-        return path.posix.join('/projects', path.relative(projRoot, full).split(path.sep).join('/'));
-      }
     }
     return null;
   }
@@ -140,9 +133,6 @@ export class Workbench {
       if (!(await this.docker.hasImage(IMAGE()))) await this.docker.pull(IMAGE());
       fs.mkdirSync(this.workspacesDir, { recursive: true });
       const binds = [`${this.hostPath(this.workspacesDir)}:/workspaces`, ...WORKBENCH_CACHE_VOLUMES];
-      if (this.projectsDir && fs.existsSync(this.projectsDir)) {
-        binds.push(`${this.hostPath(this.projectsDir)}:/projects`);
-      }
       await this.docker.startDetached({
         name: WORKBENCH_NAME,
         Image: IMAGE(),

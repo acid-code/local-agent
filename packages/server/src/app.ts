@@ -84,7 +84,7 @@ export async function buildApp(options: {
   engine.memory = memoryProbe ? new MemoryBudget(memoryProbe, () => budgetConfig(store.getSettings()), path.join(config.dataDir, 'memory-calibration.json')) : null;
   const workbench = options.workbench !== undefined
     ? options.workbench
-    : new Workbench(docker, path.join(config.dataDir, 'workspaces'), () => engine.memory, toHostBindPath, process.env.LA_PROJECTS_DIR || '/projects');
+    : new Workbench(docker, path.join(config.dataDir, 'workspaces'), () => engine.memory, toHostBindPath);
   engine.workbench = workbench;
   const browser = options.browser !== undefined
     ? options.browser

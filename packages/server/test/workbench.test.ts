@@ -136,22 +136,27 @@ describe('shared workbench', () => {
     expect(r3.tier).toBe('low');
   });
 
-  it('mounts and executes commands inside projectsDir (/projects/<repo>) in the shared workbench', async () => {
+  it('runs sandboxed projects under workspaces/projects in workbench and refuses host paths outside workspaces', async () => {
     const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'la-wb-ws-'));
-    const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'la-wb-proj-'));
-    const repoDir = path.join(proj, 'fb-marketplace-scraper');
+    const repoDir = path.join(ws, 'projects', 'fb-marketplace-scraper');
     fs.mkdirSync(repoDir, { recursive: true });
     const { docker, execCalls, startedSpecs } = fakeDocker();
-    const wb = new Workbench(docker, ws, () => null, (p) => p, proj);
+    const wb = new Workbench(docker, ws, () => null);
 
+    expect(await wb.run('ls', '/home/acid/projects/secret')).toBeNull();
     const res = await wb.run('npm ping', repoDir);
-    expect(res).toEqual({ output: 'ran in /projects/fb-marketplace-scraper', code: 0 });
-    expect(startedSpecs[0].HostConfig.Binds).toContain(`${proj}:/projects`);
-    expect(execCalls.find((c) => c.cmd[2]?.includes('npm ping'))?.cwd).toBe('/projects/fb-marketplace-scraper');
+    expect(res).toEqual({ output: 'ran in /workspaces/projects/fb-marketplace-scraper', code: 0 });
+    expect(startedSpecs[0].HostConfig.Binds).toEqual([
+      `${ws}:/workspaces`,
+      'la-workbench-npm:/cache/npm',
+      'la-workbench-pip:/cache/pip',
+      'la-workbench-uv:/cache/uv',
+      'la-workbench-tools:/opt/workbench',
+    ]);
+    expect(execCalls.find((c) => c.cmd[2]?.includes('npm ping'))?.cwd).toBe('/workspaces/projects/fb-marketplace-scraper');
 
     await wb.stop();
     fs.rmSync(ws, { recursive: true, force: true });
-    fs.rmSync(proj, { recursive: true, force: true });
   });
 
   it('queues chat before background (FIFO within priority) and enforces max 2 resident models', async () => {
