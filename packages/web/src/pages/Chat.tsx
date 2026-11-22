@@ -1,6 +1,6 @@
 import { CuteArt } from '../components/CuteArt';
 import { isOwner } from '../lib/role';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Menu as DropMenu } from '../components/ui';
 import { ModelPicker, useUsableModels } from '../lib/models';
 import { browserDictationSupported, startDictation } from '../lib/dictation';
@@ -17,7 +17,7 @@ import { PersonaPanel, useWorkspaces, type PanelAgent } from '../components/Pers
 import { PersonaChip, greetingFor, startersFor } from '../components/ChatChips';
 import { ContextPanel } from '../components/ContextPanel';
 import { ContextRing } from '../components/ContextRing';
-import { WorkGroupView } from '../components/WorkSteps';
+import { TypingDots, WorkGroupView, useSettled } from '../components/WorkSteps';
 import { groupWork } from '../lib/work-steps';
 import { ContextNudgeBanner, DecisionTimeline, BulkDiffCard, LocalRepoPicker, MiniAgentStrip, type MiniAgentRow } from '../components/ChatUpgrades';
 import { parseSources, toolSummary, waitStateOf, waitedFor, type ContextBreakdown } from '@local-agent/shared';
@@ -25,6 +25,7 @@ import { toast, errorText } from '../lib/toast';
 import { copyText } from '../lib/files';
 import { speak, subscribeSpeaking } from '../lib/speak';
 import { WAKE_AFTER_MS, backoffMs, chatLiveAction, mergeSnapshot, snapshotDiffers } from '../lib/live-sync';
+import { keepIdentity } from '../lib/anim-clock';
 import { api, post } from '../lib/api';
 import { isAbort, latestOnly } from '../lib/latest';
 import { Markdown } from '../components/Markdown';
@@ -47,6 +48,8 @@ const PAGE = 150;
 
 type OcrMode = 'auto' | 'printed' | 'handwriting' | 'off';
 const IMAGE_NAME = /\.(jpe?g|png|webp|heic|heif|tiff?|bmp|gif)$/i;
+
+const TYPING_GRACE_MS = 700;
 
 export function Chat() {
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -150,6 +153,14 @@ export function Chat() {
   const ws = useWorkspaces();
   const navigate = useNavigate();
   const active = ['running', 'loading', 'waiting', 'paused', 'awaiting_approval'].includes(status);
+  // Between steps (tool result in, next thought not yet) the dots used to blink on and off many times a second.
+  // They now appear only once the agent has been quiet for a moment, and hide at once when it speaks.
+  // Work groups are rebuilt only when the transcript changes, not on every streamed token.
+  const items = useMemo(() => groupWork(messages), [messages]);
+  // Live reasoning between steps shows as the last row of the live work group, so it no longer pops a separate
+  // block in and out below the steps on every tool call.
+  const thoughtInGroup = Boolean(active && thinking && !streaming && items[items.length - 1]?.kind === 'work');
+  const showTyping = useSettled(active && status !== 'waiting' && !streaming && !thinking, TYPING_GRACE_MS);
 
   async function refreshLists() {
     const [sessionRes, agentRes] = await Promise.all([
@@ -259,7 +270,7 @@ export function Chat() {
         const busy = (ctx.helpers || []).some((row) => row.status === 'running' || row.status === 'queued' || row.status === 'waiting');
         if (wasBusy && !busy) {
           const data = await api<{ messages: Message[] }>(`/api/sessions/${id}`);
-          if (!stopped && currentRef.current === id) { setMessages(data.messages); setHelperTick((value) => value + 1); }
+          if (!stopped && currentRef.current === id) { setMessages((prev) => keepIdentity(prev, data.messages)); setHelperTick((value) => value + 1); }
         }
         wasBusy = busy;
         if (busy) timer = window.setTimeout(() => void check(), 2500);
@@ -442,7 +453,7 @@ export function Chat() {
           // Same run still going after a reconnect: its own stream may have died with the connection, so reopen it.
           else if (!wasFirst && data.activeRun) setRunReconnect((n) => n + 1);
           if (!wasFirst && Array.isArray(data.messages)) {
-            setMessages((prev) => snapshotDiffers(prev, data.messages) ? mergeSnapshot(prev, data.messages) : prev);
+            setMessages((prev) => snapshotDiffers(prev, data.messages) ? keepIdentity(prev, mergeSnapshot(prev, data.messages)) : prev);
             // The run this page streamed ended while the connection was down: load its final state.
             if (!data.activeRun && runIdRef.current) void openSession(sessionId);
           }
@@ -487,7 +498,7 @@ export function Chat() {
         if (typeof data.statusDetail === 'string' && data.statusDetail) setLoadingNote(data.statusDetail);
         setWaitInfo(data.waitInfo ?? null);
         if (Array.isArray(data.messages) && data.run?.sessionId === currentRef.current) {
-          setMessages((prev) => (data.messages.length >= prev.length ? data.messages : prev));
+          setMessages((prev) => (data.messages.length >= prev.length ? keepIdentity(prev, data.messages as Message[]) : prev));
         }
         // The run may have ended before this stream connected (e.g. it failed at once): show why.
         if (data.run?.status === 'failed' && data.run?.error) setRunError(String(data.run.error));
@@ -1076,11 +1087,11 @@ export function Chat() {
               </div>
             </form>
           )}
-          {(() => { const items = groupWork(messages); const indexOf = new Map(messages.map((m, i) => [m.id, i])); return items.map((item, itemIndex) => {
+          {(() => { const indexOf = new Map(messages.map((m, i) => [m.id, i])); return items.map((item, itemIndex) => {
             if (item.kind === 'work') {
               const live = Boolean(active) && itemIndex === items.length - 1;
               const runs = new Set(item.runIds);
-              return <WorkGroupView key={item.id} group={item} live={live} diffs={edits.filter((edit) => edit.runId && runs.has(edit.runId)).map((edit) => edit.diff)} />;
+              return <WorkGroupView key={item.id} group={item} live={live} liveThought={live && thoughtInGroup ? thinking : undefined} diffs={edits.filter((edit) => edit.runId && runs.has(edit.runId)).map((edit) => edit.diff)} />;
             }
             const message = item.message;
             const index = indexOf.get(message.id) ?? 0;
@@ -1124,7 +1135,7 @@ export function Chat() {
             </article>
             );
           }); })()}
-          {(thinking || streaming) && (
+          {(streaming || (thinking && !thoughtInGroup)) && (
             <article className={persona ? 'msg from-agent streaming-msg' : 'msg streaming-msg'} style={persona ? { ['--accent' as string]: persona.accent || '#e4b56a' } : undefined}>
               {persona && <div className="who"><Face agent={persona} size={28} /><span className="meta">{persona.emoji ? `${persona.emoji} ` : ''}{persona.name}</span></div>}
               {thinking && (
@@ -1179,7 +1190,7 @@ export function Chat() {
               </div>
             );
           })()}
-          {active && status !== 'waiting' && !streaming && !thinking && <div className="typing" aria-label={t('Working')}><span /><span /><span /> <em>{loadingNote || t('Working…')}</em></div>}
+          {showTyping && <TypingDots label={t('Working')} note={loadingNote || t('Working…')} />}
           {runError && !active && (
             <div className="banner error-card" role="alert">
               <strong>{t('The reply failed.')}</strong>

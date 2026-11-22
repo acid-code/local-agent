@@ -174,3 +174,20 @@ export function diffStats(diffs: string[]): { added: number; removed: number } {
   }
   return { added, removed };
 }
+
+/** True when a row would render the same (lets React skip unchanged rows while the stream ticks). */
+export function sameRow(a: WorkRow, b: WorkRow): boolean {
+  if (a === b) return true;
+  if (a.type !== b.type || a.id !== b.id) return false;
+  if (a.type !== 'step' || b.type !== 'step') return (a as WorkThought).text === (b as WorkThought).text;
+  return a.pending === b.pending && a.failed === b.failed && a.output === b.output && a.durationMs === b.durationMs
+    && a.verb === b.verb && a.target === b.target && a.icon === b.icon && a.files.join('\n') === b.files.join('\n')
+    && JSON.stringify(a.args) === JSON.stringify(b.args);
+}
+
+/** True when a work group would render the same: same rows, counts and timing. */
+export function sameGroup(a: WorkGroup, b: WorkGroup): boolean {
+  if (a === b) return true;
+  return a.id === b.id && a.stepCount === b.stepCount && a.durationMs === b.durationMs && a.rows.length === b.rows.length
+    && a.rows.every((row, i) => sameRow(row, b.rows[i]!));
+}
