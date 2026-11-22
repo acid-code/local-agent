@@ -1,0 +1,25 @@
+[Unit]
+Description=llama-server uncensored fallback (Inkling 2 Mini, ROCm HIP)
+After=network-online.target llama-server.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=acid
+Group=acid
+WorkingDirectory=/opt/llama-server
+Environment=LD_LIBRARY_PATH=/opt/llama-server/uncensored-bin
+Environment=HSA_OVERRIDE_GFX_VERSION=11.0.0
+Environment=HIP_VISIBLE_DEVICES=0
+EnvironmentFile=-/etc/default/llama-uncensored
+ExecStart=/opt/llama-server/uncensored-run.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=300
+TimeoutStopSec=30
+LimitMEMLOCK=infinity
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

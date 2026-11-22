@@ -106,6 +106,10 @@ export interface RunCursor {
   noTools?: boolean;
   /** One retry on the next Auto tier after the model was missing from Ollama. */
   missingRetry?: boolean;
+  /** One automatic retry on the uncensored local llama-server after a clear refusal. */
+  uncensoredRetry?: boolean;
+  /** Snapshot of open tasks used to stop verification send-backs when the plan does not progress. */
+  taskSnapshot?: string;
   /** One automatic nudge when Researcher answers a factual question without searching first. */
   researchRetried?: boolean;
   /** One automatic nudge when a high-confidence skill was not loaded. */

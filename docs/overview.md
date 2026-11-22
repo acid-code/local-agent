@@ -97,6 +97,7 @@ Ordinary turns stay on the local model. Gemini is used only for a hard reasoning
 ## Backups, watchdog, notices, voice
 
 Snapshots land in `data/backups`. Each one has the database, the encrypted vault, `master.key`, and the persona workspaces. Settings can copy the file onward with rsync or rclone (including an S3-compatible target). Restore is one confirmation, then the process exits so it can start on the restored files.
+Database snapshots use SQLite `VACUUM INTO`, so rebuilds and power-loss recovery never archive a partially copied live WAL. Every container/update action requests a new snapshot first, and restores remove stale WAL/SHM files before starting the restored database.
 
 The watchdog checks Ollama and restarts containers this app created when they have stopped. It does not try to reinstall Ollama.
 

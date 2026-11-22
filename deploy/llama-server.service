@@ -22,6 +22,7 @@ ExecStart=/opt/llama-server/run.sh
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=300
+TimeoutStopSec=30
 LimitMEMLOCK=infinity
 LimitCORE=0
 

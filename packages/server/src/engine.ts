@@ -63,7 +63,7 @@ import { GALLERY } from './gallery.js';
 import { disabledRules } from './rules.js';
 import { CONNECTOR_TOOLS, disabledConnectorTools } from './connectors.js';
 import { memoryBrief, memoryFileTool, projectRules, proposeSkillTool, searchChatsTool, skillNudge } from './learning.js';
-import { LlamaWatch, isLlamaServerProvider, isOllamaProvider } from './coexist.js';
+import { LlamaWatch, isLlamaServerProvider, isOllamaProvider, isUncensoredProvider } from './coexist.js';
 
 export class Engine {
   private readonly inflight = new Map<string, { abort: AbortController; paused: boolean; resumePause: () => void }>();
@@ -75,6 +75,7 @@ export class Engine {
   private readonly heldLarge = new Map<string, string>();
   private readonly dwell = new Map<string, { modelId: string; previousId: string | null; until: number; explicit: boolean }>();
   residentLarge: string[] = [];
+  private llamaLease: { runId: string; kind: 'qwen' | 'uncensored' } | null = null;
   extraTools: Tool[] = [];
   /** Set by the routes once OCR is wired: reads an image file for the read_image_text tool. */
   ocrReader: ((fileId: string, mode: OcrMode, ownerId: string) => Promise<OcrResult>) | null = null;
@@ -98,6 +99,23 @@ export class Engine {
   ) {
     this.autonomy = new Autonomy(store, bus, vault, (input) => this.startTurn(input), (runId) => this.stop(runId), () => this.libraryDir);
     this.llama = new LlamaWatch(store, fetchImpl);
+  }
+  private async acquireLlamaLease(runId: string, kind: 'qwen' | 'uncensored', signal: AbortSignal): Promise<void> {
+    if (this.llamaLease?.runId === runId) {
+      this.llamaLease.kind = kind;
+      return;
+    }
+    while (this.llamaLease && this.llamaLease.runId !== runId) {
+      const live = this.liveStreams.get(runId);
+      if (live) live.detail = 'Waiting for GPU access — another chat is using the llama-server model.';
+      this.bus.publish({ type: 'status', runId, status: 'waiting', detail: 'Waiting for GPU access — another chat is using the llama-server model.' } as never);
+      if (signal.aborted) throw new StopError();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    this.llamaLease = { runId, kind };
+    const live = this.liveStreams.get(runId);
+    if (live) live.detail = undefined;
+    this.bus.publish({ type: 'status', runId, status: 'running', detail: undefined } as never);
   }
   /** llama-server ↔ Ollama GPU coexistence (see coexist.ts). */
   readonly llama: LlamaWatch;
@@ -201,6 +219,13 @@ export class Engine {
       if (limitTimer) clearTimeout(limitTimer);
       this.heldLarge.delete(runId);
       this.inflight.delete(runId);
+      if (this.llamaLease?.runId === runId) {
+        const kind = this.llamaLease.kind;
+        this.llamaLease = null;
+        if (kind === 'uncensored' && !process.env.VITEST) {
+          void this.llama.switchToQwen();
+        }
+      }
       // The store can already be closed when the app shuts down mid-run.
       try {
         this.liveStreams.delete(runId);
@@ -727,6 +752,15 @@ export class Engine {
       return;
     }
     const provider = this.provider(model);
+    const providerRow = this.store.getProvider(model.providerId);
+    if (providerRow && (isLlamaServerProvider(providerRow) || isUncensoredProvider(providerRow))) {
+      await this.acquireLlamaLease(run.id, isUncensoredProvider(providerRow) ? 'uncensored' : 'qwen', signal);
+      if (isUncensoredProvider(providerRow) && this.llamaLease?.runId === run.id) {
+        await this.llama.switchToUncensored();
+      } else if (isLlamaServerProvider(providerRow) && this.llamaLease?.runId === run.id) {
+        await this.llama.switchToQwen();
+      }
+    }
     const toolless = Boolean(current.cursor.noTools) || this.toolSupportOf(model) === false;
     const tools = toolless ? [] : this.tools(agent, this.store.getSession(run.sessionId)?.mode, current.cursor.stage, current.cursor.toolSubset, Boolean(current.cursor.helperId)).map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
     const sessionForCtx = this.store.getSession(run.sessionId);
@@ -792,6 +826,35 @@ export class Engine {
         }
       }
       if (lease) await this.calibrateLease(lease, model.apiName, numCtx);
+      const uncensored = this.llama.uncensoredModel();
+      if (!current.cursor.uncensoredRetry
+        && !toolCalls?.length
+        && isRefusalText(text)) {
+        let fallback = uncensored;
+        if (!fallback) {
+          if (await this.llama.switchToUncensored()) {
+            await this.refreshModels();
+            fallback = this.llama.uncensoredModel();
+          }
+        } else if (model.id !== fallback.id) {
+          await this.llama.switchToUncensored();
+        }
+        if (!fallback || model.id === fallback.id) {
+          this.store.addLog('warn', 'The uncensored fallback could not be started.', undefined, 'router');
+        } else {
+          if (this.llamaLease?.runId === run.id) this.llamaLease.kind = 'uncensored';
+          const reason = `Switched to ${fallback.name} — ${model.name} returned a clear refusal.`;
+          this.store.addLog('warn', reason, undefined, 'router');
+          this.store.updateStep(step.id, { status: 'failed', error: 'The selected model refused the request.', endedAt: now(), latencyMs: Date.now() - started });
+          this.store.updateRun(run.id, {
+            cursor: { ...current.cursor, modelId: fallback.id, uncensoredRetry: true, phase: 'model', switched: true, routingReason: reason },
+            modelId: fallback.id,
+            switched: true,
+            routingNote: reason,
+          });
+          return;
+        }
+      }
     } catch (error) {
       lease?.release();
       if (error instanceof StopError) throw error;
@@ -933,12 +996,18 @@ export class Engine {
       }
       const open = check.action === 'ok' ? openTasks(this.store, run.sessionId, run.id) : [];
       const taskRounds = current.cursor.taskRounds ?? 0;
+      const taskSnapshot = open.slice().sort().join('\n');
+      const repeatedTasks = Boolean(current.cursor.taskSnapshot && taskSnapshot && current.cursor.taskSnapshot === taskSnapshot);
       if (open.length && taskRounds < MAX_TASK_ROUNDS && maxSteps - current.cursor.turn > 1) {
+        if (repeatedTasks) {
+          text += `\n\n⚠️ ${open.length} task(s) still open: ${open.join('; ')}`;
+        } else {
         this.store.updateStep(step.id, { status: 'completed', output: { text, discarded: 'open tasks' }, tokensIn: usage.inputTokens, tokensOut: usage.outputTokens, costUsd: cost, latencyMs: Date.now() - started, endedAt: now() });
         this.store.addStep({ runId: run.id, kind: 'contract', name: 'verify', status: 'completed', input: { tasks: open.length }, output: `Sent back: ${open.length} task(s) still open`, toolCallId: null, turn: current.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now() });
         const fresh = this.store.getRun(run.id)!;
-        this.store.updateRun(run.id, { cursor: { ...current.cursor, phase: 'model', turn: current.cursor.turn + 1, taskRounds: taskRounds + 1, recovery: { rounds: current.cursor.recovery?.rounds ?? 0, note: tasksNote(open) } }, inputTokens: fresh.inputTokens + usage.inputTokens, outputTokens: fresh.outputTokens + usage.outputTokens, costUsd: fresh.costUsd + cost });
+        this.store.updateRun(run.id, { cursor: { ...current.cursor, phase: 'model', turn: current.cursor.turn + 1, taskRounds: taskRounds + 1, taskSnapshot, recovery: { rounds: current.cursor.recovery?.rounds ?? 0, note: tasksNote(open) } }, inputTokens: fresh.inputTokens + usage.inputTokens, outputTokens: fresh.outputTokens + usage.outputTokens, costUsd: fresh.costUsd + cost });
         return;
+        }
       }
       if (open.length) text += `\n\n⚠️ ${open.length} task(s) still open: ${open.join('; ')}`;
       if (check.action === 'footer') {
@@ -2041,6 +2110,16 @@ function isToolParseError(message: string): boolean {
 function isProviderOutage(message: string): boolean {
   if (isToolParseError(message)) return false;
   return /\(429\)|\(5\d\d\)|status 429|status 5\d\d|rate limit|too many requests/i.test(message);
+}
+
+export function isRefusalText(text: string): boolean {
+  const value = text.trim();
+  if (value.length < 12 || value.length > 4000) return false;
+  return (
+    /\b(i[' ]?m sorry|i am sorry|i can[' ]?t (help|assist)|i cannot (help|assist)|unable to help|won[' ]?t be able to|can[' ]?t comply|cannot comply)\b/i.test(value)
+    || /\b(i (?:cannot|can't|won't|will not) (?:provide|generate|create|perform|assist with|help with|fulfil|fulfill)|not allowed to|not permitted to|against (?:my|our) (?:safety )?policy|safety (?:guidelines|policy)|content (?:filter|policy)|policy restrictions?|refuse to|terms of service|terms and (?:conditions|policies)|due to (?:terms|polic(?:y|ies))|prohibited by|disallowed by|violat(?:e|es|ing) (?:my|the|our) (?:safety )?(?:policy|guidelines|terms)|cannot (?:access|search|browse) (?:that|those|the) (?:site|website|platform)|restricted (?:website|platform|action))\b/i.test(value)
+    || /אסור לי|לא אוכל לעזור|לא יכול לעזור|אין לי אפשרות|מדיניות בטיחות|בהתאם למדיניות|המערכת לא מאפשר/i.test(value)
+  );
 }
 
 function strategyFor(agent: Agent, model: ModelRow, autoRole?: string) {

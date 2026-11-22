@@ -75,7 +75,7 @@ export function providerFor(model: ModelRow, provider: ProviderRow, fetchImpl: t
     return new OllamaProvider(base.replace(/\/v1$/, ''), fetchImpl);
   }
   // llama-server: keep the slot prefix cache on so a stable system prompt + tools are not re-prefilled each turn.
-  const llama = isLlamaServerProvider(provider);
+  const llama = isLlamaServerProvider(provider) || /uncensored|:8081(?:\/|$)/i.test(`${provider.name} ${provider.baseUrl || ''}`);
   const extra = llama ? { cache_prompt: true } : undefined;
   return new OpenAIProvider(base, key || '', fetchImpl, provider.kind === 'openrouter', extra, llama);
 }

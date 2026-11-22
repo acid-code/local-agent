@@ -42,6 +42,21 @@ Small models we measured for Hebrew (CPU box): gemma3:4b best; gemma3:1b OK but 
 qwen3:1.7b weak vocabulary; qwen3:0.6b unusable. Other profiles: `generic-32g` (24 GB cap, QAT Gemma 4) and
 `generic-16g` (10 GB cap, gemma3:4b).
 
+## Uncensored llama-server fallback
+
+The benchmarked Inkling 2 Mini build can be installed as an automatic fallback on port `8081`. The installer packages
+the llama-server binary and shared libraries from `deploy/llama-inkling-bin/`; the three GGUF assets are discovered
+from the configured models directory or `/home/<user>/projects/llama.cpp-APU-upgrade/models/`:
+
+- `Inkling-2-Mini-Uncensored-AD-Q4_K.gguf`
+- `mmproj-Inkling-2-Mini-Uncensored-F16.gguf`
+- `dspark-Inkling-2-Mini-Q8_0.gguf`
+
+When an active model gives a clear refusal (for example, citing safety rules or terms of service), local-agent retries
+the turn once with the uncensored model. It may still fail or respect a separate service/site restriction; the fallback
+is not a bypass for authentication or abuse controls. A successful uncensored answer does not leak the routing retry into
+the stored answer.
+
 ## Runtime: Ollama Vulkan vs llama.cpp Vulkan vs ROCm
 
 | | Ollama + Vulkan | llama.cpp server (Vulkan) | ROCm (Ollama or llama.cpp) |

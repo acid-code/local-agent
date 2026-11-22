@@ -123,6 +123,7 @@ export class Autonomy {
     const providers = new Map(this.store.listProviders().map((p) => [p.id, p]));
     const usable = this.store.listModels().filter((m) => {
       if (!m.enabled || m.embedding) return false;
+      if (/embed(?:ding)?|nomic-embed/i.test(`${m.name} ${m.apiName}`)) return false;
       const p = providers.get(m.providerId);
       return Boolean(p?.enabled && p.kind !== 'rehearsal');
     });

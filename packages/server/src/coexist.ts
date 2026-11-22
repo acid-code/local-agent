@@ -20,6 +20,13 @@ export function isLlamaServerProvider(provider: Pick<ProviderRow, 'id' | 'name' 
   return provider.id === 'prov_llama' || /llama[-_ ]?server/i.test(provider.name);
 }
 
+export function isUncensoredProvider(provider: Pick<ProviderRow, 'id' | 'name' | 'kind' | 'baseUrl'>): boolean {
+  if (provider.kind !== 'openai_compat') return false;
+  return provider.id === 'prov_uncensored'
+    || /uncensored|unfiltered/i.test(provider.name)
+    || /:8081(?:\/|$)/.test(provider.baseUrl || '');
+}
+
 /** Size of a model on the GPU, from its profile or its name (e.g. "20b" → ~13 GiB). */
 export function modelGiB(model: Pick<ModelRow, 'apiName' | 'typicalQ4GiB'>): number {
   if (model.typicalQ4GiB && model.typicalQ4GiB > 0) return model.typicalQ4GiB;
@@ -47,6 +54,45 @@ export class LlamaWatch {
     const provider = this.provider();
     if (!provider) return undefined;
     return this.store.listModels().find((m) => m.providerId === provider.id && m.enabled && !m.embedding);
+  }
+
+  uncensoredModel(): ModelRow | undefined {
+    const provider = this.store.listProviders().find((p) =>
+      p.enabled && isUncensoredProvider(p)
+      && this.store.listModels().some((m) => m.providerId === p.id && m.enabled && !m.embedding),
+    );
+    if (!provider) return undefined;
+    return this.store.listModels().find((m) => m.providerId === provider.id && m.enabled && !m.embedding);
+  }
+
+  async switchToUncensored(): Promise<boolean> {
+    const configured = process.env.LLAMA_FALLBACK_CONTROL_URL?.trim();
+    const url = configured
+      ? configured.replace(/\/$/, '')
+      : 'http://host.docker.internal:8082';
+    try {
+      const response = await this.fetchImpl(`${url}/switch-uncensored`, {
+        method: 'POST',
+        signal: AbortSignal.timeout(180_000),
+      });
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  async switchToQwen(): Promise<boolean> {
+    const configured = process.env.LLAMA_FALLBACK_CONTROL_URL?.trim();
+    const url = (configured || 'http://host.docker.internal:8082').replace(/\/$/, '');
+    try {
+      const response = await this.fetchImpl(`${url}/switch-qwen`, {
+        method: 'POST',
+        signal: AbortSignal.timeout(180_000),
+      });
+      return response.ok;
+    } catch {
+      return false;
+    }
   }
 
   /**

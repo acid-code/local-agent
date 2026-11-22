@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import type { DockerCtl } from './docker.js';
 import { readMem } from './discovery.js';
 import type { Settings } from './settings.js';
@@ -12,20 +13,37 @@ export async function createBackup(dataDir: string, prefix = ''): Promise<Backup
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const id = prefix ? `${prefix}-${stamp}` : stamp;
   const file = path.join(dataDir, 'backups', `${id}.tar`);
-  const include = ['local-agent.db', 'local-agent.db-wal', 'local-agent.db-shm', 'master.key', 'cookie.secret', 'secrets.env', 'workspaces'].filter((name) => fs.existsSync(path.join(dataDir, name)));
-  if (!include.length) throw new Error('Nothing to back up yet.');
-  await run('tar', ['-C', dataDir, '-cf', file, ...include]);
+  const liveDb = path.join(dataDir, 'local-agent.db');
+  if (!fs.existsSync(liveDb)) throw new Error('Nothing to back up yet.');
+
+  const staging = fs.mkdtempSync(path.join(dataDir, 'backup-'));
+  try {
+    const snapshot = path.join(staging, 'local-agent.db');
+    const escaped = snapshot.replace(/'/g, "''");
+    const db = new DatabaseSync(liveDb);
+    try {
+      db.exec(`VACUUM main INTO '${escaped}'`);
+    } finally {
+      db.close();
+    }
+    for (const name of ['master.key', 'cookie.secret', 'secrets.env']) {
+      if (fs.existsSync(path.join(dataDir, name))) fs.copyFileSync(path.join(dataDir, name), path.join(staging, name));
+    }
+    if (fs.existsSync(path.join(dataDir, 'workspaces'))) {
+      fs.cpSync(path.join(dataDir, 'workspaces'), path.join(staging, 'workspaces'), { recursive: true });
+    }
+    const include = fs.readdirSync(staging);
+    await run('tar', ['-C', staging, '-cf', file, ...include]);
+  } finally {
+    fs.rmSync(staging, { recursive: true, force: true });
+  }
   const stat = fs.statSync(file);
   return { id, file, bytes: stat.size, createdAt: new Date().toISOString() };
 }
 
-let lastPreChangeBackupAt = 0;
-
-/** Best-effort automatic backup before a container change or update (throttled to at most once per minute). */
+/** Best-effort automatic backup before a container change or update. */
 export async function preChangeBackup(dataDir: string, reason = 'pre-change'): Promise<BackupInfo | null> {
   if (!fs.existsSync(path.join(dataDir, 'local-agent.db'))) return null;
-  if (Date.now() - lastPreChangeBackupAt < 60_000) return null;
-  lastPreChangeBackupAt = Date.now();
   try {
     return await createBackup(dataDir, reason.replace(/[^a-z0-9_-]+/gi, '-'));
   } catch {
@@ -99,6 +117,8 @@ export function applyBackupArchive(dataDir: string, archive: string) {
   try {
     fs.mkdirSync(dataDir, { recursive: true });
     runSync('tar', ['-C', staging, '-xf', archive]);
+    fs.rmSync(path.join(dataDir, 'local-agent.db-wal'), { force: true });
+    fs.rmSync(path.join(dataDir, 'local-agent.db-shm'), { force: true });
     for (const name of ['local-agent.db', 'local-agent.db-wal', 'local-agent.db-shm', 'master.key', 'secrets.env']) {
       const source = path.join(staging, name);
       if (!fs.existsSync(source)) continue;

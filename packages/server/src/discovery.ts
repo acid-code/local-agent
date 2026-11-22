@@ -34,6 +34,8 @@ const PORTS = [
   { id: 'ollama-host', url: 'http://host.docker.internal:11434', kind: 'ollama' },
   { id: 'llama', url: 'http://127.0.0.1:8080/v1', kind: 'openai' },
   { id: 'llama-host', url: 'http://host.docker.internal:8080/v1', kind: 'openai' },
+  { id: 'uncensored', url: 'http://127.0.0.1:8081/v1', kind: 'openai' },
+  { id: 'uncensored-host', url: 'http://host.docker.internal:8081/v1', kind: 'openai' },
   { id: 'lmstudio', url: 'http://127.0.0.1:1234/v1', kind: 'openai' },
   { id: 'vllm', url: 'http://127.0.0.1:8000/v1', kind: 'openai' },
 ];
@@ -44,12 +46,14 @@ export async function scanMachine(fetchImpl: typeof fetch, docker: DockerCtl, st
   const resident: string[] = [];
   const host = process.env.OLLAMA_HOST ? normalizeOllamaHost(process.env.OLLAMA_HOST) : '';
   const llamaEnv = process.env.LLAMA_SERVER_URL ? process.env.LLAMA_SERVER_URL.trim().replace(/\/$/, '') : '';
+  const uncensoredEnv = process.env.LLAMA_UNCENSORED_SERVER_URL ? process.env.LLAMA_UNCENSORED_SERVER_URL.trim().replace(/\/$/, '') : '';
   const savedOpenAI = store.listProviders()
     .filter((p) => p.enabled && p.kind === 'openai_compat' && p.id !== 'prov_ollama' && p.baseUrl)
     .map((p) => ({ id: p.id.replace(/^prov_/, ''), url: p.baseUrl!.replace(/\/$/, ''), kind: 'openai', providerName: p.name }));
   const rawTargets: { id: string; url: string; kind: string; providerName?: string }[] = [
     ...(host ? [{ id: 'ollama-env', url: host, kind: 'ollama' }] : []),
     ...(llamaEnv ? [{ id: 'llama', url: llamaEnv.endsWith('/v1') ? llamaEnv : `${llamaEnv}/v1`, kind: 'openai', providerName: 'llama-server' }] : []),
+    ...(uncensoredEnv ? [{ id: 'uncensored', url: uncensoredEnv.endsWith('/v1') ? uncensoredEnv : `${uncensoredEnv}/v1`, kind: 'openai', providerName: 'llama-server (uncensored)' }] : []),
     ...savedOpenAI,
     ...PORTS,
   ];
@@ -86,11 +90,17 @@ export async function scanMachine(fetchImpl: typeof fetch, docker: DockerCtl, st
         if (!response.ok) throw new Error(String(response.status));
         const json = await response.json() as { data?: { id?: string }[] };
         const count = json.data?.length ?? 0;
-        const normId = target.id === 'llama-host' ? 'llama' : target.id;
+        const normId = target.id === 'llama-host' ? 'llama'
+          : target.id === 'uncensored-host' ? 'uncensored'
+          : target.id;
         if (normId === 'llama') llamaFound = true;
         probes.push({ id: target.id, kind: 'openai', ok: true, detail: `${count} model${count === 1 ? '' : 's'} at ${target.url}`, url: target.url });
-        const nCtx = normId === 'llama' ? await llamaContext(fetchImpl, target.url) : 0;
-        rememberOpenAI(store, normId, target.url, json, target.providerName || (normId === 'llama' ? 'llama-server' : normId), nCtx);
+        const nCtx = normId === 'llama' || normId === 'uncensored' ? await llamaContext(fetchImpl, target.url) : 0;
+        const displayName = target.providerName
+          || (normId === 'llama' ? 'llama-server'
+            : normId === 'uncensored' ? 'llama-server (uncensored)'
+            : normId);
+        rememberOpenAI(store, normId, target.url, json, displayName, nCtx);
       }
     } catch {
       probes.push({ id: target.id, kind: target.kind, ok: false, detail: `No answer from ${target.url}`, url: target.url });
@@ -152,11 +162,14 @@ export async function llamaContext(fetchImpl: typeof fetch, base: string): Promi
 
 function rememberOpenAI(store: Store, id: string, base: string, json: { data?: { id?: string }[] }, displayName?: string, nCtx = 0) {
   const provider = store.upsertProvider({ id: `prov_${id}`, kind: 'openai_compat', name: displayName || id, baseUrl: base, enabled: true });
-  const names = parseOpenAIModels(json);
+  const names = parseOpenAIModels(json).map((name) => id === 'uncensored'
+    ? (name.includes('Inkling-2-Mini-Uncensored') ? 'inkling-2-mini-uncensored' : name)
+    : name);
   for (const name of names) {
     const profile = resolveProfile(name);
+    const publicName = id === 'uncensored' ? 'Inkling 2 Mini Uncensored' : name;
     store.upsertModel({
-      id: `${id}_${name.replace(/[^a-z0-9]+/gi, '_')}`, providerId: provider.id, name, apiName: name, profileId: profile.id,
+      id: `${id}_${name.replace(/[^a-z0-9]+/gi, '_')}`, providerId: provider.id, name: publicName, apiName: name, profileId: profile.id,
       tokenizer: profile.tokenizer, contextWindow: nCtx ? Math.min(profile.contextWindow, nCtx) : profile.contextWindow,
       practicalBudget: nCtx ? Math.min(profile.practicalBudget, nCtx) : profile.practicalBudget, strategy: profile.strategy,
       sizeClass: profile.sizeClass, local: true, modalities: profile.modalities, strengths: profile.strengths, typicalQ4GiB: profile.typicalQ4GiB ?? null,
