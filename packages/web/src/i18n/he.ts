@@ -1535,4 +1535,7 @@ export const he: Record<string, string> = {
   "failed": "נכשלו",
   "tokens": "טוקנים",
   "stopped": "נעצר",
+  "Personas can start each other's runs": "פרסונות יכולות להפעיל ריצות אחת של השנייה",
+  "From {0}": "מאת {0}",
+  "Handoff": "העברת משימה",
 };

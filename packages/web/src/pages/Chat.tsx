@@ -1107,12 +1107,22 @@ export function Chat() {
             if (message.role === 'assistant' && !message.content.trim() && calls.length) {
               return <div key={message.id} className="tool-call-chip"><Wrench size={14} />{' '}{t('Calling')}{' '}{calls.join(', ')}…{message.routingNote && <span className="switch">{message.routingNote}</span>}</div>;
             }
-            const [visible, attached] = message.content.split(CONTEXT_MARK);
+            const [rawVisible, attached] = message.content.split(CONTEXT_MARK);
+            const pmsgMatch = (rawVisible || '').match(/^\[persona-message\|([^|\]]+)\|([^|\]]+)\|([^|\]]+)\|([^|\]]+)\|([^\]]*)\]\n?/);
+            const pmsg = pmsgMatch ? { id: pmsgMatch[1]!, kind: pmsgMatch[2]!, fromAgentId: pmsgMatch[3]!, fromName: pmsgMatch[4]!, fromSessionId: pmsgMatch[5] || '' } : null;
+            const visible = pmsg ? (rawVisible || '').slice(pmsgMatch![0].length) : (rawVisible || '');
             const cites = citationsIn(visible || '').filter((cite) => cite.kind === 'file');
             const helperNote = Boolean(message.routingNote?.startsWith('helper:'));
             return (
-            <article key={message.id} id={`m-${message.id}`} data-mid={message.id} title={message.createdAt ? fmt.dateTime(message.createdAt) : undefined} className={`${message.role === 'user' ? 'msg user' : fromAgent ? `msg from-agent${streak ? ' cont' : ''}` : 'msg'}${helperNote ? ' helper-result' : ''}`} style={fromAgent ? { ['--accent' as string]: speaker.accent || '#e4b56a' } : undefined}>
-              {fromAgent ? !streak && <div className="who"><Face agent={speaker} size={28} /><span className="meta">{speaker.emoji ? `${speaker.emoji} ` : ''}{speaker.name}</span></div> : message.role !== 'user' && message.role !== 'assistant' && <div className="meta"><span>{message.role}</span></div>}
+            <article key={message.id} id={`m-${message.id}`} data-mid={message.id} title={message.createdAt ? fmt.dateTime(message.createdAt) : undefined} className={`${message.role === 'user' ? 'msg user' : fromAgent ? `msg from-agent${streak ? ' cont' : ''}` : 'msg'}${helperNote ? ' helper-result' : ''}${pmsg ? ' persona-msg' : ''}`} style={fromAgent ? { ['--accent' as string]: speaker.accent || '#e4b56a' } : undefined}>
+              {pmsg && (
+                <div className="persona-msg-head">
+                  <span>{t('From {0}', [pmsg.fromName])}</span>
+                  {pmsg.kind === 'handoff' && <span className="pill small">{t('Handoff')}</span>}
+                  {pmsg.fromAgentId && <Link className="link-button" to={`/?persona=${pmsg.fromAgentId}`}>{t('Open chat')}</Link>}
+                </div>
+              )}
+              {!pmsg && (fromAgent ? !streak && <div className="who"><Face agent={speaker} size={28} /><span className="meta">{speaker.emoji ? `${speaker.emoji} ` : ''}{speaker.name}</span></div> : message.role !== 'user' && message.role !== 'assistant' && <div className="meta"><span>{message.role}</span></div>)}
               {message.routingNote && !helperNote && <div className="switch">{message.routingNote}</div>}
               {message.thinking && (
                 <details className="thinking saved-thinking">

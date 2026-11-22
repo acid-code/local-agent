@@ -68,6 +68,7 @@ import { registerMedia } from './media.js';
 import { getChatWorkspaces, prefillChatWorkspaces, resolveChatWorkspaces, setChatWorkspaces, chatWorkspacePaths } from './chat-workspaces.js';
 import { usableModels } from './usable-models.js';
 import { registerWorkspaceRoutes } from './workspaces.js';
+import { listPersonaMessages } from './persona-messaging.js';
 import { budgetConfig, budgetReport, type MemoryBudget } from './memory.js';
 import { localStatus } from './images.js';
 import { activeRunOf, sessionEventFilter } from './session-events.js';
@@ -196,6 +197,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const body = parse(z.object({
       goodModelId: z.string().nullable().optional(),
       autoResume: z.boolean().optional(),
+      personaAutoStart: z.boolean().optional(),
       sandbox: z.enum(['docker-or-host', 'docker-only', 'host']).optional(),
       maxSteps: z.number().int().min(1).max(40).optional(),
       outputReserveTokens: z.number().int().min(128).max(32000).optional(),
@@ -238,6 +240,18 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const next = { ...current, ...body, imageGen: { ...current.imageGen, ...(body.imageGen ?? {}) } };
     const saved = store.saveSettings(next, 'Settings updated', { settings: next, agents: store.listAgents() });
     return { settings: saved };
+  });
+
+  app.get('/api/persona-messages', async (req) => {
+    const q = req.query as { sessionId?: string; agentId?: string; limit?: string };
+    return {
+      messages: listPersonaMessages(store, {
+        ownerId: accountOf(req).id,
+        sessionId: q.sessionId || undefined,
+        agentId: q.agentId || undefined,
+        limit: q.limit ? Number(q.limit) : 50,
+      }),
+    };
   });
   app.post('/api/secrets', async (req) => {
     const body = parse(z.object({ key: z.string(), value: z.string().min(1) }), req.body);

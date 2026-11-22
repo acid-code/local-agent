@@ -69,6 +69,12 @@ export interface RunCursor {
   imagePrompt?: string;
   /** Scheduled or triggered run: queued behind chat replies and images when memory is short. */
   background?: boolean;
+  /** Persona-to-persona messaging hop counter (refused above 3). */
+  hop?: number;
+  sourceMessageId?: string;
+  sourceAgentId?: string;
+  sourceSessionId?: string;
+  sourceRunId?: string;
   turn: number;
   modelId?: string;
   messageModelId?: string;

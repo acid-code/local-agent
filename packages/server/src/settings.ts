@@ -48,6 +48,8 @@ export interface Settings {
   ramSystemReserveGiB: number;
   /** Machine profile the installer applied, and the model it picked for Hebrew replies. */
   modelProfile?: { id: string; hebrew: string | null; at: string } | null;
+  /** Whether personas may auto-start each other's runs via send_message / handoff. Default true. */
+  personaAutoStart?: boolean;
 }
 
 export interface ImageGenSettings {
@@ -88,6 +90,7 @@ export const DEFAULT_SETTINGS: Settings = {
   backupCron: '0 3 * * *',
   backupTransport: 'none',
   backupTarget: '',
+  personaAutoStart: true,
   imapHost: '',
   imapPort: 993,
   imapMailbox: 'INBOX',

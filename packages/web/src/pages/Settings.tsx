@@ -18,7 +18,7 @@ import { UpdatesBlock } from '../components/Updates';
 interface Secret { id: string; name: string; handle: string; scope: string; revokedAt: string | null }
 interface Audit { id: number; action: string; actor: string; createdAt: string }
 interface SecretRequest { id: string; name: string; reason: string; status: string; createdAt: string }
-interface SettingsShape { codeApproval: string; geminiTier: string; sandbox: string; autoResume: boolean; approvalForDestructive: boolean; approvalMode?: string; readOnly?: boolean; dailyTokenLimit?: number | null; killSwitch?: boolean; searxngUrl?: string }
+interface SettingsShape { codeApproval: string; geminiTier: string; sandbox: string; autoResume: boolean; personaAutoStart?: boolean; approvalForDestructive: boolean; approvalMode?: string; readOnly?: boolean; dailyTokenLimit?: number | null; killSwitch?: boolean; searxngUrl?: string }
 interface ProviderItem { id: string; kind: string; name: string; baseUrl: string | null; enabled: boolean }
 interface ModelItem { id: string; name: string; apiName: string; local: boolean; enabled: boolean; providerId: string; parameterSize?: string | null; practicalBudget?: number }
 interface AutoRoleRow { role: string; wanted: string; modelName?: string; providerName?: string; fallback: boolean; available: boolean; note: string }
@@ -484,6 +484,14 @@ function OwnerSettings() {
               <option value="sandbox-auto">{tr('Auto inside the workspace, ask for host paths and push')}</option>
               <option value="always">{tr('Ask before every edit batch')}</option>
             </select>
+          </label>
+          <label className="check-row" style={{ marginTop: 10 }}>
+            <input
+              type="checkbox"
+              checked={settings.personaAutoStart !== false}
+              onChange={async (event) => { await patchSettings({ personaAutoStart: event.target.checked }); await load(); }}
+            />
+            <span>{tr("Personas can start each other's runs")}</span>
           </label>
           <p className="faint">{tr('Sandbox:')}{' '}{settings.sandbox}. Destructive shell commands ask first: {settings.approvalForDestructive ? 'yes' : 'no'}. Interrupted runs resume on restart: {settings.autoResume ? 'yes' : 'no'}.</p>
           <h3 style={{ marginTop: 18 }}>{tr('Limits')}</h3>
