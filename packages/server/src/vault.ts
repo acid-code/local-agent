@@ -216,7 +216,18 @@ export class Vault {
     }));
   }
 
-  resolveRequest(id: string, status: 'provided' | 'denied') {
+  getRequest(id: string): SecretRequest | null {
+    return this.listRequestsWhere('WHERE id = ?', id)[0] ?? null;
+  }
+
+  private listRequestsWhere(where: string, ...args: unknown[]): SecretRequest[] {
+    return (this.store.db.prepare(`SELECT * FROM secret_requests ${where}`).all(...(args as never[])) as Record<string, unknown>[]).map((row) => ({
+      id: String(row.id), runId: String(row.run_id), name: String(row.name), scope: String(row.scope),
+      scopeId: row.scope_id ? String(row.scope_id) : null, reason: String(row.reason), status: String(row.status), createdAt: String(row.created_at),
+    }));
+  }
+
+  resolveRequest(id: string, status: 'provided' | 'denied' | 'expired') {
     this.store.db.prepare('UPDATE secret_requests SET status = ?, resolved_at = ? WHERE id = ?').run(status, now(), id);
   }
 

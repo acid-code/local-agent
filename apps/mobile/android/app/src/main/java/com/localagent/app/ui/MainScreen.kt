@@ -1,321 +1,311 @@
 package com.localagent.app.ui
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.localagent.app.model.Persona
-import kotlinx.coroutines.launch
 
 @Composable
 fun LocalAgentApp(vm: ChatViewModel, onVoiceDictation: () -> Unit) {
     val state by vm.ui.collectAsState()
-    var showSettings by remember { mutableStateOf(false) }
 
     CompositionLocalProvider(LocalAgentApi provides vm.client) {
-    when {
-        state.checkingAuth -> {
-            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-                    Text("Connecting to local-agent…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        when {
+            state.checkingAuth -> {
+                Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                        CircularProgressIndicator(color = MaterialTheme.colorScheme.tertiary, strokeWidth = 3.dp)
+                        Text("Connecting to your mini PC…", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
             }
+            !state.authenticated -> ConnectScreen(state = state, onConnect = vm::connectAndLogin)
+            else -> AppShell(state = state, vm = vm, onVoiceDictation = onVoiceDictation)
         }
-        !state.authenticated -> ConnectScreen(state = state, onConnect = vm::connectAndLogin)
-        showSettings -> SettingsScreen(
-            state = state,
-            onBack = { showSettings = false },
-            onRefreshModels = vm::refreshModels,
-            onPullModel = vm::pullModel,
-            onSaveSearx = vm::saveSearxngUrl,
-            onAutoDetectSearx = vm::autoDetectSearxng,
-            onToggleVoice = vm::togglePersonaVoice,
-            onSignOut = { showSettings = false; vm.signOut() },
-        )
-        else -> MainChatShell(
-            state = state,
-            vm = vm,
-            onOpenSettings = { showSettings = true },
-            onVoiceDictation = onVoiceDictation,
-        )
-    }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+/** Native app shell: one screen per bottom tab, no desktop menus. The bar hides while typing. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun MainChatShell(
-    state: AppUiState,
-    vm: ChatViewModel,
-    onOpenSettings: () -> Unit,
-    onVoiceDictation: () -> Unit,
-) {
-    val drawerState = rememberDrawerState(DrawerValue.Closed)
-    val scope = rememberCoroutineScope()
+private fun AppShell(state: AppUiState, vm: ChatViewModel, onVoiceDictation: () -> Unit) {
     val snackbarHostState = remember { SnackbarHostState() }
-    var showModelSheet by remember { mutableStateOf(false) }
-    var showContextSheet by remember { mutableStateOf(false) }
-    var searchQuery by remember { mutableStateOf("") }
-
     LaunchedEffect(state.snackbar) {
         val msg = state.snackbar ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(msg)
         vm.consumeSnackbar()
     }
+    val imeVisible = WindowInsets.isImeVisible
 
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        drawerContent = {
-            ModalDrawerSheet(
-                drawerContainerColor = MaterialTheme.colorScheme.surface,
-                modifier = Modifier.width(310.dp),
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+        bottomBar = {
+            AnimatedVisibility(
+                visible = !(imeVisible && state.tab == AppTab.Chat),
+                enter = slideInVertically { it } + fadeIn(),
+                exit = slideOutVertically { it } + fadeOut(),
             ) {
-                Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text("local-agent", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary, modifier = Modifier.weight(1f))
-                        IconButton(onClick = { scope.launch { drawerState.close() }; vm.startNewChat() }) {
-                            Icon(Icons.Default.AddComment, contentDescription = "New chat")
-                        }
-                        IconButton(onClick = { scope.launch { drawerState.close() }; onOpenSettings() }) {
-                            Icon(Icons.Default.Settings, contentDescription = "Settings")
-                        }
-                    }
-
-                    OutlinedTextField(
-                        value = searchQuery,
-                        onValueChange = { searchQuery = it },
-                        placeholder = { Text("Search chats…") },
-                        singleLine = true,
-                        leadingIcon = { Icon(Icons.Default.Search, null, Modifier.size(18.dp)) },
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp),
-                    )
-
-                    LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(vertical = 8.dp)) {
-                        item {
-                            Text("PERSONAS", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
-                        }
-                        items(state.personas, key = { it.id }) { persona ->
-                            NavigationDrawerItem(
-                                selected = state.activePersona?.id == persona.id,
-                                onClick = { scope.launch { drawerState.close() }; vm.openPersona(persona.id) },
-                                icon = { PersonaAvatar(persona, 30) },
-                                label = {
-                                    Column {
-                                        Text(persona.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
-                                        if (persona.title.isNotBlank()) {
-                                            Text(persona.title, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                        }
-                                    }
-                                },
-                                badge = if (persona.unread > 0) { { Badge { Text("${persona.unread}") } } } else null,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp),
-                            )
-                        }
-
-                        item {
-                            Spacer(Modifier.height(8.dp))
-                            Text("RECENT CHATS", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
-                        }
-                        val filteredSessions = state.sessions.filter {
-                            searchQuery.isBlank() || it.title.contains(searchQuery, ignoreCase = true)
-                        }
-                        items(filteredSessions, key = { it.id }) { session ->
-                            NavigationDrawerItem(
-                                selected = state.currentSession?.id == session.id,
-                                onClick = { scope.launch { drawerState.close() }; vm.openSession(session.id) },
-                                icon = { Icon(Icons.Default.ChatBubbleOutline, null, Modifier.size(18.dp)) },
-                                label = { Text(session.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                                badge = {
-                                    IconButton(onClick = { vm.deleteChat(session.id) }, modifier = Modifier.size(28.dp)) {
-                                        Icon(Icons.Default.DeleteOutline, contentDescription = "Delete chat", modifier = Modifier.size(16.dp))
-                                    }
-                                },
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 1.dp),
-                            )
-                        }
-                    }
-
-                    HorizontalDivider()
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.AccountCircle, null, tint = MaterialTheme.colorScheme.primary)
-                        Spacer(Modifier.width(8.dp))
-                        Text(state.username.ifBlank { "Owner" }, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        TextButton(onClick = { scope.launch { drawerState.close() }; onOpenSettings() }) { Text("System") }
-                    }
-                }
+                BottomTabs(state = state, onSelect = vm::selectTab)
             }
         },
-    ) {
-        Scaffold(
-            snackbarHost = { SnackbarHost(snackbarHostState) },
-            containerColor = MaterialTheme.colorScheme.background,
-            topBar = {
-                TopAppBar(
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
-                    navigationIcon = {
-                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                            Icon(Icons.Default.Menu, contentDescription = "Open menu")
-                        }
-                    },
-                    title = {
-                        val persona = state.activePersona
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            if (persona != null) PersonaAvatar(persona, 30)
-                            Column {
-                                Text(persona?.name ?: "Chat", style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                val pinnedName = state.currentSession?.modelPin?.let { pin -> state.models.firstOrNull { it.id == pin }?.name } ?: "Auto"
-                                Text(pinnedName, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
-                            }
-                        }
-                    },
-                    actions = {
-                        ModeTogglePill(coderMode = state.coderMode, onToggle = vm::setCoderMode)
-                        Spacer(Modifier.width(4.dp))
-                        state.breakdown?.let { bd ->
-                            ContextRingChip(breakdown = bd, onClick = { showContextSheet = true })
-                        }
-                        IconButton(onClick = {
-                            val on = vm.toggleVoiceMode()
-                            if (on && !state.isStreaming) onVoiceDictation()
-                        }) {
-                            Icon(
-                                Icons.Default.Headphones,
-                                contentDescription = if (state.voiceMode) "Voice mode ON" else "Voice mode",
-                                tint = if (state.voiceMode) AccentGold else MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        IconButton(onClick = { showModelSheet = true }) {
-                            Icon(Icons.Default.Tune, contentDescription = "Models")
-                        }
-                    },
+    ) { padding ->
+        AnimatedContent(
+            targetState = state.tab,
+            transitionSpec = { fadeIn() togetherWith fadeOut() },
+            label = "tab",
+        ) { tab ->
+            when (tab) {
+                AppTab.Chat -> ChatScreen(state, vm, onVoiceDictation, Modifier.padding(bottom = padding.calculateBottomPadding()).consumeWindowInsets(PaddingValues(bottom = padding.calculateBottomPadding())))
+                AppTab.Chats -> ChatsScreen(
+                    state = state,
+                    contentPadding = padding,
+                    onOpenSession = { vm.openSession(it); vm.selectTab(AppTab.Chat) },
+                    onOpenPersona = { vm.openPersona(it); vm.selectTab(AppTab.Chat) },
+                    onNewChat = { vm.startNewChat(); vm.selectTab(AppTab.Chat) },
+                    onDelete = vm::deleteChat,
                 )
-            },
-        ) { padding ->
-            Column(Modifier.fillMaxSize().padding(padding).imePadding()) {
-                val listState = rememberLazyListState()
-                val visibleMessages = remember(state.messages) {
-                    state.messages.filter { it.role == "user" || it.role == "assistant" || it.role == "tool" }
-                }
-
-                LaunchedEffect(visibleMessages.size, state.streamingText.length) {
-                    if (visibleMessages.isNotEmpty() || state.streamingText.isNotBlank()) {
-                        val last = (visibleMessages.size + (if (state.streamingText.isNotBlank() || state.streamingThinking.isNotBlank()) 1 else 0) - 1).coerceAtLeast(0)
-                        listState.animateScrollToItem(last)
-                    }
-                }
-
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    if (visibleMessages.isEmpty() && !state.isStreaming) {
-                        item { EmptyWelcomeCard(persona = state.activePersona, onPickPrompt = { vm.setDraft(it) }) }
-                    }
-
-                    items(visibleMessages, key = { it.id }) { msg ->
-                        MessageBubble(
-                            msg = msg,
-                            persona = msg.agentId?.let { id -> state.personas.firstOrNull { it.id == id } },
-                            isSpeaking = state.speakingId == msg.id,
-                            onSpeak = { vm.speakMessage(msg.id, msg.content, msg.agentId) },
-                        )
-                    }
-
-                    if (state.streamingThinking.isNotBlank() || state.streamingText.isNotBlank()) {
-                        item(key = "streaming_live") {
-                            StreamingBubble(persona = state.activePersona, thinking = state.streamingThinking, text = state.streamingText)
-                        }
-                    }
-
-                    if (state.steps.isNotEmpty() && (state.coderMode || state.isStreaming)) {
-                        item(key = "decision_timeline") {
-                            CursorTimelineCard(steps = state.steps, live = state.isStreaming)
-                        }
-                    }
-
-                    if (state.coderMode || state.edits.isNotEmpty()) {
-                        items(state.edits, key = { "edit_${it.id}" }) { edit ->
-                            MobileDiffCard(
-                                edit = edit,
-                                kept = edit.id in state.keptEditIds,
-                                onKeep = { vm.keepEdit(edit.id) },
-                                onRevert = { vm.revertEdit(edit.id) },
-                            )
-                        }
-                    }
-
-                    if (state.runStatus == "waiting") {
-                        item(key = "wait_memory") {
-                            MemoryWaitCard(
-                                detail = state.statusDetail.ifBlank { "Waiting for available RAM (MemAvailable)…" },
-                                onRecheck = vm::recheckMemoryNow,
-                                onForce = { vm.controlRun("force") },
-                                onCancel = { vm.controlRun("stop") },
-                            )
-                        }
-                    }
-
-                    items(state.approvals, key = { it.id }) { approval ->
-                        ApprovalCard(
-                            item = approval,
-                            onApprove = { vm.decideApproval(approval.id, "approve") },
-                            onDeny = { vm.decideApproval(approval.id, "deny") },
-                        )
-                    }
-
-                    if (state.isStreaming && state.runStatus != "waiting" && state.streamingText.isBlank() && state.streamingThinking.isBlank()) {
-                        item(key = "typing") {
-                            Row(Modifier.padding(vertical = 6.dp, horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                                Text(state.statusDetail.ifBlank { "Working…" }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                        }
-                    }
-
-                    if (!state.runError.isNullOrBlank()) {
-                        item(key = "run_error") {
-                            Surface(color = MaterialTheme.colorScheme.error.copy(alpha = 0.14f), shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
-                                Text(state.runError, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(12.dp), style = MaterialTheme.typography.bodySmall)
-                            }
-                        }
-                    }
-                }
-
-                state.breakdown?.let { bd ->
-                    MobileContextNudge(
-                        percent = bd.percent,
-                        onCompact = vm::compactCurrentChat,
-                        onHandoff = vm::handoffCurrentChat,
+                AppTab.Approvals -> ApprovalsScreen(
+                    state = state,
+                    onApprove = { vm.decideApproval(it, "approve") },
+                    onDeny = { vm.decideApproval(it, "deny") },
+                    onOpenChat = vm::openApprovalChat,
+                    onRefresh = vm::refreshPendingApprovals,
+                    contentPadding = padding,
+                )
+                AppTab.System -> Box(Modifier.padding(bottom = padding.calculateBottomPadding()).consumeWindowInsets(PaddingValues(bottom = padding.calculateBottomPadding()))) {
+                    SettingsScreen(
+                        state = state,
+                        onBack = { vm.selectTab(AppTab.Chat) },
+                        onRefreshModels = vm::refreshModels,
+                        onPullModel = vm::pullModel,
+                        onSaveSearx = vm::saveSearxngUrl,
+                        onAutoDetectSearx = vm::autoDetectSearxng,
+                        onToggleVoice = vm::togglePersonaVoice,
+                        onSignOut = { vm.signOut() },
                     )
                 }
-
-                ComposerBar(
-                    draft = state.draft,
-                    isStreaming = state.isStreaming,
-                    onDraftChange = vm::setDraft,
-                    onSend = vm::sendCurrentMessage,
-                    onStop = { vm.controlRun("stop") },
-                    onVoice = onVoiceDictation,
-                )
             }
+        }
+    }
+}
+
+@Composable
+private fun BottomTabs(state: AppUiState, onSelect: (AppTab) -> Unit) {
+    NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 0.dp) {
+        val itemColors = NavigationBarItemDefaults.colors(
+            indicatorColor = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.18f),
+            selectedIconColor = MaterialTheme.colorScheme.onSurface,
+            selectedTextColor = MaterialTheme.colorScheme.onSurface,
+        )
+        NavigationBarItem(
+            selected = state.tab == AppTab.Chat, onClick = { onSelect(AppTab.Chat) }, colors = itemColors,
+            icon = { Icon(if (state.tab == AppTab.Chat) Icons.Filled.ChatBubble else Icons.Outlined.ChatBubbleOutline, null) },
+            label = { Text("Chat") },
+        )
+        NavigationBarItem(
+            selected = state.tab == AppTab.Chats, onClick = { onSelect(AppTab.Chats) }, colors = itemColors,
+            icon = { Icon(if (state.tab == AppTab.Chats) Icons.Filled.Forum else Icons.Outlined.Forum, null) },
+            label = { Text("Chats") },
+        )
+        NavigationBarItem(
+            selected = state.tab == AppTab.Approvals, onClick = { onSelect(AppTab.Approvals) }, colors = itemColors,
+            icon = {
+                BadgedBox(badge = { if (state.pendingApprovals.isNotEmpty()) Badge { Text("${state.pendingApprovals.size}") } }) {
+                    Icon(if (state.tab == AppTab.Approvals) Icons.Filled.VerifiedUser else Icons.Outlined.VerifiedUser, null)
+                }
+            },
+            label = { Text("Approvals") },
+        )
+        NavigationBarItem(
+            selected = state.tab == AppTab.System, onClick = { onSelect(AppTab.System) }, colors = itemColors,
+            icon = { Icon(if (state.tab == AppTab.System) Icons.Filled.Settings else Icons.Outlined.Settings, null) },
+            label = { Text("System") },
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChatScreen(state: AppUiState, vm: ChatViewModel, onVoiceDictation: () -> Unit, modifier: Modifier) {
+    var showModelSheet by remember { mutableStateOf(false) }
+    var showContextSheet by remember { mutableStateOf(false) }
+    var menuOpen by remember { mutableStateOf(false) }
+    val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
+
+    Scaffold(
+        modifier = modifier,
+        containerColor = MaterialTheme.colorScheme.background,
+        topBar = {
+            TopAppBar(
+                scrollBehavior = scrollBehavior,
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.background,
+                    scrolledContainerColor = MaterialTheme.colorScheme.surface,
+                ),
+                title = {
+                    val persona = state.activePersona
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        if (persona != null) PersonaAvatar(persona, 36)
+                        Column(Modifier.clip(RoundedCornerShape(8.dp)).clickable { showModelSheet = true }.padding(horizontal = 2.dp)) {
+                            Text(
+                                state.currentSession?.title?.takeIf { it.isNotBlank() } ?: persona?.name ?: "New chat",
+                                style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            )
+                            val pinnedName = state.currentSession?.modelPin?.let { pin -> state.models.firstOrNull { it.id == pin }?.name } ?: "Auto"
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    listOfNotNull(persona?.name, pinnedName).joinToString(" · "),
+                                    style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                )
+                                Icon(Icons.Default.ExpandMore, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                },
+                actions = {
+                    state.breakdown?.let { bd -> ContextRingChip(breakdown = bd, onClick = { showContextSheet = true }) }
+                    IconButton(onClick = { vm.startNewChat() }) { Icon(Icons.Outlined.AddComment, contentDescription = "New chat") }
+                    Box {
+                        IconButton(onClick = { menuOpen = true }) { Icon(Icons.Default.MoreVert, contentDescription = "More") }
+                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text(if (state.coderMode) "Switch to chat mode" else "Switch to code mode") },
+                                leadingIcon = { Icon(if (state.coderMode) Icons.AutoMirrored.Outlined.Chat else Icons.Outlined.Code, null) },
+                                onClick = { menuOpen = false; vm.setCoderMode(!state.coderMode) },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (state.voiceMode) "Voice mode: on" else "Voice mode: off") },
+                                leadingIcon = { Icon(Icons.Outlined.Headphones, null, tint = if (state.voiceMode) AccentGold else MaterialTheme.colorScheme.onSurfaceVariant) },
+                                onClick = {
+                                    menuOpen = false
+                                    val on = vm.toggleVoiceMode()
+                                    if (on && !state.isStreaming) onVoiceDictation()
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Model…") },
+                                leadingIcon = { Icon(Icons.Outlined.Tune, null) },
+                                onClick = { menuOpen = false; showModelSheet = true },
+                            )
+                        }
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        Column(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding()) {
+            val listState = rememberLazyListState()
+            val visibleMessages = remember(state.messages) {
+                state.messages.filter { it.role == "user" || it.role == "assistant" || it.role == "tool" }
+            }
+            LaunchedEffect(visibleMessages.size, state.streamingText.length, state.approvals.size) {
+                val total = listState.layoutInfo.totalItemsCount
+                if (total > 0) listState.animateScrollToItem(total - 1)
+            }
+
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                if (visibleMessages.isEmpty() && !state.isStreaming) {
+                    item { EmptyWelcomeCard(persona = state.activePersona, onPickPrompt = { vm.setDraft(it) }) }
+                }
+                items(visibleMessages, key = { it.id }) { msg ->
+                    MessageBubble(
+                        msg = msg,
+                        persona = msg.agentId?.let { id -> state.personas.firstOrNull { it.id == id } },
+                        isSpeaking = state.speakingId == msg.id,
+                        onSpeak = { vm.speakMessage(msg.id, msg.content, msg.agentId) },
+                    )
+                }
+                if (state.streamingThinking.isNotBlank() || state.streamingText.isNotBlank()) {
+                    item(key = "streaming_live") {
+                        StreamingBubble(persona = state.activePersona, thinking = state.streamingThinking, text = state.streamingText)
+                    }
+                }
+                if (state.steps.isNotEmpty() && (state.coderMode || state.isStreaming)) {
+                    item(key = "decision_timeline") { CursorTimelineCard(steps = state.steps, live = state.isStreaming) }
+                }
+                if (state.coderMode || state.edits.isNotEmpty()) {
+                    items(state.edits, key = { "edit_${it.id}" }) { edit ->
+                        MobileDiffCard(edit = edit, kept = edit.id in state.keptEditIds, onKeep = { vm.keepEdit(edit.id) }, onRevert = { vm.revertEdit(edit.id) })
+                    }
+                }
+                if (state.runStatus == "waiting") {
+                    item(key = "wait_memory") {
+                        MemoryWaitCard(
+                            wait = state.wait ?: com.localagent.app.model.WaitState.of(state.statusDetail, null),
+                            onRecheck = vm::recheckMemoryNow,
+                            onForce = { vm.controlRun("force") },
+                            onCancel = { vm.controlRun("stop") },
+                        )
+                    }
+                }
+                items(state.approvals, key = { "approval_${it.id}" }) { approval ->
+                    ApprovalCard(
+                        item = approval,
+                        highlighted = approval.id == state.focusApprovalId,
+                        onApprove = { vm.decideApproval(approval.id, "approve") },
+                        onDeny = { vm.decideApproval(approval.id, "deny") },
+                    )
+                }
+                if (state.isStreaming && state.runStatus != "waiting" && state.approvals.isEmpty() && state.streamingText.isBlank() && state.streamingThinking.isBlank()) {
+                    item(key = "typing") {
+                        Row(Modifier.padding(vertical = 6.dp, horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.tertiary)
+                            Text(state.statusDetail.ifBlank { "Working…" }, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+                if (!state.runError.isNullOrBlank()) {
+                    item(key = "run_error") {
+                        Surface(color = MaterialTheme.colorScheme.error.copy(alpha = 0.12f), shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
+                            Text(state.runError, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(14.dp), style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+                }
+            }
+
+            state.breakdown?.let { bd -> MobileContextNudge(percent = bd.percent, onCompact = vm::compactCurrentChat, onHandoff = vm::handoffCurrentChat) }
+
+            ComposerBar(
+                draft = state.draft,
+                isStreaming = state.isStreaming,
+                onDraftChange = vm::setDraft,
+                onSend = vm::sendCurrentMessage,
+                onStop = { vm.controlRun("stop") },
+                onVoice = onVoiceDictation,
+            )
         }
     }
 
@@ -331,9 +321,110 @@ private fun MainChatShell(
             onPull = vm::pullModel,
         )
     }
-
     if (showContextSheet && state.breakdown != null) {
-        ContextBreakdownSheet(breakdown = state.breakdown!!, onDismiss = { showContextSheet = false })
+        ContextBreakdownSheet(breakdown = state.breakdown, onDismiss = { showContextSheet = false })
+    }
+}
+
+/** Full-screen chat list: personas on top, then chats with search. Replaces the desktop-style side drawer. */
+@Composable
+fun ChatsScreen(
+    state: AppUiState,
+    contentPadding: PaddingValues,
+    onOpenSession: (String) -> Unit,
+    onOpenPersona: (String) -> Unit,
+    onNewChat: () -> Unit,
+    onDelete: (String) -> Unit,
+) {
+    var query by remember { mutableStateOf("") }
+    val filtered = state.sessions.filter { query.isBlank() || it.title.contains(query, ignoreCase = true) }
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(top = contentPadding.calculateTopPadding() + 8.dp, bottom = contentPadding.calculateBottomPadding() + 88.dp),
+    ) {
+        item(key = "head") {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Chats", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                FilledTonalButton(onClick = onNewChat, modifier = Modifier.heightIn(min = 44.dp), shape = RoundedCornerShape(14.dp)) {
+                    Icon(Icons.Outlined.AddComment, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("New chat")
+                }
+            }
+        }
+        item(key = "search") {
+            OutlinedTextField(
+                value = query, onValueChange = { query = it },
+                placeholder = { Text("Search chats") }, singleLine = true,
+                leadingIcon = { Icon(Icons.Default.Search, null) },
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+            )
+        }
+        if (state.personas.isNotEmpty()) {
+            item(key = "personas") {
+                LazyRow(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    items(state.personas, key = { it.id }) { p -> PersonaTile(p, selected = state.activePersona?.id == p.id) { onOpenPersona(p.id) } }
+                }
+            }
+        }
+        item(key = "recent") {
+            Text("Recent", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp))
+        }
+        items(filtered, key = { it.id }) { session ->
+            val persona = state.personas.firstOrNull { it.id == session.agentId }
+            val waiting = state.pendingApprovals.count { it.sessionId == session.id }
+            ListItem(
+                modifier = Modifier.clickable { onOpenSession(session.id) }.padding(horizontal = 4.dp),
+                colors = ListItemDefaults.colors(
+                    containerColor = if (state.currentSession?.id == session.id) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.background,
+                ),
+                leadingContent = { if (persona != null) PersonaAvatar(persona, 40) else Icon(Icons.Outlined.ChatBubbleOutline, null) },
+                headlineContent = { Text(session.title.ifBlank { "Untitled chat" }, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium) },
+                supportingContent = {
+                    Text(
+                        if (waiting > 0) "Waiting for your approval" else persona?.name ?: "",
+                        maxLines = 1, color = if (waiting > 0) AccentAmber else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                },
+                trailingContent = {
+                    var confirm by remember { mutableStateOf(false) }
+                    IconButton(onClick = { confirm = true }) { Icon(Icons.Outlined.DeleteOutline, contentDescription = "Delete chat", tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    if (confirm) {
+                        AlertDialog(
+                            onDismissRequest = { confirm = false },
+                            title = { Text("Delete this chat?") },
+                            text = { Text(session.title) },
+                            confirmButton = { TextButton(onClick = { confirm = false; onDelete(session.id) }) { Text("Delete", color = MaterialTheme.colorScheme.error) } },
+                            dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } },
+                        )
+                    }
+                },
+            )
+        }
+        if (filtered.isEmpty()) {
+            item(key = "none") {
+                Text(
+                    if (state.sessions.isEmpty()) "No chats yet. Tap New chat to start one." else "No chat titles match “$query”.",
+                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(20.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PersonaTile(persona: Persona, selected: Boolean, onClick: () -> Unit) {
+    Column(
+        Modifier.width(72.dp).clip(RoundedCornerShape(16.dp)).clickable(onClick = onClick).padding(vertical = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        BadgedBox(badge = { if (persona.unread > 0) Badge { Text("${persona.unread}") } }) { PersonaAvatar(persona, 52) }
+        Text(
+            persona.name, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            color = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -345,19 +436,19 @@ private fun EmptyWelcomeCard(persona: Persona?, onPickPrompt: (String) -> Unit) 
         "Help me plan my week step by step",
     )
     Column(
-        Modifier.fillMaxWidth().padding(vertical = 32.dp, horizontal = 8.dp),
+        Modifier.fillMaxWidth().padding(vertical = 40.dp, horizontal = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        if (persona != null) PersonaAvatar(persona, 60)
-        Text(persona?.let { "Chat with ${it.name}" } ?: "Start a conversation", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+        if (persona != null) PersonaAvatar(persona, 72)
+        Text(persona?.let { "Chat with ${it.name}" } ?: "Start a conversation", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
         if (!persona?.description.isNullOrBlank()) {
-            Text(persona!!.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(persona!!.description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Spacer(Modifier.height(6.dp))
+        Spacer(Modifier.height(8.dp))
         starters.forEach { prompt ->
-            OutlinedCard(onClick = { onPickPrompt(prompt) }, shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
-                Text(prompt, modifier = Modifier.padding(12.dp), style = MaterialTheme.typography.bodyMedium)
+            OutlinedCard(onClick = { onPickPrompt(prompt) }, shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)) {
+                Text(prompt, modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp), style = MaterialTheme.typography.bodyLarge)
             }
         }
     }

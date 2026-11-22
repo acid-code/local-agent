@@ -148,6 +148,10 @@ class LocalAgentClient(context: Context) {
         }.getOrDefault(false)
     }
 
+    suspend fun serverVersion(): String? = withContext(Dispatchers.IO) {
+        runCatching { requestJson("GET", "/api/health").optString("version").ifBlank { null } }.getOrNull()
+    }
+
     suspend fun me(): AuthMe {
         val json = requestJson("GET", "/api/auth/me")
         return AuthMe(
@@ -301,15 +305,8 @@ class LocalAgentClient(context: Context) {
     suspend fun listApprovals(runId: String? = null): List<ApprovalItem> {
         val json = requestJson("GET", "/api/approvals")
         val arr = json.optJSONArray("approvals") ?: JSONArray()
-        return List(arr.length()) { i ->
-            val a = arr.getJSONObject(i)
-            ApprovalItem(
-                id = a.getString("id"),
-                runId = a.getString("runId"),
-                toolName = a.optString("toolName", "tool"),
-                reason = a.optString("reason", ""),
-            )
-        }.filter { runId == null || it.runId == runId }
+        return List(arr.length()) { i -> com.localagent.app.approvals.ApprovalPolicy.parse(arr.getJSONObject(i)) }
+            .filter { runId == null || it.runId == runId }
     }
 
     suspend fun decideApproval(id: String, decision: String) {
@@ -350,6 +347,22 @@ class LocalAgentClient(context: Context) {
                 if (resp.isSuccessful) resp.body?.bytes() else null
             }
         }.getOrNull()
+    }
+
+    /** The open chat's live feed: a snapshot on every connect, then events of any run in that chat. */
+    fun streamSession(sessionId: String, onEvent: (JSONObject) -> Unit, onClosed: () -> Unit): EventSource {
+        val req = Request.Builder()
+            .url(url("/api/sessions/$sessionId/events"))
+            .header("Accept", "text/event-stream")
+            .build()
+        return EventSources.createFactory(sseHttp).newEventSource(req, object : EventSourceListener() {
+            override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
+                runCatching { JSONObject(data) }.onSuccess(onEvent)
+            }
+
+            override fun onClosed(eventSource: EventSource) = onClosed()
+            override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) = onClosed()
+        })
     }
 
     fun streamRun(runId: String, onEvent: (JSONObject) -> Unit, onClosed: () -> Unit): EventSource {
@@ -469,6 +482,7 @@ class LocalAgentClient(context: Context) {
                 thinking = it.optString("thinking", ""),
                 status = it.optString("status", ""),
                 detail = it.optString("detail", ""),
+                waitInfo = it.optJSONObject("waitInfo"),
             )
         }
         return SessionDetail(

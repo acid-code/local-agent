@@ -1,0 +1,12 @@
+[Unit]
+Description=local-agent llama fallback switch control
+After=network.target llama-server.service llama-uncensored.service
+
+[Service]
+Type=simple
+ExecStart=/opt/llama-server/fallback-control.py
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

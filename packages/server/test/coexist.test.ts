@@ -4,13 +4,13 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { Store } from '../src/db.js';
 import type { ModelRow } from '../src/db.js';
-import { Engine } from '../src/engine.js';
+import { Engine, isRefusalText } from '../src/engine.js';
 import { Bus } from '../src/bus.js';
 import { DockerCtl } from '../src/docker.js';
 import { VectorIndex } from '../src/embeddings.js';
 import { Vault } from '../src/vault.js';
 import { ScriptedProvider, providerFor, LLAMA_TIMEOUT_MS } from '../src/providers.js';
-import { LlamaWatch, isLlamaServerProvider, isOllamaProvider, modelGiB } from '../src/coexist.js';
+import { LlamaWatch, isLlamaServerProvider, isOllamaProvider, isUncensoredProvider, modelGiB } from '../src/coexist.js';
 import { isContextOverflowError } from '@local-agent/shared';
 import { clipToolOutput, toHostBindPath } from '../src/tools.js';
 import { checkFinalReply, falseInability } from '../src/recovery.js';
@@ -30,6 +30,7 @@ function setup(healthOk: boolean) {
   store.upsertProvider({ id: 'prov_llama', kind: 'openai_compat', name: 'llama-server', baseUrl: 'http://127.0.0.1:8080/v1', enabled: true });
   store.upsertModel(model('ollama_gpt_oss_20b', 'prov_ollama', 'gpt-oss:20b', 13.8, 'large') as never);
   store.upsertModel(model('ollama_qwen3_1_7b', 'prov_ollama', 'qwen3:1.7b', 1.4, 'small') as never);
+  store.upsertModel({ ...model('ollama_nomic_embed', 'prov_ollama', 'nomic-embed-text', 0.3, 'small'), embedding: true } as never);
   store.upsertModel(model('llama_qwen3_6', 'prov_llama', 'qwen3.6-35b-a3b', 23, 'large') as never);
   const health: typeof fetch = async () => new Response('{}', { status: healthOk ? 200 : 503 });
   return { dir, store, health };
@@ -41,8 +42,11 @@ describe('llama-server and Ollama coexistence', () => {
     expect(isOllamaProvider({ id: 'x', name: 'x', kind: 'openai_compat', baseUrl: 'http://host.docker.internal:11434/v1' })).toBe(true);
     expect(isOllamaProvider({ id: 'prov_llama', name: 'llama-server', kind: 'openai_compat', baseUrl: 'http://host.docker.internal:8080/v1' })).toBe(false);
     expect(isLlamaServerProvider({ id: 'prov_llama', name: 'llama-server', kind: 'openai_compat' })).toBe(true);
+    expect(isUncensoredProvider({ id: 'prov_uncensored', name: 'llama-server (uncensored)', kind: 'openai_compat', baseUrl: 'http://127.0.0.1:8081/v1' })).toBe(true);
     expect(modelGiB({ apiName: 'gpt-oss:20b', typicalQ4GiB: null })).toBeGreaterThan(4);
     expect(modelGiB({ apiName: 'nomic-embed-text', typicalQ4GiB: 0.3 })).toBeLessThan(4);
+    expect(isRefusalText("I'm sorry, I can't assist with searching Facebook Marketplace because it violates the terms of service.")).toBe(true);
+    expect(isRefusalText('I can search the public page, but I need the exact location first.')).toBe(false);
   });
 
   it('blocks big Ollama models only while llama-server answers', async () => {

@@ -20,22 +20,7 @@ fi
 STAMP="$(date -u +%Y-%m-%dT%H-%M-%SZ)"
 BACKUP="$INSTALL_ROOT/data/backups/pre-update-${STAMP}.tar"
 mkdir -p "$INSTALL_ROOT/data/backups"
-ITEMS=()
-for f in local-agent.db local-agent.db-wal local-agent.db-shm master.key cookie.secret secrets.env workspaces; do
-  [[ -e "$INSTALL_ROOT/data/$f" ]] && ITEMS+=("$f")
-done
-if [[ "$(id -u)" -eq 0 ]]; then
-  tar -C "$INSTALL_ROOT/data" -cf "$BACKUP" "${ITEMS[@]}"
-else
-  # Container-created files like master.key may be owned by root:root (0600); archive via Docker if available.
-  if tar -C "$INSTALL_ROOT/data" -cf "$BACKUP" "${ITEMS[@]}" 2>/dev/null; then
-    :
-  else
-    rm -f "$BACKUP"
-    docker run --rm -v "$INSTALL_ROOT/data:/data" debian:bookworm-slim \
-      tar -C /data -cf "/data/backups/pre-update-${STAMP}.tar" "${ITEMS[@]}"
-  fi
-fi
+node "$SRC/scripts/backup-data.mjs" "$INSTALL_ROOT/data" "$BACKUP"
 echo "Backed up $INSTALL_ROOT/data -> $BACKUP"
 
 if [[ "$SRC" != "$INSTALL_ROOT" ]]; then

@@ -1,3 +1,4 @@
+import { ensurePinned } from './pinned.js';
 import { isDiskFullError } from './resources.js';
 import { MemoryBudget, budgetConfig, systemProbe, type MemoryProbe } from './memory.js';
 import path from 'node:path';
@@ -162,7 +163,16 @@ export async function buildApp(options: {
     });
   }
 
+  const pinFetch = options.fetchImpl ?? fetch;
+  const pinOnce = async () => {
+    for (const result of await ensurePinned(pinFetch).catch(() => [])) {
+      if (result.action === 'pinned' || result.action === 'repinned') store.addLog('info', `Pinned ${result.model} in memory (keep_alive forever).`, undefined, 'pinned');
+      else if (result.action === 'error') store.addLog('warn', `Could not pin ${result.model}: ${result.detail}`, undefined, 'pinned');
+    }
+  };
+  if (options.startScheduler !== false) setTimeout(() => { void pinOnce(); }, 20_000).unref?.();
   const background = options.startScheduler === false ? [] : [
+    setInterval(() => { void pinOnce(); }, 120_000),
     setInterval(() => {
       void watchOnce(docker, options.fetchImpl ?? fetch).then((report) => {
         for (const note of [...report.notes, ...report.restarted.map((name) => `Restarted ${name}`)]) {

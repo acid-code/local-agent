@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { Bus } from './bus.js';
 import type { Engine } from './engine.js';
 import type { Store } from './db.js';
+import { riskFromReason } from './approval-view.js';
 
 interface PushSub { endpoint: string; keys: { p256dh: string; auth: string } }
 interface QueuedNote { text: string; keyboard?: { text: string; callback_data: string }[][] }
@@ -42,6 +43,16 @@ async function flushTelegram(dataDir: string, fetchImpl: typeof fetch, token: st
   fs.writeFileSync(path.join(dataDir, 'telegram-queue.json'), JSON.stringify(left), { mode: 0o600 });
 }
 
+/** Notify about an approval only while it is pending, and only the first time its id is seen. */
+export function shouldNotifyApproval(approval: { id: string; status?: string }, seen: Map<string, number>): boolean {
+  if (approval.status && approval.status !== 'pending') return false;
+  const key = `approval:${approval.id}`;
+  if (seen.has(key)) return false;
+  seen.set(key, Date.now());
+  if (seen.size > 2000) for (const old of [...seen.keys()].slice(0, 500)) seen.delete(old);
+  return true;
+}
+
 export class Notifier {
   private offset = 0;
   private timer: NodeJS.Timeout | null = null;
@@ -62,11 +73,14 @@ export class Notifier {
   private token() { return process.env.TELEGRAM_BOT_TOKEN || ''; }
   private chat() { return process.env.TELEGRAM_CHAT_ID || ''; }
 
-  private async onEvent(event: { type: string; runId?: string; approval?: { id: string; toolName?: string; reason?: string }; message?: string; exhausted?: boolean }) {
+  private async onEvent(event: { type: string; runId?: string; approval?: { id: string; toolName?: string; reason?: string; status?: string }; message?: string; exhausted?: boolean }) {
     if (event.type === 'approval' && event.approval) {
-      await this.push(`Approval needed: ${event.approval.toolName || 'action'}\n${event.approval.reason || ''}`, [
-        [{ text: 'Approve', callback_data: `ok:${event.approval.id}` }, { text: 'Deny', callback_data: `no:${event.approval.id}` }],
-      ]);
+      // The bus also announces approvals when they are decided, and again when a run resumes; notify once, and only while it waits.
+      if (!shouldNotifyApproval(event.approval, this.seen)) return;
+      const approval = event.approval;
+      await this.push(`Approval needed: ${approval.toolName || 'action'}\n${approval.reason || ''}`, [
+        [{ text: 'Approve', callback_data: `ok:${approval.id}` }, { text: 'Deny', callback_data: `no:${approval.id}` }],
+      ], { kind: 'approval', approvalId: approval.id, risk: riskFromReason(approval.reason || '') });
     } else if (event.type === 'error' && event.message) {
       await this.pushOnce(`fail:${event.runId}`, `Run failed: ${event.message}`);
     } else if (event.type === 'quota' && event.exhausted) {
@@ -76,9 +90,9 @@ export class Notifier {
     }
   }
 
-  async push(text: string, keyboard?: { text: string; callback_data: string }[][]) {
+  async push(text: string, keyboard?: { text: string; callback_data: string }[][], extra?: Record<string, unknown>) {
     await this.telegram(text, keyboard);
-    await this.webPush(text);
+    await this.webPush(text, extra);
     this.store.addLog('info', `Notice: ${text.slice(0, 180)}`);
   }
 
@@ -131,7 +145,7 @@ export class Notifier {
     } catch { /* telegram is optional */ }
   }
 
-  private async webPush(text: string) {
+  private async webPush(text: string, extra?: Record<string, unknown>) {
     const subs = this.subscriptions();
     if (!subs.length) return;
     let webpush: { setVapidDetails: (subject: string, pub: string, priv: string) => void; sendNotification: (sub: PushSub, payload: string) => Promise<unknown> };
@@ -143,7 +157,7 @@ export class Notifier {
     const vapid = this.vapid(webpush as unknown as { generateVAPIDKeys?: () => { publicKey: string; privateKey: string } });
     if (!vapid) return;
     webpush.setVapidDetails('mailto:owner@local-agent.local', vapid.publicKey, vapid.privateKey);
-    await Promise.all(subs.map((sub) => webpush.sendNotification(sub, JSON.stringify({ title: 'local-agent', body: text.slice(0, 180) })).catch(() => undefined)));
+    await Promise.all(subs.map((sub) => webpush.sendNotification(sub, JSON.stringify({ title: 'local-agent', body: text.slice(0, 180), ...extra })).catch(() => undefined)));
   }
 
   publicKey(): string | null {

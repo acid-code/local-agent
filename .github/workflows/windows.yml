@@ -1,10 +1,19 @@
 name: windows
+# Every push and PR builds the installer (NSIS setup.exe), its blockmap, latest.yml (electron-updater's feed file)
+# and the portable exe, and uploads them as a workflow artifact. Only pushes to main publish them to a GitHub
+# release and mark it Latest, which is what installed apps update from:
+#   https://github.com/acid-code/local-agent/releases/latest/download/latest.yml
+# Not code-signed: there is no Windows signing certificate in the repo secrets. SmartScreen warns on first run.
 on:
   push:
-    branches: [main]
+    branches: ['**']
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: write
+concurrency:
+  group: windows-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
 jobs:
   exe:
     runs-on: windows-latest
@@ -15,17 +24,49 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
-      - name: Build the portable exe and the installer
+      - name: Install and test the desktop app
+        working-directory: apps/desktop
+        run: |
+          npm ci
+          npm test
+      - name: Build the installer and the portable exe
         working-directory: apps/desktop
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
+        # --publish never: build latest.yml and the blockmap, but let the release step below upload them.
+        run: npx electron-builder --win portable nsis --publish never
+      - name: Check the update files
+        shell: bash
         run: |
-          npm ci
-          npx electron-builder --win portable nsis
+          set -euo pipefail
+          cd apps/desktop/release
+          ls -la
+          version="$(sed -n 's/^version: //p' latest.yml | tr -d "'\r")"
+          setup="local-agent-${version}-setup.exe"
+          portable="local-agent-${version}-portable.exe"
+          test -f "$setup" || { echo "::error::missing $setup"; exit 1; }
+          test -f "$setup.blockmap" || { echo "::error::missing $setup.blockmap"; exit 1; }
+          test -f "$portable" || { echo "::error::missing $portable"; exit 1; }
+          grep -q "path: $setup" latest.yml || { echo "::error::latest.yml does not point at $setup"; cat latest.yml; exit 1; }
+          # latest.yml's sha512 must match the installer, or electron-updater rejects the download.
+          want="$(sed -n 's/^sha512: //p' latest.yml)"
+          have="$(node -e "process.stdout.write(require('crypto').createHash('sha512').update(require('fs').readFileSync(process.argv[1])).digest('base64'))" "$setup")"
+          [ "$want" = "$have" ] || { echo "::error::latest.yml sha512 does not match $setup"; exit 1; }
+          cat latest.yml
+          echo "DESKTOP_VERSION=$version" >> "$GITHUB_ENV"
+          {
+            echo "### Windows"
+            echo "- Version: $version"
+            echo "- Files: \`$setup\`, \`$setup.blockmap\`, \`latest.yml\`, \`$portable\`"
+            echo "- Not code-signed (no certificate secret)."
+          } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: local-agent-windows
-          path: apps/desktop/release/*.exe
+          path: |
+            apps/desktop/release/*.exe
+            apps/desktop/release/*.blockmap
+            apps/desktop/release/latest.yml
           if-no-files-found: error
       - name: Publish the GitHub release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -36,27 +77,22 @@ jobs:
           set -euo pipefail
           short="${GITHUB_SHA::7}"
           tag="main-${short}"
-          portable="$(find apps/desktop/release -name 'local-agent-portable.exe' -print -quit)"
-          setup="$(find apps/desktop/release -name 'local-agent-setup.exe' -print -quit)"
-          test -n "$portable"
-          test -n "$setup"
-          cp "$portable" "local-agent-${short}-portable.exe"
-          cp "$setup" "local-agent-${short}-setup.exe"
-          note="Windows shell for the web console. Unsigned. SmartScreen: More info, then Run anyway."
+          cd apps/desktop/release
+          files=("local-agent-${DESKTOP_VERSION}-setup.exe" "local-agent-${DESKTOP_VERSION}-setup.exe.blockmap" "latest.yml" "local-agent-${DESKTOP_VERSION}-portable.exe")
+          note="Windows ${DESKTOP_VERSION}: installer (updates an existing install in place) and portable exe. Unsigned. SmartScreen: More info, then Run anyway."
           for attempt in 1 2 3 4 5 6; do
             if gh release view "$tag" >/dev/null 2>&1; then
-              gh release upload "$tag" "local-agent-${short}-portable.exe" "local-agent-${short}-setup.exe" --clobber
+              gh release upload "$tag" "${files[@]}" --clobber
               body="$(gh release view "$tag" --json body --jq .body)"
               case "$body" in
                 *"$note"*) ;;
                 *) gh release edit "$tag" --notes "${body}"$'\n\n'"${note}" ;;
               esac
+              # Mark Latest only now that latest.yml and the installer are attached.
+              gh release edit "$tag" --latest
               exit 0
             fi
-            if gh release create "$tag" "local-agent-${short}-portable.exe" "local-agent-${short}-setup.exe" \
-              --title "local-agent ${short}" \
-              --latest \
-              --notes "$note"; then
+            if gh release create "$tag" "${files[@]}" --title "local-agent ${short}" --latest --notes "$note"; then
               exit 0
             fi
             sleep 10

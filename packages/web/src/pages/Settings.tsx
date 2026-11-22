@@ -13,6 +13,7 @@ import { Activity, Archive, Bot, Bug, Check, Cpu, FolderGit2, Globe, KeyRound, P
 import { useWorkspaces } from '../components/PersonaPanel';
 import { Face, type FaceAgent } from '../components/Face';
 import { t as tr } from '../i18n';
+import { UpdatesBlock } from '../components/Updates';
 
 interface Secret { id: string; name: string; handle: string; scope: string; revokedAt: string | null }
 interface Audit { id: number; action: string; actor: string; createdAt: string }
@@ -20,16 +21,27 @@ interface SecretRequest { id: string; name: string; reason: string; status: stri
 interface SettingsShape { codeApproval: string; geminiTier: string; sandbox: string; autoResume: boolean; approvalForDestructive: boolean; approvalMode?: string; readOnly?: boolean; dailyTokenLimit?: number | null; killSwitch?: boolean; searxngUrl?: string }
 interface ProviderItem { id: string; kind: string; name: string; baseUrl: string | null; enabled: boolean }
 interface ModelItem { id: string; name: string; apiName: string; local: boolean; enabled: boolean; providerId: string; parameterSize?: string | null; practicalBudget?: number }
+interface AutoRoleRow { role: string; wanted: string; modelName?: string; providerName?: string; fallback: boolean; available: boolean; note: string }
+interface AutoRoles { ok: boolean; detail: string; roles: AutoRoleRow[] }
+function autoRoleLabel(role: string) {
+  if (role === 'fast') return tr('Fast');
+  if (role === 'main') return tr('Main');
+  if (role === 'coder') return tr('Coder');
+  if (role === 'thinking') return tr('Thinking');
+  if (role === 'cloud') return tr('Cloud');
+  return role;
+}
 
 interface Def { id: string; label: string; icon: LucideIcon; blurb: string; words: string; owner?: boolean; group: 'General' | 'Admin' }
 /** One page, in this order. Old deep links (#models, #setup, #vault, #policy, #backups…) land on the matching section. */
 const SECTIONS: Def[] = [
   { id: 'appearance', group: 'General', label: tr('Appearance'), icon: Palette, blurb: tr('Theme, font, bubbles and wallpaper for your account.'), words: 'theme dark light font wallpaper color bubbles density accent' },
   { id: 'language', group: 'General', label: tr('Language'), icon: Languages, blurb: tr('Interface language and Hebrew polishing.'), words: 'language hebrew עברית english rtl locale translate' },
-  { id: 'system', group: 'General', label: tr('System'), icon: Cpu, blurb: tr('Models, Ollama pulls, llama-server, SearXNG web search, and image generation.'), words: 'system models ollama llama-server pull refresh searxng search url gemini image limits quota tier setup' },
+  { id: 'system', group: 'General', label: tr('System'), icon: Cpu, blurb: tr('Models, Ollama pulls, llama-server, SearXNG web search, and image generation.'), words: 'system models ollama llama-server pull refresh searxng search url gemini image limits quota tier setup auto roles fast coder main' },
   { id: 'personas', group: 'General', label: tr('Personas'), icon: Bot, blurb: tr('Who you talk to. Edit one from the chat with its name.'), words: 'personas agents prompt instructions tools skills face voice' },
   { id: 'workspaces', group: 'General', label: tr('Workspaces'), icon: FolderGit2, blurb: tr('Folders and repos chats can attach.'), words: 'workspaces folders repos git clone sets' },
   { id: 'data', group: 'General', label: tr('Data'), icon: Archive, blurb: tr('Your account, backups and exports.'), words: 'backups snapshot restore export password account diagnostics' },
+  { id: 'updates', group: 'General', label: tr('About & updates'), icon: RefreshCw, blurb: tr('App and server versions. Check for a new Windows app.'), words: 'about version update updates upgrade check download release installer apk windows desktop' },
   { id: 'people', group: 'Admin', owner: true, label: tr('People'), icon: Users, blurb: tr('Member accounts and what they may use.'), words: 'members accounts users invite quota' },
   { id: 'health', group: 'Admin', owner: true, label: tr('Health'), icon: Activity, blurb: tr('Ollama, Docker, SearXNG, RAM budget and the rest.'), words: 'ollama docker searxng ram memory status doctor' },
   { id: 'policy', group: 'Admin', owner: true, label: tr('Safety & limits'), icon: ShieldCheck, blurb: tr('Approvals, read-only mode, the kill switch and token caps.'), words: 'approvals read-only kill switch tokens caps limits safety emergency gemini tier' },
@@ -38,7 +50,7 @@ const SECTIONS: Def[] = [
   { id: 'debug', group: 'Admin', owner: true, label: tr('Debug'), icon: Bug, blurb: tr('Logs, run inspector and diagnostics. Nothing leaves this machine.'), words: 'logs inspector replay tool test diagnostics' },
   { id: 'remote', group: 'Admin', owner: true, label: tr('Remote access'), icon: Globe, blurb: tr('Reach this box from your phone or laptop.'), words: 'tailscale phone lan network access cloudflare' },
 ];
-const ALIASES: Record<string, string> = { backups: 'data', account: 'data', models: 'system', setup: 'system', quota: 'system', images: 'system', searxng: 'system' };
+const ALIASES: Record<string, string> = { about: 'updates', version: 'updates', backups: 'data', account: 'data', models: 'system', setup: 'system', quota: 'system', images: 'system', searxng: 'system' };
 
 /** Autosave feedback: a "Saved" tick in the header for a moment after any change lands. */
 function useSavedTick() {
@@ -174,6 +186,7 @@ function SystemBlock({ owner, settings, patchSettings }: { owner: boolean; setti
   const usable = useUsableModels();
   const [providers, setProviders] = useState<ProviderItem[]>([]);
   const [allModels, setAllModels] = useState<ModelItem[]>([]);
+  const [autoRoles, setAutoRoles] = useState<AutoRoles | null>(null);
   const [resident, setResident] = useState<string[]>([]);
   const [llamaUrl, setLlamaUrl] = useState('http://host.docker.internal:8080/v1');
   const [savingLlama, setSavingLlama] = useState(false);
@@ -188,10 +201,11 @@ function SystemBlock({ owner, settings, patchSettings }: { owner: boolean; setti
 
   const loadModels = () => {
     if (!owner) return;
-    void api<{ models: ModelItem[]; providers: ProviderItem[]; resident: string[] }>('/api/models').then((data) => {
+    void api<{ models: ModelItem[]; providers: ProviderItem[]; resident: string[]; autoRoles?: AutoRoles | null }>('/api/models').then((data) => {
       setAllModels(data.models || []);
       setProviders(data.providers || []);
       setResident(data.resident || []);
+      setAutoRoles(data.autoRoles ?? null);
       const llama = (data.providers || []).find((p) => p.id === 'prov_llama');
       if (llama?.baseUrl) setLlamaUrl(llama.baseUrl);
     }).catch(() => undefined);
@@ -241,6 +255,28 @@ function SystemBlock({ owner, settings, patchSettings }: { owner: boolean; setti
                     </div>
                   );
                 })}
+              </div>
+            )}
+            {autoRoles && autoRoles.roles.length > 0 && (
+              <div style={{ marginBottom: 12 }}>
+                <h4>{tr('Auto roles')}</h4>
+                <p className="faint">{tr('How Auto picks a model for each role. If a configured model is missing, Auto uses the best installed one instead.')}</p>
+                <div className="item-list">
+                  {autoRoles.roles.map((row) => (
+                    <div key={row.role} className="item-row">
+                      <span className={row.available ? (row.fallback ? 'dot warn' : 'dot ok') : 'dot bad'} aria-hidden />
+                      <span className="grow">
+                        <strong>{autoRoleLabel(row.role)}</strong>
+                        <span className="faint">
+                          {row.available
+                            ? `${row.modelName || ''}${row.providerName ? ` · ${row.providerName}` : ''}`
+                            : tr('No usable model')}
+                          {row.note ? ` — ${row.note}` : ''}
+                        </span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </>
@@ -322,6 +358,7 @@ export function Settings({ role = 'owner' }: { role?: 'owner' | 'member' }) {
           {show('personas') && <Block id="personas"><PersonasBlock /></Block>}
           {show('workspaces') && <Block id="workspaces"><WorkspacesBlock /></Block>}
           {show('data') && <Block id="data"><AccountCard /></Block>}
+          {show('updates') && <Block id="updates"><UpdatesBlock /></Block>}
         </>}
       </SettingsPage>
     );
@@ -539,6 +576,7 @@ function OwnerSettings() {
         <p><a className="btn" href="/api/debug/bundle">{tr('Download redacted diagnostics')}</a></p>
         <p className="faint">{tr('Over SSH:')}{' '}<span className="mono">{tr('npm run doctor')}</span>. To recover a forgotten password: <span className="mono">{tr('npm run reset-owner')}</span>.</p>
       </div>}
+      {show('updates') && <Block id="updates"><UpdatesBlock /></Block>}
       {show('remote') && <Block id="remote">{null}</Block>}
       {show('remote') && <div className="card" id="remote">
         <h3>{tr('Tailscale (recommended)')}</h3>

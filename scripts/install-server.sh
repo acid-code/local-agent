@@ -175,14 +175,8 @@ if [[ -f "$INSTALL_ROOT/data/local-agent.db" ]]; then
   if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "+ back up $INSTALL_ROOT/data to $BACKUP_FILE"
   else
-    BACKUP_ITEMS=()
-    for f in local-agent.db local-agent.db-wal local-agent.db-shm master.key cookie.secret secrets.env workspaces; do
-      [[ -e "$INSTALL_ROOT/data/$f" ]] && BACKUP_ITEMS+=("$f")
-    done
-    if [[ ${#BACKUP_ITEMS[@]} -gt 0 ]]; then
-      tar -C "$INSTALL_ROOT/data" -cf "$BACKUP_FILE" "${BACKUP_ITEMS[@]}"
-      echo "Backed up existing data to $BACKUP_FILE"
-    fi
+    node "$SRC/scripts/backup-data.mjs" "$INSTALL_ROOT/data" "$BACKUP_FILE"
+    echo "Backed up existing data to $BACKUP_FILE"
   fi
 fi
 

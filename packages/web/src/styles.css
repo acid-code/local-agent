@@ -265,10 +265,11 @@ button { cursor: pointer; }
 .thinking summary { cursor: pointer; color: var(--faint); font-size: calc(13px * var(--fs)); display: inline-flex; align-items: center; gap: 6px; min-height: 32px; }
 .thinking .think { max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 6px; }
 .typing { display: flex; align-items: center; gap: 4px; color: var(--faint); margin: 0 0 16px; }
-.typing span { width: 6px; height: 6px; border-radius: calc(99px * var(--round)); background: var(--brass); animation: pulse 1.2s infinite ease-in-out; }
+.typing span { width: 6px; height: 6px; border-radius: calc(99px * var(--round)); background: var(--brass); animation: typing-dot 1.2s infinite ease-in-out; will-change: opacity, transform; }
 .typing span:nth-child(2) { animation-delay: .15s; } .typing span:nth-child(3) { animation-delay: .3s; }
 .typing em { font-style: normal; font-size: calc(13px * var(--fs)); margin-inline-start: 6px; }
-@keyframes pulse { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
+/* Opacity and transform only: both run on the compositor, so a busy main thread (streaming, layout) cannot stutter them. */
+@keyframes typing-dot { 0%, 80%, 100% { opacity: .25; transform: scale(.85); } 40% { opacity: 1; transform: scale(1); } }
 .error-card { border-color: rgba(var(--coral-rgb), 0.45); background: rgba(var(--coral-rgb), 0.08); }
 .error-card p { margin: 6px 0 10px; overflow-wrap: anywhere; }
 .first-run { margin-bottom: 16px; }
@@ -1085,9 +1086,11 @@ table.limits tbody th { color: var(--text); font-weight: 500; }
 .diff-view .hunk { color: var(--sky); }
 .commit-line { margin: 2px 0; font-size: calc(12px * var(--fs)); }
 .skeleton-lines { display: flex; flex-direction: column; gap: 8px; padding: 12px; }
-.skeleton-lines span { height: 10px; border-radius: 4px; background: linear-gradient(90deg, var(--bg-2), var(--bg-3), var(--bg-2)); background-size: 200% 100%; animation: shimmer 1.2s linear infinite; }
+/* The shine is a transformed overlay (compositor), not an animated background-position (a repaint every frame). */
+.skeleton-lines span { position: relative; overflow: hidden; height: 10px; border-radius: 4px; background: var(--bg-2); }
+.skeleton-lines span::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, var(--bg-3), transparent); transform: translate3d(-100%, 0, 0); animation: shimmer 1.2s linear infinite; will-change: transform; }
 .skeleton-lines span:nth-child(2) { width: 70%; } .skeleton-lines span:nth-child(3) { width: 45%; }
-@keyframes shimmer { to { background-position: -200% 0; } }
+@keyframes shimmer { to { transform: translate3d(100%, 0, 0); } }
 @media (max-width: 1240px) { .chat.with-panel:has(.ws-browser) { grid-template-columns: 236px minmax(0, 1fr); } .chat.with-panel .ws-browser { width: min(560px, 100vw); } }
 @media (max-width: 980px) { .chat.with-panel:has(.ws-browser) { grid-template-columns: minmax(0, 1fr); } .ws-split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, 35%) minmax(0, 1fr); } .ws-tree { border-inline-end: 0; border-bottom: 1px solid var(--line); } }
 
@@ -1405,7 +1408,20 @@ table.limits tbody th { color: var(--text); font-weight: 500; }
 .persona-row-name { font-weight: 560; font-size: calc(14px * var(--fs)); }
 .persona-preview { font-size: calc(12.5px * var(--fs)); }
 .persona-row.on .persona-open { background: var(--bg-3); }
-.side-alert { margin: 6px 12px 0; padding: 8px 12px; border: 1px solid rgba(var(--coral-rgb), 0.45); color: var(--coral); background: transparent; border-radius: calc(10px * var(--round)); font-size: var(--t-meta); text-align: start; }
+/* Secret-request notice: its own row above the footer (never on top of it), with a dismiss button. */
+.side-alert { flex: none; display: flex; align-items: center; gap: 2px; margin: 8px 12px; border: 1px solid rgba(var(--coral-rgb), 0.45); color: var(--coral); border-radius: calc(10px * var(--round)); font-size: var(--t-meta); }
+.side-alert-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 8px 4px 8px 12px; border: 0; background: transparent; color: inherit; text-align: start; min-height: 36px; }
+.side-alert-main .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side-alert-count { display: none; }
+.side-alert-x { flex: none; display: grid; place-items: center; width: 32px; height: 32px; margin-inline-end: 2px; border: 0; border-radius: 999px; background: transparent; color: inherit; }
+.side-alert-x:hover, .side-alert-main:hover { background: rgba(var(--coral-rgb), 0.1); }
+@media (min-width: 981px) {
+  /* Collapsed rail: a small key + count; the dismiss lives in Settings → Secrets there. */
+  .app.collapsed .side-alert { margin: 8px auto; border-radius: 999px; }
+  .app.collapsed .side-alert-main { padding: 6px 8px; gap: 4px; }
+  .app.collapsed .side-alert-count { display: inline; font-weight: 600; }
+  .app.collapsed .side-alert-x { display: none; }
+}
 .side-foot { padding: 12px 14px; border-top: 0; gap: 10px; align-items: center; }
 .side-foot .avatar { width: 34px; height: 34px; border-radius: 999px; background: #b8336a; color: #fff; font-weight: 600; font-size: 15px; display: grid; place-items: center; border: 0; }
 .side-foot .who { font-weight: 560; }
@@ -2184,48 +2200,55 @@ button.state-card:hover, a.state-card:hover { background: var(--bg-3); }
 .preset-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-top: 10px; }
 .preset-card { display: flex; flex-direction: column; gap: 6px; padding: 12px; border: 1px solid var(--line); border-radius: calc(10px * var(--round)); background: var(--bg-1); }
 
-/* Cute Grok-bot-style blob persona animations */
-.face.blob .blob-inner { transform-origin: 32px 36px; transition: transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1); }
-.face.blob .blob-eyes { animation: blob-blink 5.4s ease-in-out infinite; animation-delay: var(--blink-delay, 0s); }
-.pin-face .face.blob .blob-inner,
-.state-hero .face.blob .blob-inner { animation: blob-float 3.8s ease-in-out infinite; animation-delay: var(--float-delay, 0s); }
-.pin-face:hover .face.blob .blob-inner,
-.persona-row:hover .face.blob .blob-inner,
-.head-pill:hover .face.blob .blob-inner,
-.state-hero:hover .face.blob .blob-inner { animation: blob-hop 0.55s cubic-bezier(0.34, 1.56, 0.64, 1); }
-.pin-face:active .face.blob .blob-inner { transform: scale(1.08, 0.9); }
-.head-pill:has(.head-live) .face.blob .blob-inner { animation: blob-think 1.35s ease-in-out infinite; }
-.head-pill:has(.head-live) .face.blob .blob-eyes { animation: blob-glance 1.8s ease-in-out infinite; }
+/* Cute Grok-bot-style blob persona animations.
+   Float, hop and think move the whole <svg> box with transform: that runs on the compositor (its own GPU layer),
+   so it stays smooth at fractional Windows scaling and while the chat streams. Animating the SVG's inner <g>
+   instead repaints the shape (and its drop-shadow) on the main thread every frame and snaps to whole pixels,
+   which is what jittered. Only the faces that are meant to be alive animate; faces in lists stay still. */
+.face.blob { transform-origin: 50% 56%; }
+.pin-face .face.blob,
+.state-hero .face.blob,
+.head-pill .face.blob,
+.persona-row .face.blob { transition: transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1); backface-visibility: hidden; }
+.pin-face .face.blob,
+.state-hero .face.blob { animation: blob-float 3.8s ease-in-out infinite; animation-delay: var(--float-delay, 0s); will-change: transform; }
+.pin-face:hover .face.blob,
+.persona-row:hover .face.blob,
+.head-pill:hover .face.blob,
+.state-hero:hover .face.blob { animation: blob-hop 0.55s cubic-bezier(0.34, 1.56, 0.64, 1); will-change: transform; }
+.pin-face:active .face.blob { transform: scale(1.08, 0.9); }
+.head-pill:has(.head-live) .face.blob { animation: blob-think 1.35s ease-in-out infinite; will-change: transform; }
+/* Blinks stay inside the SVG (eyes move against the body), so keep them to the few faces in focus. */
+.pin-face .face.blob .blob-eyes,
+.state-hero .face.blob .blob-eyes,
+.head-pill .face.blob .blob-eyes { animation: blob-blink 5.4s ease-in-out infinite; animation-delay: var(--blink-delay, 0s); transform-box: fill-box; transform-origin: 50% 50%; }
+.head-pill:has(.head-live) .face.blob .blob-eyes { animation: blob-blink 1.8s ease-in-out infinite; }
 
+/* Percentages are of the face's own size (2.2 of 64 viewBox units ≈ 3.4%), so motion scales with the face. */
 @keyframes blob-blink {
   0%, 44%, 49%, 94%, 100% { transform: scaleY(1); }
   46.5% { transform: scaleY(0.12); }
   96.5% { transform: scaleY(0.14); }
 }
 @keyframes blob-float {
-  0%, 100% { transform: translateY(0) scale(1, 1); }
-  50% { transform: translateY(-2.2px) scale(0.985, 1.02); }
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1, 1); }
+  50% { transform: translate3d(0, -3.4%, 0) scale(0.985, 1.02); }
 }
 @keyframes blob-hop {
-  0% { transform: translateY(0) scale(1, 1) rotate(0deg); }
-  28% { transform: translateY(2px) scale(1.09, 0.91) rotate(-4deg); }
-  58% { transform: translateY(-4.5px) scale(0.95, 1.07) rotate(4deg); }
-  82% { transform: translateY(1px) scale(1.03, 0.97) rotate(-1.5deg); }
-  100% { transform: translateY(0) scale(1, 1) rotate(0deg); }
+  0% { transform: translate3d(0, 0, 0) scale(1, 1) rotate(0deg); }
+  28% { transform: translate3d(0, 3%, 0) scale(1.09, 0.91) rotate(-4deg); }
+  58% { transform: translate3d(0, -7%, 0) scale(0.95, 1.07) rotate(4deg); }
+  82% { transform: translate3d(0, 1.5%, 0) scale(1.03, 0.97) rotate(-1.5deg); }
+  100% { transform: translate3d(0, 0, 0) scale(1, 1) rotate(0deg); }
 }
 @keyframes blob-think {
-  0%, 100% { transform: translateY(0) scale(1, 1) rotate(-2deg); }
-  50% { transform: translateY(-3px) scale(0.97, 1.04) rotate(3deg); }
-}
-@keyframes blob-glance {
-  0%, 100% { transform: translateX(0) scaleY(1); }
-  25% { transform: translateX(-2.2px) scaleY(1); }
-  50% { transform: translateX(0) scaleY(0.15); }
-  75% { transform: translateX(2.2px) scaleY(1); }
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1, 1) rotate(-2deg); }
+  50% { transform: translate3d(0, -4.7%, 0) scale(0.97, 1.04) rotate(3deg); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .face.blob .blob-inner,
-  .face.blob .blob-eyes { animation: none !important; transition: none !important; }
+  .face.blob,
+  .face.blob .blob-eyes,
+  .typing span { animation: none !important; transition: none !important; will-change: auto !important; }
 }
 
 /* Sleek minimal scrollbars (replaces chunky Windows default scrollbar with arrows) */
@@ -2271,3 +2294,130 @@ button.state-card:hover, a.state-card:hover { background: var(--bg-3); }
   content-visibility: auto;
   contain-intrinsic-size: auto 220px;
 }
+
+/* ── Layout and controls pass (2026-11): headers that never scroll away, a trace you can always close, one control system ── */
+
+/* Chats drawer: the title, New chat and search stay put; only the list scrolls. */
+.chat.v2 .rail.open { overflow: hidden; }
+.chat.v2 .rail.open .session-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 12px; }
+.chat.v2 .rail.open > .sheet-head,
+.chat.v2 .rail.open > .rail-actions,
+.chat.v2 .rail.open > .rail-search { flex: none; }
+.chat.v2 .rail.open > .sheet-head { display: flex; align-items: center; justify-content: space-between; min-height: 40px; }
+
+/* Trace: a sheet with a real header (Back, title, Close) that sits below the desktop title bar and does not scroll away. */
+.chat.v2.with-trace .trace { overflow: hidden; padding: 0; gap: 0; }
+.chat.v2.with-trace .trace > .sheet-head.trace-head {
+  display: flex; align-items: center; gap: 6px; flex: none;
+  min-height: 52px; padding: 8px 10px;
+  padding-top: max(8px, env(safe-area-inset-top));
+  border-bottom: 1px solid var(--line); background: var(--bg-2);
+}
+.chat.v2.with-trace .trace > .sheet-head.trace-head strong { font-size: var(--t-title); font-weight: 600; }
+.chat.v2.with-trace .trace > :not(.sheet-head) { margin-inline: 14px; }
+.chat.v2.with-trace .trace > .faint { margin-top: 12px; }
+.chat.v2.with-trace .trace { overflow-y: auto; }
+.chat.v2.with-trace .trace > .sheet-head.trace-head { position: sticky; top: 0; z-index: 1; }
+.chat.v2.with-trace .trace .step { padding: 10px 0; border-bottom: 1px solid var(--line); }
+:root[data-desktop="win"] .chat.v2.with-trace .trace,
+:root[data-desktop="linux"] .chat.v2.with-trace .trace { top: 40px; height: calc(100dvh - 40px); }
+.chat.v2.with-trace .scrim { display: block; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.32); z-index: 35; }
+:root[data-desktop="win"] .chat.v2.with-trace .scrim,
+:root[data-desktop="linux"] .chat.v2.with-trace .scrim { top: 40px; }
+.flip-rtl:dir(rtl) { transform: scaleX(-1); }
+
+/* One control system: 36px round icon buttons, 32px pills, the same hover and focus everywhere, in both schemes. */
+.chat.v2 .thread-head .icon-btn,
+.chat.v2 .composer-bar .icon-btn,
+.chat.v2 .composer-bar .icon-btn.round {
+  width: 36px; height: 36px; min-width: 36px; padding: 0;
+  border-radius: 999px; border: 1px solid transparent; background: transparent; color: var(--muted);
+}
+.chat.v2 .thread-head .icon-btn:hover:not(:disabled),
+.chat.v2 .composer-bar .icon-btn:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
+.chat.v2 .composer-bar .composer-plus { background: var(--bg-3); color: var(--text); }
+.chat.v2 .composer-bar .icon-btn.primary-fill { background: var(--persona, var(--brass)); color: #fff; }
+:root[data-scheme="dark"] .chat.v2 .composer-bar .icon-btn.primary-fill { color: #0e0f11; }
+.chat.v2 .composer-bar .icon-btn.primary-fill:disabled { background: var(--bg-3); color: var(--faint); opacity: 1; }
+/* "On" is a selected state, not an error: tint with the accent, not coral. */
+.icon-btn.on, .chat.v2 .thread-head .icon-btn.on, .chat.v2 .composer-bar .icon-btn[aria-pressed="true"] {
+  color: var(--brass); background: rgba(var(--brass-rgb), 0.14); border-color: rgba(var(--brass-rgb), 0.35);
+}
+.chat.v2 .composer-bar .pill,
+.chat.v2 .composer-bar .model-trigger,
+.chat.v2 .composer-bar .ctx-ring-btn { min-height: 32px; height: 32px; border-radius: 999px; padding-inline: 10px; border: 1px solid var(--line); background: transparent; }
+.chat.v2 .composer-bar .pill:hover,
+.chat.v2 .composer-bar .model-trigger:hover,
+.chat.v2 .composer-bar .ctx-ring-btn:hover { background: var(--bg-3); color: var(--text); }
+.chat.v2 .thread-head .persona-name { min-height: 36px; }
+.btn { min-height: 36px; border-radius: calc(10px * var(--round)); }
+.btn.small { min-height: 30px; }
+:root[data-scheme="light"] .btn:not(.primary):not(.ghost):not(.danger) { background: var(--bg-2); border-color: rgba(var(--text-rgb), 0.16); }
+:root[data-scheme="light"] .icon-btn.round { border-color: rgba(var(--text-rgb), 0.14); }
+:root[data-scheme="light"] .chat.v2 .thread-head .persona-name { box-shadow: none; }
+/* Keyboard focus is always visible and the same everywhere. */
+.btn:focus-visible, .icon-btn:focus-visible, .pill:focus-visible, .model-trigger:focus-visible, .ctx-ring-btn:focus-visible, .menu-item:focus-visible, .session-item:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: 2px solid rgba(var(--brass-rgb), 0.75); outline-offset: 2px;
+}
+.icon-btn svg, .btn svg { flex: none; }
+.chat.v2 .trace-head .head-spacer { flex: 1; }
+
+/* Wait card: the GPU queue reads as calm info (no Force), the RAM wait keeps its warning look. */
+.wait-banner { flex-wrap: wrap; }
+.wait-banner.queue { border-color: rgba(var(--sky-rgb), 0.35); background: rgba(var(--sky-rgb), 0.08); }
+.wait-banner.queue strong::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-inline-end: 8px; border-radius: 50%; background: var(--sky); animation: pulse 1.6s ease-in-out infinite; vertical-align: middle; }
+.wait-confirm { flex-basis: 100%; margin-top: 10px; padding: 10px 12px; border-radius: calc(10px * var(--round)); border: 1px solid rgba(var(--coral-rgb), 0.45); background: rgba(var(--coral-rgb), 0.08); }
+.wait-confirm p { margin: 0 0 8px; color: var(--text); }
+
+/* ── Copilot-style work steps: one calm, collapsible block per stretch of agent work ── */
+.work-group { margin: 4px 0 18px; max-width: 100%; }
+.work-head { display: inline-flex; align-items: center; gap: 8px; min-height: 32px; padding: 4px 8px 4px 4px; margin-inline-start: -4px; border: 0; background: transparent; color: var(--muted); font-size: var(--t-meta); border-radius: calc(8px * var(--round)); cursor: pointer; }
+.work-head:hover { color: var(--text); background: var(--bg-2); }
+.work-chev { flex: none; transition: transform .18s var(--ease); }
+.work-group.open .work-chev { transform: rotate(90deg); }
+.work-chev:dir(rtl) { transform: scaleX(-1); }
+.work-group.open .work-chev:dir(rtl) { transform: rotate(90deg); }
+.work-title { font-weight: 500; }
+.work-diffstat { font-size: calc(12px * var(--fs)); }
+.work-diffstat .add { color: var(--moss); }
+.work-diffstat .del { color: var(--coral); }
+.work-live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--brass); animation: pulse 1.4s ease-in-out infinite; }
+.work-rows { list-style: none; margin: 6px 0 0; padding: 2px 0 2px 0; margin-inline-start: 11px; padding-inline-start: 16px; border-inline-start: 1px solid var(--line-strong); display: flex; flex-direction: column; gap: 4px; animation: menu-in-down .18s var(--ease); }
+.work-step { margin: 0; }
+.work-row { width: 100%; display: flex; align-items: center; gap: 9px; min-height: 34px; padding: 5px 8px; margin-inline-start: -8px; border: 0; background: transparent; color: var(--text); text-align: start; border-radius: calc(8px * var(--round)); cursor: pointer; font-size: calc(14px * var(--fs)); line-height: 1.4; }
+.work-row:hover { background: var(--bg-2); }
+.work-icon { flex: none; color: var(--faint); }
+.work-verb { flex: none; color: var(--text); }
+.work-target { color: var(--muted); min-width: 0; }
+.work-spacer { flex: 1; }
+.work-time { flex: none; font-size: calc(12px * var(--fs)); font-variant-numeric: tabular-nums; }
+.work-file { display: inline-flex; align-items: center; gap: 4px; flex: none; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line-strong); background: var(--bg-2); color: var(--muted); font-size: calc(12px * var(--fs)); }
+.work-step.failed .work-icon, .work-step.failed .work-verb { color: var(--coral); }
+.work-step.pending .work-icon { color: var(--brass); animation: pulse 1.4s ease-in-out infinite; }
+.work-detail { margin: 4px 0 10px; padding: 10px 12px; border-radius: calc(10px * var(--round)); background: var(--code-bg); border: 1px solid var(--line); }
+.work-detail.think { white-space: pre-wrap; color: var(--muted); font-size: var(--t-meta); line-height: 1.55; background: var(--bg-2); }
+.work-detail pre { margin: 0 0 8px; max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-size: calc(12px * var(--fs)); color: var(--text); }
+.work-detail-label { margin: 2px 0 4px; font-size: calc(11px * var(--fs)); letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
+.work-narration { margin: 8px 0 10px; color: var(--text); font-size: var(--t-body); line-height: 1.6; }
+.work-narration p { margin: 0 0 6px; }
+:root[data-scheme="light"] .work-detail { background: rgba(var(--text-rgb), 0.035); }
+@media (max-width: 640px) {
+  .work-rows { margin-inline-start: 8px; padding-inline-start: 12px; }
+  .work-row { min-height: 40px; font-size: calc(14px * var(--fs)); flex-wrap: wrap; row-gap: 2px; }
+  .work-file { max-width: 140px; }
+}
+
+/* Settings → About & updates */
+.updates-card .version-list { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0 0 14px; }
+.updates-card .version-list dt { color: var(--muted, #8a8f98); }
+.updates-card .version-list dd { margin: 0; }
+.updates-card .update-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.updates-card .update-row .btn { display: inline-flex; align-items: center; gap: 6px; }
+.updates-card .update-status { margin: 10px 0 0; font-size: 13px; }
+.updates-card .update-status.ok { color: #3fb27f; }
+.updates-card .update-status.busy, .updates-card .update-status.muted { color: var(--muted, #8a8f98); }
+.updates-card .update-status.action { color: var(--brass, #d4a24c); font-weight: 600; }
+.updates-card .update-status.error { color: #e5484d; }
+.updates-card .update-progress { width: 100%; max-width: 360px; height: 6px; margin-top: 8px; accent-color: var(--brass, #d4a24c); }
+.updates-card svg.spin { animation: la-update-spin 1s linear infinite; }
+@keyframes la-update-spin { to { transform: rotate(360deg); } }

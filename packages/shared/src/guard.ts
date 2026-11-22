@@ -23,13 +23,22 @@ const MUTATING: RegExp[] = [
   /\bgit\s+push\b/i,
   /\bnpm\s+publish\b/i,
   /\btee\b/i,
+  /\bfind\b[^\n|;&]*\s-delete\b/i,
 ];
+
+/**
+ * Redirects that only throw output away or merge streams (2>/dev/null, &>/dev/null, 2>&1). Read-only commands
+ * like `git log --oneline -5 2>/dev/null` were flagged as destructive because of the bare ">" rule, which made the
+ * agent sit on an approval prompt for an `ls`.
+ */
+const HARMLESS_REDIRECTS = /(?:\d|&)?>{1,2}\s*\/dev\/null\b|\b\d>&\d\b/g;
 
 export type CommandAssessment = 'ok' | 'mutating' | 'blocked';
 
 export function assessCommand(command: string): CommandAssessment {
   if (BLOCKED.some((pattern) => pattern.test(command))) return 'blocked';
-  if (MUTATING.some((pattern) => pattern.test(command))) return 'mutating';
+  const cleaned = command.replace(HARMLESS_REDIRECTS, ' ');
+  if (MUTATING.some((pattern) => pattern.test(cleaned))) return 'mutating';
   return 'ok';
 }
 

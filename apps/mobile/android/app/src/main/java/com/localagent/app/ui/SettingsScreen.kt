@@ -1,5 +1,7 @@
 package com.localagent.app.ui
 
+import com.localagent.app.update.UpdateCheck
+
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -106,40 +108,27 @@ fun SettingsScreen(
     val scope = rememberCoroutineScope()
     val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
     val currentVersion = packageInfo.versionName ?: "unknown"
+    @Suppress("DEPRECATION")
+    val currentCode = if (android.os.Build.VERSION.SDK_INT >= 28) packageInfo.longVersionCode else packageInfo.versionCode.toLong()
     var checkingUpdate by remember { mutableStateOf(false) }
     var updateStatus by remember { mutableStateOf("") }
-    var releaseUrl by remember { mutableStateOf("") }
+    var available by remember { mutableStateOf<UpdateCheck.Release?>(null) }
 
     fun checkForUpdate() {
         if (checkingUpdate) return
         checkingUpdate = true
         updateStatus = "Checking…"
-        releaseUrl = ""
+        available = null
         scope.launch {
-            try {
-                val release = withContext(Dispatchers.IO) {
-                    val connection = URL("https://api.github.com/repos/acid-code/local-agent/releases/latest").openConnection() as HttpURLConnection
-                    connection.requestMethod = "GET"
-                    connection.setRequestProperty("Accept", "application/vnd.github+json")
-                    connection.setRequestProperty("User-Agent", "local-agent-android")
-                    connection.connectTimeout = 12_000
-                    connection.readTimeout = 12_000
-                    if (connection.responseCode != 200) throw Exception("GitHub returned HTTP ${connection.responseCode}")
-                    JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
+            when (val result = withContext(Dispatchers.IO) { UpdateCheck.check(currentCode) }) {
+                is UpdateCheck.Result.Available -> {
+                    available = result.release
+                    updateStatus = "Version ${result.release.versionName} is available. You have $currentVersion."
                 }
-                val tag = release.optString("tag_name")
-                val url = release.optString("html_url")
-                val latest = tag.removePrefix("main-").removePrefix("v")
-                val currentNumber = currentVersion.substringAfterLast(".", "").toIntOrNull()
-                val latestNumber = latest.substringAfterLast(".", "").toIntOrNull()
-                val newer = if (currentNumber != null && latestNumber != null) latestNumber > currentNumber else tag != currentVersion
-                releaseUrl = url
-                updateStatus = if (newer) "Update available: $tag" else "You are up to date (v$currentVersion)"
-            } catch (error: Exception) {
-                updateStatus = "Update check failed: ${error.message ?: "unknown error"}"
-            } finally {
-                checkingUpdate = false
+                is UpdateCheck.Result.UpToDate -> updateStatus = "You are up to date."
+                is UpdateCheck.Result.Failed -> updateStatus = "Update check failed: ${result.message}"
             }
+            checkingUpdate = false
         }
     }
 
@@ -157,18 +146,22 @@ fun SettingsScreen(
         ) {
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("App", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text("local-agent for Android · v$currentVersion", style = MaterialTheme.typography.bodySmall)
-                    OutlinedButton(onClick = { checkForUpdate() }, enabled = !checkingUpdate) {
-                        Text(if (checkingUpdate) "Checking…" else "Check for updates")
+                    Text("About & updates", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text("Android app  v$currentVersion ($currentCode)", style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace)
+                    Text("Server  ${state.serverVersion?.let { "v$it" } ?: "…"}", style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedButton(onClick = { checkForUpdate() }, enabled = !checkingUpdate, modifier = Modifier.heightIn(min = 48.dp)) {
+                            Text(if (checkingUpdate) "Checking…" else "Check for updates")
+                        }
+                        available?.let { release ->
+                            Button(onClick = {
+                                // The browser downloads the signed APK; opening it installs over this app (same key, higher versionCode).
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(release.apkUrl)))
+                            }, modifier = Modifier.heightIn(min = 48.dp)) { Text("Download APK") }
+                        }
                     }
                     if (updateStatus.isNotBlank()) {
                         Text(updateStatus, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    if (releaseUrl.isNotBlank()) {
-                        TextButton(onClick = {
-                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(releaseUrl)))
-                        }) { Text("Open release") }
                     }
                 }
             }

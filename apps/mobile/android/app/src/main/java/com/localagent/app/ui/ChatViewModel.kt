@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.localagent.app.data.AudioPlayer
 import com.localagent.app.data.LocalAgentClient
 import com.localagent.app.model.*
+import com.localagent.app.approvals.ApprovalNotifier
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -14,6 +15,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import okhttp3.sse.EventSource
+import org.json.JSONObject
+import com.localagent.app.live.LiveSync
 
 data class AppUiState(
     val checkingAuth: Boolean = true,
@@ -21,6 +24,7 @@ data class AppUiState(
     val username: String = "",
     val role: String = "owner",
     val serverUrl: String = "",
+    val serverVersion: String? = null,
     val authError: String? = null,
     val connecting: Boolean = false,
     val personas: List<Persona> = emptyList(),
@@ -37,10 +41,18 @@ data class AppUiState(
     val activeRunId: String? = null,
     val runStatus: String = "",
     val statusDetail: String = "",
+    /** Queue vs RAM wait, from the status event's waitInfo (or its detail text on older servers). */
+    val wait: WaitState? = null,
     val streamingText: String = "",
     val streamingThinking: String = "",
     val runError: String? = null,
     val approvals: List<ApprovalItem> = emptyList(),
+    /** Every pending approval of this account, across chats (the Approvals tab and its badge). */
+    val pendingApprovals: List<ApprovalItem> = emptyList(),
+    val approvalsLoaded: Boolean = false,
+    /** Approval to scroll to and highlight, e.g. after tapping its notification. */
+    val focusApprovalId: String? = null,
+    val tab: AppTab = AppTab.Chat,
     val breakdown: ContextBreakdown? = null,
     val draft: String = "",
     val speakingId: String? = null,
@@ -56,6 +68,10 @@ data class AppUiState(
         get() = runStatus in setOf("running", "loading", "waiting", "paused", "awaiting_approval")
 }
 
+enum class AppTab { Chat, Chats, Approvals, System }
+
+private val ACTIVE_STATUSES = setOf("running", "loading", "waiting", "paused", "awaiting_approval")
+
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
     val client = LocalAgentClient(application.applicationContext)
     private val audio = AudioPlayer(application.applicationContext, client)
@@ -63,6 +79,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     val ui: StateFlow<AppUiState> = _ui.asStateFlow()
 
     private var eventSource: EventSource? = null
+    /** Generation of the run stream; a close from an older (cancelled) stream is ignored. */
+    private var runStreamGen = 0
+    private var runStreamAttempt = 0
+    private var sessionSource: EventSource? = null
+    private var sessionWatchId: String? = null
+    private var sessionGen = 0
+    private var sessionAttempt = 0
+    private var sessionFirstSnapshot = true
+    private var foreground = true
     private var memoryPollJob: Job? = null
 
     init {
@@ -286,13 +311,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             activeRunId = detail.activeRunId,
                             runStatus = detail.live?.status?.ifBlank { detail.activeRunStatus ?: "" } ?: (detail.activeRunStatus ?: ""),
                             statusDetail = detail.live?.detail ?: "",
+                            wait = detail.live?.takeIf { l -> l.status == "waiting" }?.let { l -> WaitState.of(l.detail, l.waitInfo) },
                             streamingText = detail.live?.text ?: "",
                             streamingThinking = detail.live?.thinking ?: "",
                             runError = null,
-                            approvals = emptyList(),
+                            approvals = it.pendingApprovals.filter { a -> a.sessionId == detail.session.id || a.runId == detail.activeRunId },
                         )
                     }
                     if (!detail.activeRunId.isNullOrBlank()) attachStream(detail.activeRunId)
+                    watchSession(detail.session.id)
+                    refreshPendingApprovals()
                 }
                 .onFailure { e -> _ui.update { it.copy(snackbar = e.message ?: "Failed to open chat") } }
         }
@@ -342,11 +370,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun attachStream(runId: String) {
         closeStream()
+        val gen = ++runStreamGen
         eventSource = client.streamRun(
             runId = runId,
             onEvent = { json ->
                 when (json.optString("type")) {
                     "snapshot" -> {
+                        runStreamAttempt = 0
                         val runObj = json.optJSONObject("run")
                         val status = runObj?.optString("status", "") ?: ""
                         val detail = json.optString("statusDetail", "")
@@ -404,8 +434,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     "status" -> {
                         val st = json.optString("status", "")
                         val detail = json.optString("detail", "")
-                        _ui.update { it.copy(runStatus = st, statusDetail = detail) }
-                        if (st == "waiting") startMemoryRecheckLoop() else stopMemoryRecheckLoop()
+                        val wait = if (st == "waiting") WaitState.of(detail, json.optJSONObject("waitInfo")) else null
+                        _ui.update { it.copy(runStatus = st, statusDetail = detail, wait = wait) }
+                        // Re-checking RAM only helps the memory wait, not the large-model queue.
+                        if (st == "waiting" && wait?.queue != true) startMemoryRecheckLoop() else stopMemoryRecheckLoop()
                         if (st == "awaiting_approval") refreshApprovals(runId)
                     }
                     "approval" -> refreshApprovals(runId)
@@ -426,8 +458,90 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             },
-            onClosed = { stopMemoryRecheckLoop() },
+            onClosed = {
+                stopMemoryRecheckLoop()
+                // Dropped while the run is still going (network change, server restart): reattach with backoff.
+                // The new stream starts with a snapshot, so nothing is missed.
+                if (gen == runStreamGen && foreground && _ui.value.activeRunId == runId && _ui.value.runStatus in ACTIVE_STATUSES) {
+                    viewModelScope.launch {
+                        delay(LiveSync.backoffMs(runStreamAttempt++))
+                        if (gen == runStreamGen && _ui.value.activeRunId == runId) attachStream(runId)
+                    }
+                }
+            },
         )
+    }
+
+    /** Keeps the open chat's live feed connected: runs started on another device show up, a reconnect resyncs. */
+    private fun watchSession(sessionId: String, force: Boolean = false) {
+        if (!force && sessionWatchId == sessionId && sessionSource != null) return
+        sessionSource?.cancel()
+        sessionWatchId = sessionId
+        sessionFirstSnapshot = true
+        val gen = ++sessionGen
+        sessionSource = client.streamSession(
+            sessionId = sessionId,
+            onEvent = { json -> if (gen == sessionGen) onSessionEvent(sessionId, json) },
+            onClosed = {
+                if (gen == sessionGen) {
+                    sessionSource = null
+                    if (foreground && _ui.value.currentSession?.id == sessionId) {
+                        viewModelScope.launch {
+                            delay(LiveSync.backoffMs(sessionAttempt++))
+                            if (gen == sessionGen && foreground && _ui.value.currentSession?.id == sessionId) watchSession(sessionId, force = true)
+                        }
+                    }
+                }
+            },
+        )
+    }
+
+    private fun stopWatchingSession() {
+        sessionGen++
+        sessionSource?.cancel()
+        sessionSource = null
+    }
+
+    private fun onSessionEvent(sessionId: String, json: JSONObject) {
+        if (_ui.value.currentSession?.id != sessionId) return
+        val type = json.optString("type")
+        if (type == "snapshot") {
+            sessionAttempt = 0
+            val first = sessionFirstSnapshot
+            sessionFirstSnapshot = false
+            val active = json.optJSONObject("activeRun")
+            val activeId = active?.optString("id")?.takeIf { it.isNotBlank() }
+            if (activeId != null && activeId != _ui.value.activeRunId) {
+                _ui.update { it.copy(activeRunId = activeId, runStatus = active.optString("status", "running")) }
+                attachStream(activeId)
+            } else if (!first && activeId != null) {
+                attachStream(activeId)
+            }
+            if (!first) {
+                val arr = json.optJSONArray("messages")
+                if (arr != null) {
+                    val server = List(arr.length()) { i -> client.parseMessage(arr.getJSONObject(i)) }
+                    _ui.update { s -> s.copy(messages = LiveSync.mergeSnapshot(s.messages, server, { it.id }, { it.role }, { it.content })) }
+                }
+                // The streamed run ended while disconnected: load its final state.
+                if (activeId == null && _ui.value.runStatus in ACTIVE_STATUSES) openSession(sessionId)
+            }
+            return
+        }
+        val msgObj = json.optJSONObject("message")
+        val runId = json.optString("runId").takeIf { it.isNotBlank() }
+        when (val action = LiveSync.action(type, runId, json.optString("status").takeIf { it.isNotBlank() }, msgObj != null, _ui.value.activeRunId)) {
+            is LiveSync.Action.AdoptRun -> {
+                _ui.update { it.copy(activeRunId = action.runId, runStatus = action.status, runError = null) }
+                attachStream(action.runId)
+            }
+            LiveSync.Action.UpsertMessage -> {
+                val msg = client.parseMessage(msgObj!!)
+                _ui.update { s -> s.copy(messages = s.messages.filterNot { it.id == msg.id } + msg) }
+            }
+            LiveSync.Action.Reload -> { openSession(sessionId); refreshSessions() }
+            LiveSync.Action.None -> Unit
+        }
     }
 
     private fun startMemoryRecheckLoop() {
@@ -446,6 +560,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun closeStream() {
+        runStreamGen++
         stopMemoryRecheckLoop()
         eventSource?.cancel()
         eventSource = null
@@ -470,18 +585,89 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun refreshApprovals(runId: String) {
+    @Suppress("UNUSED_PARAMETER")
+    private fun refreshApprovals(runId: String) = refreshPendingApprovals()
+
+    /** Reload every pending approval; the chat shows the ones that belong to it. */
+    fun refreshPendingApprovals() {
+        if (!_ui.value.authenticated) return
         viewModelScope.launch {
-            val list = runCatching { client.listApprovals(runId) }.getOrDefault(emptyList())
-            _ui.update { it.copy(approvals = list) }
+            val list = runCatching { client.listApprovals() }.getOrNull() ?: return@launch
+            _ui.update { s -> s.copy(pendingApprovals = list, approvals = approvalsForChat(list, s), approvalsLoaded = true) }
+            ApprovalNotifier.sync(getApplication(), list, post = false)
         }
     }
 
-    fun decideApproval(id: String, decision: String) {
+    private fun approvalsForChat(list: List<ApprovalItem>, s: AppUiState): List<ApprovalItem> =
+        list.filter { a -> (s.currentSession != null && a.sessionId == s.currentSession.id) || (s.activeRunId != null && a.runId == s.activeRunId) }
+
+    private var approvalPollJob: Job? = null
+
+    /** While the app is on screen, keep approvals fresh so the badge and cards are never stale. */
+    fun setForeground(on: Boolean) {
+        approvalPollJob?.cancel()
+        approvalPollJob = null
+        val wasForeground = foreground
+        foreground = on
+        if (!on) { stopWatchingSession(); return }
+        // Back on screen: reconnect the chat feed (its snapshot resyncs messages and the active run).
+        if (!wasForeground || sessionSource == null) _ui.value.currentSession?.id?.let { watchSession(it, force = true) }
+        approvalPollJob = viewModelScope.launch {
+            while (true) {
+                refreshPendingApprovals()
+                delay(8_000)
+            }
+        }
+    }
+
+    fun selectTab(tab: AppTab) {
+        _ui.update { it.copy(tab = tab, focusApprovalId = if (tab == AppTab.Approvals) it.focusApprovalId else null) }
+        if (tab == AppTab.Approvals) refreshPendingApprovals()
+        if (tab == AppTab.System) refreshServerVersion()
+    }
+
+    fun refreshServerVersion() {
         viewModelScope.launch {
-            _ui.update { it.copy(approvals = it.approvals.filterNot { a -> a.id == id }) }
+            val version = runCatching { client.serverVersion() }.getOrNull()
+            _ui.update { it.copy(serverVersion = version) }
+        }
+    }
+
+    /** From a notification tap: open the Approvals tab on that exact approval. */
+    fun focusApproval(id: String) {
+        _ui.update { it.copy(tab = AppTab.Approvals, focusApprovalId = id) }
+        refreshPendingApprovals()
+    }
+
+    fun openApprovalChat(item: ApprovalItem) {
+        val sid = item.sessionId ?: return
+        _ui.update { it.copy(tab = AppTab.Chat, focusApprovalId = null) }
+        openSession(sid)
+    }
+
+    /** Approve or deny through the owner-checked endpoint. High-risk confirmation happens in the UI before this. */
+    fun decideApproval(id: String, decision: String) {
+        val before = _ui.value.pendingApprovals.firstOrNull { it.id == id }
+        _ui.update { s ->
+            s.copy(
+                pendingApprovals = s.pendingApprovals.filterNot { a -> a.id == id },
+                approvals = s.approvals.filterNot { a -> a.id == id },
+            )
+        }
+        ApprovalNotifier.cancel(getApplication(), id)
+        viewModelScope.launch {
             runCatching { client.decideApproval(id, decision) }
-                .onFailure { e -> _ui.update { it.copy(snackbar = e.message) } }
+                .onSuccess { _ui.update { it.copy(snackbar = if (decision == "approve") "Approved" else "Denied") } }
+                .onFailure { e ->
+                    val already = (e as? com.localagent.app.data.ApiException)?.statusCode == 409
+                    _ui.update { s ->
+                        s.copy(
+                            snackbar = if (already) "Already decided" else (e.message ?: "Could not send. Try again."),
+                            pendingApprovals = if (!already && before != null && s.pendingApprovals.none { it.id == id }) s.pendingApprovals + before else s.pendingApprovals,
+                        )
+                    }
+                    refreshPendingApprovals()
+                }
         }
     }
 
@@ -586,6 +772,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
+        stopWatchingSession()
         closeStream()
         audio.release()
         super.onCleared()

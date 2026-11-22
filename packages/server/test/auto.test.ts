@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { DEFAULT_AUTO_MAP, decideAuto, summaryTriggerFor, type AutoCandidate } from '@local-agent/shared';
+import { DEFAULT_AUTO_MAP, autoRoleHealth, decideAuto, describeAutoRoles, detectCoder, detectFast, matchAutoModel, summaryTriggerFor, type AutoCandidate, type AutoMap } from '@local-agent/shared';
 import { buildApp } from '../src/app.js';
 import { toolCapabilityWarnings } from '../src/ollama.js';
 import { ollamaNumCtx, providerFor, type ModelProvider } from '../src/providers.js';
@@ -58,8 +58,10 @@ describe('auto routing', () => {
     expect(decideAuto({ text: 'fix the typo in the server readme', map: DEFAULT_AUTO_MAP, models }).modelId).toBe('coder');
     const detected = decideAuto({ text: 'Please explain the workshop to a new teammate in some detail.', map: { ...DEFAULT_AUTO_MAP, main: '' }, models: [coder, model({ id: 'qwen', name: 'qwen3.6:35b-a3b', apiName: 'qwen3.6:35b-a3b' })] });
     expect(detected.modelId).toBe('qwen');
-    const gemmaFirst = decideAuto({ text: 'Please explain the workshop to a new teammate in some detail.', map: DEFAULT_AUTO_MAP, models: [model({ id: 'qwen', name: 'qwen3.6:35b-a3b', apiName: 'qwen3.6:35b-a3b' }), main] });
-    expect(gemmaFirst.modelId).toBe('main');
+    // Qwen3.6 is the main brain: with both present (and an empty saved main slot), Auto picks Qwen, never gemma4.
+    const qwenFirst = decideAuto({ text: 'Please explain the workshop to a new teammate in some detail.', map: { ...DEFAULT_AUTO_MAP, main: '' }, models: [main, model({ id: 'qwen', name: 'qwen3.6:35b-a3b', apiName: 'qwen3.6:35b-a3b' })] });
+    expect(qwenFirst.modelId).toBe('qwen');
+    expect(DEFAULT_AUTO_MAP.main).toBe('qwen3.6-35b-a3b');
   });
 
   it('summarizes large models only after half the practical budget', () => {
@@ -167,11 +169,101 @@ describe('auto runs the mapped model', () => {
     const unpinned = await route('Please explain how this workshop should be described to a new teammate.');
     expect(unpinned?.name).toBe('gemma4:26b-a4b');
 
-    const code = await route('fix the typo in the server readme');
+    // Sticky chat model: a code-ish follow-up stays on the chat's model; /auto re-routes it to the coder.
+    const sticky = await route('fix the typo in the server readme');
+    expect(sticky?.name).toBe('gemma4:26b-a4b');
+    expect(JSON.stringify(sticky?.output)).toMatch(/this chat's model/);
+    const code = await route('/auto fix the typo in the server readme');
     expect(code?.name).toBe('qwen3-coder:30b');
     const smart = await route('/smart Please explain how this workshop should be described to a new teammate.');
     expect(String(smart?.name)).toMatch(/Gemini|gemini|Flash/);
     expect(JSON.stringify(smart?.output)).toMatch(/smart model/);
+    await app.close();
+  });
+});
+
+
+const staleMap: AutoMap = { fast: 'qwen3:4b', main: 'qwen3.6-35b-a3b', coder: 'qwen3-coder:30b', thinking: '', cloud: '', embed: 'nomic-embed-text' };
+
+describe('auto role availability', () => {
+  it('resolves stale Ollama names to gemma3:4b and the llama.cpp Qwen model', () => {
+    const gemma = model({ id: 'gemma', name: 'gemma3:4b', apiName: 'gemma3:4b', sizeClass: 'small', practicalBudget: 8192, providerName: 'Ollama' });
+    const qwen = model({ id: 'qwen', name: 'Qwen3.6-35B-A3B-Q4_K_M', apiName: 'Qwen3.6-35B-A3B-Q4_K_M', providerName: 'llama-server' });
+    expect(matchAutoModel([qwen], 'qwen3.6-35b-a3b')?.id).toBe('qwen');
+    const health = autoRoleHealth(staleMap, [gemma, qwen]);
+    expect(health.ok).toBe(true);
+    const byRole = Object.fromEntries(health.roles.map((row) => [row.role, row]));
+    expect(byRole.fast?.modelId).toBe('gemma');
+    expect(byRole.fast?.fallback).toBe(true);
+    expect(byRole.fast?.note).toMatch(/qwen3:4b/);
+    expect(byRole.main?.modelId).toBe('qwen');
+    expect(byRole.main?.fallback).toBe(false);
+    expect(byRole.coder?.modelId).toBe('qwen');
+    expect(byRole.coder?.fallback).toBe(true);
+    expect(byRole.coder?.note).toMatch(/qwen3-coder:30b/);
+    expect(detectFast([gemma, qwen])?.id).toBe('gemma');
+    expect(decideAuto({ text: 'hello', map: staleMap, models: [gemma, qwen] }).modelId).toBe('gemma');
+    expect(decideAuto({ text: 'Please explain how this workshop should be described to a new teammate.', map: staleMap, models: [gemma, qwen] }).modelId).toBe('qwen');
+  });
+
+  it('prefers gpt-oss for coder when it is installed, otherwise the Qwen main model', () => {
+    const qwen = model({ id: 'qwen', name: 'Qwen3.6-35B-A3B-Q4_K_M', apiName: 'Qwen3.6-35B-A3B-Q4_K_M', providerName: 'llama-server' });
+    const oss = model({ id: 'oss', name: 'gpt-oss-20b', apiName: 'gpt-oss-20b', providerName: 'llama-server' });
+    expect(detectCoder([qwen, oss])?.id).toBe('oss');
+    expect(detectCoder([qwen])?.id).toBe('qwen');
+    expect(autoRoleHealth({ ...DEFAULT_AUTO_MAP, coder: 'gpt-oss:20b' }, [qwen, oss]).roles.find((row) => row.role === 'coder')?.modelId).toBe('oss');
+  });
+
+  it('stays green when only gemma3:4b is installed, and goes red when no chat model exists', () => {
+    const gemma = model({ id: 'gemma', name: 'gemma3:4b', apiName: 'gemma3:4b', sizeClass: 'small', practicalBudget: 8192, providerName: 'Ollama' });
+    const onlyFast = autoRoleHealth(staleMap, [gemma]);
+    expect(onlyFast.ok).toBe(true);
+    expect(onlyFast.roles.every((row) => row.available && row.modelId === 'gemma')).toBe(true);
+    const embed = model({ id: 'emb', name: 'nomic-embed-text', apiName: 'nomic-embed-text', embedding: true });
+    const empty = autoRoleHealth(staleMap, [embed]);
+    expect(empty.ok).toBe(false);
+    expect(empty.detail).toMatch(/No usable model/);
+    expect(describeAutoRoles(staleMap, []).every((row) => !row.available)).toBe(true);
+  });
+});
+
+describe('auto role health against live providers', () => {
+  it('reports the resolved mapping and stays green when Ollama lacks the configured models', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'la-roles-'));
+    dirs.push(dir);
+    const fetchImpl = (async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes('/api/tags')) return new Response(JSON.stringify({ models: [{ name: 'gemma3:4b' }] }));
+      if (url.includes('/api/ps')) return new Response(JSON.stringify({ models: [{ name: 'gemma3:4b' }] }));
+      if (url.replace(/\/$/, '').endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'Qwen3.6-35B-A3B-Q4_K_M' }] }));
+      return new Response('{}', { status: 404 });
+    }) as typeof fetch;
+    const { app, store } = await buildApp({ dataDir: dir, startScheduler: false, serveWeb: false, fetchImpl });
+    const setup = await app.inject({ method: 'POST', url: '/api/setup', payload: { username: 'asaf', password: ['fixture', 'owner', '11'].join('-') } });
+    const cookies = { la_session: setup.cookies.find((item) => item.name === 'la_session')!.value };
+    store.upsertProvider({ id: 'prov_ollama', kind: 'openai_compat', name: 'Ollama', baseUrl: 'http://127.0.0.1:11434/v1', enabled: true });
+    store.upsertProvider({ id: 'prov_llama', kind: 'openai_compat', name: 'llama-server', baseUrl: 'http://127.0.0.1:8080/v1', enabled: true });
+    const add = (id: string, providerId: string, name: string, size: 'small' | 'large') => store.upsertModel({
+      id, providerId, name, apiName: name, profileId: id, tokenizer: 'approx', contextWindow: 32768, practicalBudget: size === 'small' ? 8192 : 32768,
+      strategy: 'rolling', sizeClass: size, local: true, modalities: ['text'], strengths: ['chat'], typicalQ4GiB: size === 'large' ? 22 : 3,
+      priceIn: 0, priceOut: 0, notes: '', parameterSize: null, family: 'test', source: 'discovered', embedding: false, freeTier: null, enabled: true,
+    });
+    add('gemma', 'prov_ollama', 'gemma3:4b', 'small');
+    add('qwen', 'prov_llama', 'Qwen3.6-35B-A3B-Q4_K_M', 'large');
+    store.saveSettings({ ...store.getSettings(), autoModels: staleMap }, 'stale roles', {});
+    const health = await app.inject({ method: 'GET', url: '/api/debug/health', cookies });
+    expect(health.statusCode).toBe(200);
+    const roles = (health.json() as { checks: { id: string; ok: boolean; detail: string; roles?: { role: string; modelName?: string; fallback: boolean }[] }[] }).checks.find((check) => check.id === 'roles');
+    expect(roles?.ok).toBe(true);
+    expect(roles?.detail).toMatch(/gemma3:4b/);
+    expect(roles?.detail).toMatch(/Qwen3\.6-35B-A3B-Q4_K_M|qwen3/i);
+    expect(roles?.detail).not.toMatch(/Ollama does not have/);
+    const models = await app.inject({ method: 'GET', url: '/api/models', cookies });
+    const report = models.json() as { autoRoles?: { ok: boolean; roles: { role: string; modelName?: string; fallback: boolean }[] } };
+    expect(report.autoRoles?.ok).toBe(true);
+    const coder = report.autoRoles?.roles.find((row) => row.role === 'coder');
+    expect(coder?.modelName).toMatch(/Qwen3\.6-35B-A3B/i);
+    expect(coder?.fallback).toBe(true);
     await app.close();
   });
 });

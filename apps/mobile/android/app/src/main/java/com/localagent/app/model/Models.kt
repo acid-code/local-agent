@@ -62,6 +62,14 @@ data class ApprovalItem(
     val runId: String,
     val toolName: String,
     val reason: String,
+    /** safe | low | medium | high. Anything the server did not label counts as high. */
+    val risk: String = "high",
+    /** The command, path or action that will run, secrets redacted by the server. */
+    val summary: String = "",
+    val sessionId: String? = null,
+    val sessionTitle: String? = null,
+    val agentName: String? = null,
+    val createdAt: String = "",
 )
 
 data class LiveStreamSnapshot(
@@ -69,6 +77,7 @@ data class LiveStreamSnapshot(
     val thinking: String = "",
     val status: String = "",
     val detail: String = "",
+    val waitInfo: org.json.JSONObject? = null,
 )
 
 data class EditDiff(

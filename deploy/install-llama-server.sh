@@ -70,10 +70,16 @@ fi
 
 # A running binary cannot be overwritten (ETXTBSY), so stop first.
 systemctl stop llama-server 2>/dev/null || true
+systemctl stop llama-uncensored 2>/dev/null || true
 
 mkdir -p "$TARGET/bin" "$TARGET/models"
 echo "Installing llama-server binaries and libs from $BUILD_SRC -> $TARGET/bin"
 cp -a "$BUILD_SRC"/. "$TARGET/bin/"
+mkdir -p "$TARGET/uncensored-bin"
+if [[ -d "$REPO_ROOT/deploy/llama-inkling-bin" && -x "$REPO_ROOT/deploy/llama-inkling-bin/llama-server" ]]; then
+  echo "Installing packaged uncensored llama-server binaries and libs"
+  cp -a "$REPO_ROOT/deploy/llama-inkling-bin"/. "$TARGET/uncensored-bin/"
+fi
 
 if [[ -n "$MODEL_SRC" && -d "$MODEL_SRC" ]]; then
   echo "Linking GGUF models from $MODEL_SRC -> $TARGET/models"
@@ -85,7 +91,21 @@ if [[ -n "$MODEL_SRC" && -d "$MODEL_SRC" ]]; then
   done
 fi
 
+# Inkling fallback assets are external GGUFs; link them into /opt when present.
+for src in \
+  "$MODEL_SRC/Inkling-2-Mini-Uncensored-AD-Q4_K.gguf" \
+  "$MODEL_SRC/mmproj-Inkling-2-Mini-Uncensored-F16.gguf" \
+  "$MODEL_SRC/dspark-Inkling-2-Mini-Q8_0.gguf" \
+  "$APU_ROOT/models/Inkling-2-Mini-Uncensored-AD-Q4_K.gguf" \
+  "$APU_ROOT/models/mmproj-Inkling-2-Mini-Uncensored-F16.gguf" \
+  "$APU_ROOT/models/dspark-Inkling-2-Mini-Q8_0.gguf"; do
+  [[ -f "$src" ]] || continue
+  ln -sfn "$src" "$TARGET/models/$(basename "$src")"
+done
+
 install -m 0755 "$REPO_ROOT/deploy/llama-server-run.sh" "$TARGET/run.sh"
+install -m 0755 "$REPO_ROOT/deploy/llama-uncensored-run.sh" "$TARGET/uncensored-run.sh"
+install -m 0755 "$REPO_ROOT/deploy/llama-fallback-control.py" "$TARGET/fallback-control.py"
 install -m 0755 "$REPO_ROOT/deploy/llama-server-guard.sh" "$TARGET/guard.sh"
 install -m 0755 "$REPO_ROOT/deploy/llama-server-netguard.sh" "$TARGET/netguard.sh"
 chown -R "$APP_USER:$APP_USER" "$TARGET"
@@ -176,6 +196,8 @@ if [[ "$FIREWALL" -eq 1 ]]; then
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
     for net in $DOCKER_NETS; do
       ufw allow from "$net" to any port "$PORT" proto tcp comment 'llama-server from Docker'
+      ufw allow from "$net" to any port 8081 proto tcp comment 'uncensored llama-server from Docker'
+      ufw allow from "$net" to any port 8082 proto tcp comment 'llama fallback control from Docker'
     done
     for ifc in $DENY_IFACES; do
       ip link show "$ifc" >/dev/null 2>&1 || continue
@@ -191,10 +213,15 @@ fi
 # ---------- 5. systemd ----------
 sed "s/^User=.*/User=$APP_USER/; s/^Group=.*/Group=$APP_USER/" \
   "$REPO_ROOT/deploy/llama-server.service" > /etc/systemd/system/llama-server.service
+sed "s/^User=.*/User=$APP_USER/; s/^Group=.*/Group=$APP_USER/" \
+  "$REPO_ROOT/deploy/llama-uncensored.service" > /etc/systemd/system/llama-uncensored.service
+install -m 0644 "$REPO_ROOT/deploy/llama-fallback-control.service" /etc/systemd/system/llama-fallback-control.service
 getent group render >/dev/null && usermod -aG render,video "$APP_USER" || true
 systemctl daemon-reload
 systemctl enable llama-server
 systemctl restart llama-server
+systemctl enable llama-fallback-control
+systemctl restart llama-fallback-control
 
 echo "Waiting for llama-server to load the model..."
 ok=0
@@ -207,5 +234,34 @@ if [[ "$ok" -eq 1 ]]; then
   curl -fsS "http://127.0.0.1:$PORT/v1/models" || true; echo
 else
   echo "llama-server did not answer yet. Check: journalctl -u llama-server -n 50" >&2
+fi
+
+UNCENSORED_MODEL="$TARGET/models/Inkling-2-Mini-Uncensored-AD-Q4_K.gguf"
+UNCENSORED_MMPROJ="$TARGET/models/mmproj-Inkling-2-Mini-Uncensored-F16.gguf"
+UNCENSORED_DRAFT="$TARGET/models/dspark-Inkling-2-Mini-Q8_0.gguf"
+if [[ -f "$UNCENSORED_MODEL" && -x "$TARGET/uncensored-bin/llama-server" ]]; then
+  cat > /etc/default/llama-uncensored <<EOF
+# Automatic uncensored fallback for local-agent (llama-server on 8081).
+LLAMA_UNCENSORED_HOST=0.0.0.0
+LLAMA_UNCENSORED_PORT=8081
+LLAMA_UNCENSORED_BIN=$TARGET/uncensored-bin/llama-server
+LLAMA_UNCENSORED_MODEL=$UNCENSORED_MODEL
+LLAMA_UNCENSORED_MMPROJ=$UNCENSORED_MMPROJ
+LLAMA_UNCENSORED_DRAFT_MODEL=$UNCENSORED_DRAFT
+LLAMA_UNCENSORED_DRAFT_N_MAX=1
+LLAMA_UNCENSORED_DRAFT_N_MIN=1
+LLAMA_UNCENSORED_DRAFT_P_MIN=0.00
+LLAMA_UNCENSORED_CTX=32768
+LLAMA_UNCENSORED_UBATCH=512
+LLAMA_UNCENSORED_BATCH=512
+LLAMA_UNCENSORED_THREADS=12
+LLAMA_UNCENSORED_ALIAS=inkling-2-mini-uncensored
+EOF
+  systemctl daemon-reload
+  systemctl disable llama-uncensored 2>/dev/null || true
+  systemctl stop llama-uncensored 2>/dev/null || true
+  echo "Uncensored llama-server is installed but inactive; local-agent starts it only after a Qwen refusal."
+else
+  echo "Uncensored fallback not installed: add the Inkling GGUF/MMProj/draft files to $TARGET/models." >&2
 fi
 echo "Config: $CONF | Logs: journalctl -u llama-server -f"

@@ -62,6 +62,16 @@
       window.localAgent.getAppInfo().then((info) => {
         document.querySelector('#app-version').textContent = `local-agent ${info.version}${info.packaged ? '' : ' · development build'}`;
       }).catch(() => {});
+      const describe = (s) => ({
+        development: 'Development build: updates are off.',
+        checking: 'Checking for updates…',
+        'up-to-date': 'You are up to date.',
+        downloading: `Downloading ${s.version || 'update'}… ${s.percent || 0}%`,
+        downloaded: `Version ${s.version} is ready. Restart to install.`,
+        'portable-available': `Version ${s.version} is out. Download it from the release page.`,
+        error: s.error || 'Update check failed.',
+      })[s.state] || '';
+      window.localAgent.onUpdateStatus?.((s) => { note.textContent = describe(s); });
       document.querySelector('#check-update').addEventListener('click', async (event) => {
         const button = event.currentTarget;
         button.disabled = true;
@@ -70,6 +80,7 @@
         button.disabled = false;
         button.textContent = 'Check for updates';
         if (!result.ok) note.textContent = result.error || 'Update check failed.';
+        else note.textContent = describe(result.result || {});
       });
       const go = document.querySelector('#go');
       document.querySelectorAll('.chip').forEach((chip) => chip.addEventListener('click', () => { input.value = chip.dataset.url; input.focus(); }));

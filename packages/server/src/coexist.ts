@@ -20,6 +20,28 @@ export function isLlamaServerProvider(provider: Pick<ProviderRow, 'id' | 'name' 
   return provider.id === 'prov_llama' || /llama[-_ ]?server/i.test(provider.name);
 }
 
+export function isUncensoredProvider(provider: Pick<ProviderRow, 'id' | 'name' | 'kind' | 'baseUrl'>): boolean {
+  if (provider.kind !== 'openai_compat') return false;
+  return provider.id === 'prov_uncensored'
+    || /uncensored|unfiltered/i.test(provider.name)
+    || /:8081(?:\/|$)/.test(provider.baseUrl || '');
+}
+
+/** Embedding / reranker models: they cannot chat. */
+export function isEmbeddingName(name: string): boolean {
+  return /embed|rerank|\bbge[-_:]|\bbge$|minilm|\be5[-_]|gte[-_]/i.test(name);
+}
+
+/**
+ * True for models that cannot hold a chat turn: embeddings, rerankers, OCR, speech (TTS/ASR) and CLIP-style encoders.
+ * Auto routing and helper sub-agents must never pick these (e.g. nomic-embed-text was being given chat turns).
+ */
+export function isNonChatModel(model: { name: string; apiName: string; embedding?: boolean }): boolean {
+  if (model.embedding) return true;
+  const label = `${model.name} ${model.apiName}`;
+  return isEmbeddingName(label) || /(?:^|[-_:/\s])ocr(?:$|[-_:\s])|paddleocr|tesseract|\btts\b|piper|kokoro|whisper|parakeet|\bclip\b|siglip/i.test(label);
+}
+
 /** Size of a model on the GPU, from its profile or its name (e.g. "20b" → ~13 GiB). */
 export function modelGiB(model: Pick<ModelRow, 'apiName' | 'typicalQ4GiB'>): number {
   if (model.typicalQ4GiB && model.typicalQ4GiB > 0) return model.typicalQ4GiB;
@@ -49,29 +71,73 @@ export class LlamaWatch {
     return this.store.listModels().find((m) => m.providerId === provider.id && m.enabled && !m.embedding);
   }
 
+  uncensoredModel(): ModelRow | undefined {
+    const provider = this.store.listProviders().find((p) =>
+      p.enabled && isUncensoredProvider(p)
+      && this.store.listModels().some((m) => m.providerId === p.id && m.enabled && !m.embedding),
+    );
+    if (!provider) return undefined;
+    return this.store.listModels().find((m) => m.providerId === provider.id && m.enabled && !m.embedding);
+  }
+
+  async switchToUncensored(): Promise<boolean> {
+    return this.callFallbackControl('/switch-uncensored');
+  }
+
+  async switchToQwen(): Promise<boolean> {
+    return this.callFallbackControl('/switch-qwen');
+  }
+
+  /** POST to the host's llama fallback-control service, sending the shared token when one is configured. */
+  private async callFallbackControl(path: string): Promise<boolean> {
+    const configured = process.env.LLAMA_FALLBACK_CONTROL_URL?.trim();
+    const url = (configured || 'http://host.docker.internal:8082').replace(/\/$/, '');
+    const token = process.env.LLAMA_FALLBACK_TOKEN?.trim();
+    try {
+      const response = await this.fetchImpl(`${url}${path}`, {
+        method: 'POST',
+        headers: token ? { 'X-Fallback-Token': token } : undefined,
+        signal: AbortSignal.timeout(180_000),
+      });
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  private uncensoredProvider(): ProviderRow | undefined {
+    const models = this.store.listModels();
+    return this.store.listProviders().find((p) => p.enabled && isUncensoredProvider(p)
+      && models.some((m) => m.providerId === p.id && m.enabled && !m.embedding));
+  }
+
   /**
-   * True while llama-server answers. Before the first health check it assumes "up" when the provider is
-   * configured: blocking a big Ollama load for one turn is cheap, a frozen host is not.
+   * True while either llama-server model holds the GPU: Qwen (:8080) or the uncensored model (:8081).
+   * Only Qwen used to count, so while the uncensored model was loaded (Qwen stopped) Auto happily loaded
+   * gemma4 (~18 GB) in Ollama next to it, and the chat sat on "waiting for memory" or the host froze.
+   * Before the first health check it assumes "up" when a provider is configured: blocking a big Ollama
+   * load for one turn is cheap, a frozen host is not.
    */
   isActive(): boolean {
-    const provider = this.provider();
-    if (!provider) return false;
+    if (!this.provider() && !this.uncensoredProvider()) return false;
     if (Date.now() - this.checkedAt > this.ttlMs) void this.refresh();
     return this.active ?? true;
   }
 
   async refresh(): Promise<boolean> {
-    const provider = this.provider();
-    if (!provider?.baseUrl) {
+    const bases = [this.provider(), this.uncensoredProvider()].map((p) => p?.baseUrl).filter((url): url is string => Boolean(url));
+    if (!bases.length) {
       this.active = false;
       return false;
     }
     if (!this.pending) {
       this.checkedAt = Date.now();
-      const root = provider.baseUrl.replace(/\/$/, '').replace(/\/v1$/, '');
-      this.pending = this.fetchImpl(`${root}/health`, { signal: AbortSignal.timeout(2500) })
-        .then((r) => { this.active = r.ok; })
-        .catch(() => { this.active = false; })
+      const ping = (base: string) => {
+        const root = base.replace(/\/$/, '').replace(/\/v1$/, '');
+        return this.fetchImpl(`${root}/health`, { signal: AbortSignal.timeout(2500) }).then((r) => r.ok).catch(() => false);
+      };
+      this.pending = Promise.all(bases.map(ping))
+        .then((states) => { this.active = states.some(Boolean); })
         .finally(() => { this.pending = null; });
     }
     await this.pending;
