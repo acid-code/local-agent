@@ -108,17 +108,20 @@ fun ApprovalCard(
                     onClick = onDeny,
                     modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                     shape = RoundedCornerShape(14.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                 ) {
-                    Icon(Icons.Default.Close, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Deny")
+                    Icon(Icons.Default.Close, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp))
+                    Text("Deny", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
                 }
                 Button(
                     onClick = { if (ApprovalPolicy.needsConfirm(item.risk)) confirming = true else onApprove() },
                     modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                     shape = RoundedCornerShape(14.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                     colors = if (item.risk == "high") ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError) else ButtonDefaults.buttonColors(),
                 ) {
                     Icon(Icons.Default.Check, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp))
-                    Text(if (ApprovalPolicy.needsConfirm(item.risk)) "Review…" else "Approve")
+                    Text(if (ApprovalPolicy.needsConfirm(item.risk)) "Review…" else "Approve", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
                 }
             }
         }

@@ -125,13 +125,33 @@ describe('shared workbench', () => {
     expect(workbenchEnabled({})).toBe(true);
   });
 
-  it('gates apt install as high risk with "affects all personas" text', () => {
+  it('gates apt install as high risk with "affects all personas" text and does not flag JS => arrows as redirects', () => {
     const r1 = riskOf('shell', { command: 'apt install -y jq' }, null);
     expect(r1.tier).toBe('high');
     expect(r1.why).toContain('affects all personas');
     const r2 = riskOf('shell', { command: 'apt-get install ripgrep' }, null);
     expect(r2.tier).toBe('high');
     expect(r2.why).toContain('affects all personas');
+    const r3 = riskOf('shell', { command: "node -e \"https.get('https://example.com', res => console.log(res.statusCode))\"" }, null);
+    expect(r3.tier).toBe('low');
+  });
+
+  it('mounts and executes commands inside projectsDir (/projects/<repo>) in the shared workbench', async () => {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'la-wb-ws-'));
+    const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'la-wb-proj-'));
+    const repoDir = path.join(proj, 'fb-marketplace-scraper');
+    fs.mkdirSync(repoDir, { recursive: true });
+    const { docker, execCalls, startedSpecs } = fakeDocker();
+    const wb = new Workbench(docker, ws, () => null, (p) => p, proj);
+
+    const res = await wb.run('npm ping', repoDir);
+    expect(res).toEqual({ output: 'ran in /projects/fb-marketplace-scraper', code: 0 });
+    expect(startedSpecs[0].HostConfig.Binds).toContain(`${proj}:/projects`);
+    expect(execCalls.find((c) => c.cmd[2]?.includes('npm ping'))?.cwd).toBe('/projects/fb-marketplace-scraper');
+
+    await wb.stop();
+    fs.rmSync(ws, { recursive: true, force: true });
+    fs.rmSync(proj, { recursive: true, force: true });
   });
 
   it('queues chat before background (FIFO within priority) and enforces max 2 resident models', async () => {

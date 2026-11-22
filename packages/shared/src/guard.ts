@@ -19,7 +19,7 @@ const MUTATING: RegExp[] = [
   /\b(mount|umount)\b/i,
   /\b(kill|pkill)\b/i,
   /\bdocker\b[^\n]*\b(rm|rmi|system|prune|kill)\b/i,
-  /(^|[^&])>{1,2}/,
+  /(^|[^&=])>{1,2}/,
   /\bgit\s+push\b/i,
   /\bnpm\s+publish\b/i,
   /\btee\b/i,
