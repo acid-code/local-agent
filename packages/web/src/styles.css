@@ -2271,3 +2271,115 @@ button.state-card:hover, a.state-card:hover { background: var(--bg-3); }
   content-visibility: auto;
   contain-intrinsic-size: auto 220px;
 }
+
+/* ── Layout and controls pass (2026-11): headers that never scroll away, a trace you can always close, one control system ── */
+
+/* Chats drawer: the title, New chat and search stay put; only the list scrolls. */
+.chat.v2 .rail.open { overflow: hidden; }
+.chat.v2 .rail.open .session-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 12px; }
+.chat.v2 .rail.open > .sheet-head,
+.chat.v2 .rail.open > .rail-actions,
+.chat.v2 .rail.open > .rail-search { flex: none; }
+.chat.v2 .rail.open > .sheet-head { display: flex; align-items: center; justify-content: space-between; min-height: 40px; }
+
+/* Trace: a sheet with a real header (Back, title, Close) that sits below the desktop title bar and does not scroll away. */
+.chat.v2.with-trace .trace { overflow: hidden; padding: 0; gap: 0; }
+.chat.v2.with-trace .trace > .sheet-head.trace-head {
+  display: flex; align-items: center; gap: 6px; flex: none;
+  min-height: 52px; padding: 8px 10px;
+  padding-top: max(8px, env(safe-area-inset-top));
+  border-bottom: 1px solid var(--line); background: var(--bg-2);
+}
+.chat.v2.with-trace .trace > .sheet-head.trace-head strong { font-size: var(--t-title); font-weight: 600; }
+.chat.v2.with-trace .trace > :not(.sheet-head) { margin-inline: 14px; }
+.chat.v2.with-trace .trace > .faint { margin-top: 12px; }
+.chat.v2.with-trace .trace { overflow-y: auto; }
+.chat.v2.with-trace .trace > .sheet-head.trace-head { position: sticky; top: 0; z-index: 1; }
+.chat.v2.with-trace .trace .step { padding: 10px 0; border-bottom: 1px solid var(--line); }
+:root[data-desktop="win"] .chat.v2.with-trace .trace,
+:root[data-desktop="linux"] .chat.v2.with-trace .trace { top: 40px; height: calc(100dvh - 40px); }
+.chat.v2.with-trace .scrim { display: block; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.32); z-index: 35; }
+:root[data-desktop="win"] .chat.v2.with-trace .scrim,
+:root[data-desktop="linux"] .chat.v2.with-trace .scrim { top: 40px; }
+.flip-rtl:dir(rtl) { transform: scaleX(-1); }
+
+/* One control system: 36px round icon buttons, 32px pills, the same hover and focus everywhere, in both schemes. */
+.chat.v2 .thread-head .icon-btn,
+.chat.v2 .composer-bar .icon-btn,
+.chat.v2 .composer-bar .icon-btn.round {
+  width: 36px; height: 36px; min-width: 36px; padding: 0;
+  border-radius: 999px; border: 1px solid transparent; background: transparent; color: var(--muted);
+}
+.chat.v2 .thread-head .icon-btn:hover:not(:disabled),
+.chat.v2 .composer-bar .icon-btn:hover:not(:disabled) { background: var(--bg-3); color: var(--text); }
+.chat.v2 .composer-bar .composer-plus { background: var(--bg-3); color: var(--text); }
+.chat.v2 .composer-bar .icon-btn.primary-fill { background: var(--persona, var(--brass)); color: #fff; }
+:root[data-scheme="dark"] .chat.v2 .composer-bar .icon-btn.primary-fill { color: #0e0f11; }
+.chat.v2 .composer-bar .icon-btn.primary-fill:disabled { background: var(--bg-3); color: var(--faint); opacity: 1; }
+/* "On" is a selected state, not an error: tint with the accent, not coral. */
+.icon-btn.on, .chat.v2 .thread-head .icon-btn.on, .chat.v2 .composer-bar .icon-btn[aria-pressed="true"] {
+  color: var(--brass); background: rgba(var(--brass-rgb), 0.14); border-color: rgba(var(--brass-rgb), 0.35);
+}
+.chat.v2 .composer-bar .pill,
+.chat.v2 .composer-bar .model-trigger,
+.chat.v2 .composer-bar .ctx-ring-btn { min-height: 32px; height: 32px; border-radius: 999px; padding-inline: 10px; border: 1px solid var(--line); background: transparent; }
+.chat.v2 .composer-bar .pill:hover,
+.chat.v2 .composer-bar .model-trigger:hover,
+.chat.v2 .composer-bar .ctx-ring-btn:hover { background: var(--bg-3); color: var(--text); }
+.chat.v2 .thread-head .persona-name { min-height: 36px; }
+.btn { min-height: 36px; border-radius: calc(10px * var(--round)); }
+.btn.small { min-height: 30px; }
+:root[data-scheme="light"] .btn:not(.primary):not(.ghost):not(.danger) { background: var(--bg-2); border-color: rgba(var(--text-rgb), 0.16); }
+:root[data-scheme="light"] .icon-btn.round { border-color: rgba(var(--text-rgb), 0.14); }
+:root[data-scheme="light"] .chat.v2 .thread-head .persona-name { box-shadow: none; }
+/* Keyboard focus is always visible and the same everywhere. */
+.btn:focus-visible, .icon-btn:focus-visible, .pill:focus-visible, .model-trigger:focus-visible, .ctx-ring-btn:focus-visible, .menu-item:focus-visible, .session-item:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: 2px solid rgba(var(--brass-rgb), 0.75); outline-offset: 2px;
+}
+.icon-btn svg, .btn svg { flex: none; }
+.chat.v2 .trace-head .head-spacer { flex: 1; }
+
+/* Wait card: the GPU queue reads as calm info (no Force), the RAM wait keeps its warning look. */
+.wait-banner { flex-wrap: wrap; }
+.wait-banner.queue { border-color: rgba(var(--sky-rgb), 0.35); background: rgba(var(--sky-rgb), 0.08); }
+.wait-banner.queue strong::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-inline-end: 8px; border-radius: 50%; background: var(--sky); animation: pulse 1.6s ease-in-out infinite; vertical-align: middle; }
+.wait-confirm { flex-basis: 100%; margin-top: 10px; padding: 10px 12px; border-radius: calc(10px * var(--round)); border: 1px solid rgba(var(--coral-rgb), 0.45); background: rgba(var(--coral-rgb), 0.08); }
+.wait-confirm p { margin: 0 0 8px; color: var(--text); }
+
+/* ── Copilot-style work steps: one calm, collapsible block per stretch of agent work ── */
+.work-group { margin: 4px 0 18px; max-width: 100%; }
+.work-head { display: inline-flex; align-items: center; gap: 8px; min-height: 32px; padding: 4px 8px 4px 4px; margin-inline-start: -4px; border: 0; background: transparent; color: var(--muted); font-size: var(--t-meta); border-radius: calc(8px * var(--round)); cursor: pointer; }
+.work-head:hover { color: var(--text); background: var(--bg-2); }
+.work-chev { flex: none; transition: transform .18s var(--ease); }
+.work-group.open .work-chev { transform: rotate(90deg); }
+.work-chev:dir(rtl) { transform: scaleX(-1); }
+.work-group.open .work-chev:dir(rtl) { transform: rotate(90deg); }
+.work-title { font-weight: 500; }
+.work-diffstat { font-size: calc(12px * var(--fs)); }
+.work-diffstat .add { color: var(--moss); }
+.work-diffstat .del { color: var(--coral); }
+.work-live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--brass); animation: pulse 1.4s ease-in-out infinite; }
+.work-rows { list-style: none; margin: 6px 0 0; padding: 2px 0 2px 0; margin-inline-start: 11px; padding-inline-start: 16px; border-inline-start: 1px solid var(--line-strong); display: flex; flex-direction: column; gap: 4px; animation: menu-in-down .18s var(--ease); }
+.work-step { margin: 0; }
+.work-row { width: 100%; display: flex; align-items: center; gap: 9px; min-height: 34px; padding: 5px 8px; margin-inline-start: -8px; border: 0; background: transparent; color: var(--text); text-align: start; border-radius: calc(8px * var(--round)); cursor: pointer; font-size: calc(14px * var(--fs)); line-height: 1.4; }
+.work-row:hover { background: var(--bg-2); }
+.work-icon { flex: none; color: var(--faint); }
+.work-verb { flex: none; color: var(--text); }
+.work-target { color: var(--muted); min-width: 0; }
+.work-spacer { flex: 1; }
+.work-time { flex: none; font-size: calc(12px * var(--fs)); font-variant-numeric: tabular-nums; }
+.work-file { display: inline-flex; align-items: center; gap: 4px; flex: none; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line-strong); background: var(--bg-2); color: var(--muted); font-size: calc(12px * var(--fs)); }
+.work-step.failed .work-icon, .work-step.failed .work-verb { color: var(--coral); }
+.work-step.pending .work-icon { color: var(--brass); animation: pulse 1.4s ease-in-out infinite; }
+.work-detail { margin: 4px 0 10px; padding: 10px 12px; border-radius: calc(10px * var(--round)); background: var(--code-bg); border: 1px solid var(--line); }
+.work-detail.think { white-space: pre-wrap; color: var(--muted); font-size: var(--t-meta); line-height: 1.55; background: var(--bg-2); }
+.work-detail pre { margin: 0 0 8px; max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-size: calc(12px * var(--fs)); color: var(--text); }
+.work-detail-label { margin: 2px 0 4px; font-size: calc(11px * var(--fs)); letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
+.work-narration { margin: 8px 0 10px; color: var(--text); font-size: var(--t-body); line-height: 1.6; }
+.work-narration p { margin: 0 0 6px; }
+:root[data-scheme="light"] .work-detail { background: rgba(var(--text-rgb), 0.035); }
+@media (max-width: 640px) {
+  .work-rows { margin-inline-start: 8px; padding-inline-start: 12px; }
+  .work-row { min-height: 40px; font-size: calc(14px * var(--fs)); flex-wrap: wrap; row-gap: 2px; }
+  .work-file { max-width: 140px; }
+}

@@ -17,6 +17,7 @@ import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
+import com.localagent.app.approvals.ApprovalNotifier
 import com.localagent.app.ui.ChatViewModel
 import com.localagent.app.ui.LocalAgentApp
 import com.localagent.app.ui.LocalAgentTheme
@@ -42,7 +43,9 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         requestRuntimePermissions()
         scheduleApprovalPoll()
+        ApprovalNotifier.ensureChannel(this)
         consumeShareIntent(intent)
+        consumeApprovalIntent(intent)
 
         setContent {
             LocalAgentTheme {
@@ -56,7 +59,30 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         consumeShareIntent(intent)
+        consumeApprovalIntent(intent)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        AppVisibility.foreground = true
+        vm.setForeground(true)
+    }
+
+    override fun onStop() {
+        AppVisibility.foreground = false
+        vm.setForeground(false)
+        // Pick up anything that arrives while the app is closed sooner than the 15-minute floor.
+        ApprovalWorker.scheduleFollowUp(applicationContext)
+        super.onStop()
+    }
+
+    /** A tap on an approval notification (or its Review button) opens that exact approval. */
+    private fun consumeApprovalIntent(intent: Intent?) {
+        val id = intent?.getStringExtra(ApprovalNotifier.EXTRA_APPROVAL_ID) ?: return
+        intent.removeExtra(ApprovalNotifier.EXTRA_APPROVAL_ID)
+        vm.focusApproval(id)
     }
 
     private fun consumeShareIntent(intent: Intent?) {

@@ -2,6 +2,12 @@ package com.localagent.app.ui
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
+import androidx.compose.material3.Typography
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
@@ -27,6 +33,7 @@ private val NightScheme = darkColorScheme(
     secondary = AccentMint,
     onSecondary = Color(0xFF0A1914),
     tertiary = AccentGold,
+    onTertiary = Color(0xFF1A140C),
     background = Color(0xFF000000),
     onBackground = Color(0xFFF3F4F6),
     surface = Color(0xFF101114),
@@ -43,7 +50,8 @@ private val DayScheme = lightColorScheme(
     onPrimary = Color.White,
     secondary = Color(0xFF2C7F63),
     onSecondary = Color.White,
-    tertiary = Color(0xFF6D4CC9),
+    tertiary = Color(0xFF9A6516),
+    onTertiary = Color.White,
     background = Color(0xFFF7F7F5),
     onBackground = Color(0xFF17191E),
     surface = Color(0xFFFFFFFF),
@@ -55,9 +63,31 @@ private val DayScheme = lightColorScheme(
     onError = Color.White,
 )
 
+/** Phone type scale: 16sp body with roomy line height, clear titles, and labels that stay readable at arm's length. */
+private val AppTypography = Typography().let { base ->
+    base.copy(
+        headlineSmall = base.headlineSmall.copy(fontSize = 24.sp, lineHeight = 30.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.2).sp),
+        titleLarge = base.titleLarge.copy(fontSize = 20.sp, lineHeight = 26.sp, fontWeight = FontWeight.SemiBold),
+        titleMedium = base.titleMedium.copy(fontSize = 17.sp, lineHeight = 22.sp),
+        bodyLarge = base.bodyLarge.copy(fontSize = 16.sp, lineHeight = 24.sp),
+        bodyMedium = base.bodyMedium.copy(fontSize = 15.sp, lineHeight = 22.sp),
+        bodySmall = base.bodySmall.copy(fontSize = 13.sp, lineHeight = 18.sp),
+        labelLarge = base.labelLarge.copy(fontSize = 15.sp, fontWeight = FontWeight.SemiBold),
+        labelMedium = base.labelMedium.copy(fontSize = 13.sp),
+    )
+}
+
+private val AppShapes = Shapes(
+    extraSmall = RoundedCornerShape(8.dp),
+    small = RoundedCornerShape(12.dp),
+    medium = RoundedCornerShape(16.dp),
+    large = RoundedCornerShape(22.dp),
+    extraLarge = RoundedCornerShape(28.dp),
+)
+
 @Composable
 fun LocalAgentTheme(dark: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
-    MaterialTheme(colorScheme = if (dark) NightScheme else DayScheme, content = content)
+    MaterialTheme(colorScheme = if (dark) NightScheme else DayScheme, typography = AppTypography, shapes = AppShapes, content = content)
 }
 
 fun hexToColor(raw: String?, fallback: Color = AccentGold): Color {

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Menu as DropMenu } from '../components/ui';
 import { ModelPicker, useUsableModels } from '../lib/models';
 import { browserDictationSupported, startDictation } from '../lib/dictation';
-import { ScanText, AtSign, Info, Layers, Brain, Check, ChevronDown, Code2, Copy, Download, Eye, FileText, Folder, FolderGit2, GitBranch, Headphones, ListTree, Menu, MessageSquare, MessageSquarePlus, Pin, PinOff, Plus, Search, Mic, PanelRight, Paperclip, Pencil, Quote, RotateCcw, Send, Share, Square, Trash2, Volume2, Wrench, X } from 'lucide-react';
+import { ArrowLeft, ScanText, AtSign, Info, Layers, Brain, Check, ChevronDown, Code2, Copy, Download, Eye, FileText, Folder, FolderGit2, GitBranch, Headphones, ListTree, Menu, MessageSquare, MessageSquarePlus, Pin, PinOff, Plus, Search, Mic, PanelRight, Paperclip, Pencil, Quote, RotateCcw, Send, Share, Square, Trash2, Volume2, Wrench, X } from 'lucide-react';
 import { CiteContext, type CiteHandlers } from '../components/Markdown';
 import { FileViewer, type QuotePick, type ViewerSource } from '../components/FileViewer';
 import { MentionPicker, type MentionPick } from '../components/MentionPicker';
@@ -17,8 +17,10 @@ import { PersonaPanel, useWorkspaces, type PanelAgent } from '../components/Pers
 import { PersonaChip, greetingFor, startersFor } from '../components/ChatChips';
 import { ContextPanel } from '../components/ContextPanel';
 import { ContextRing } from '../components/ContextRing';
+import { WorkGroupView } from '../components/WorkSteps';
+import { groupWork } from '../lib/work-steps';
 import { ContextNudgeBanner, DecisionTimeline, BulkDiffCard, LocalRepoPicker, MiniAgentStrip, type MiniAgentRow } from '../components/ChatUpgrades';
-import { parseSources, toolSummary, type ContextBreakdown } from '@local-agent/shared';
+import { parseSources, toolSummary, waitStateOf, waitedFor, type ContextBreakdown } from '@local-agent/shared';
 import { toast, errorText } from '../lib/toast';
 import { copyText } from '../lib/files';
 import { speak, subscribeSpeaking } from '../lib/speak';
@@ -30,7 +32,7 @@ import { t, fmt } from '../i18n';
 
 interface Session { id: string; title: string; agentId: string | null; mode: 'chat' | 'code'; workshopId?: string | null; modelPin?: string | null; updatedAt?: string }
 type Agent = PanelAgent & FaceAgent;
-interface Message { id: string; role: string; content: string; createdAt?: string; agentId?: string | null; toolName?: string | null; routingNote?: string | null; thinking?: string | null; toolCalls?: { name: string }[] | null }
+interface Message { id: string; role: string; content: string; createdAt?: string; agentId?: string | null; toolName?: string | null; toolCallId?: string | null; runId?: string | null; routingNote?: string | null; thinking?: string | null; toolCalls?: { id?: string; name: string; arguments?: string }[] | null }
 interface Step { id: string; kind: string; name: string; status: string; latencyMs?: number; output?: unknown; error?: string | null }
 interface Plan { id: string; items: { id: string; text: string; status: string; note?: string | null }[]; canUndo?: boolean }
 interface Edit { id: string; runId: string | null; label: string; diff: string; revertedAt: string | null; keptAt: string | null; keptFiles: string[]; revertedFiles: string[] }
@@ -78,6 +80,10 @@ export function Chat() {
   const { models: usable, all: models, loaded: modelsLoaded } = modelState;
   const [modelPin, setModelPin] = useState<string | null>(null);
   const [loadingNote, setLoadingNote] = useState('');
+  // What a waiting run waits for: the large-model queue or RAM (see waitStateOf).
+  const [waitInfo, setWaitInfo] = useState<unknown>(null);
+  const [confirmForce, setConfirmForce] = useState(false);
+  const [, setWaitTick] = useState(0);
   const [breakdown, setBreakdown] = useState<ContextBreakdown | null>(null);
   const [miniAgents, setMiniAgents] = useState<MiniAgentRow[]>([]);
   const [nudgeDismissed, setNudgeDismissed] = useState(false);
@@ -202,6 +208,7 @@ export function Chat() {
         setStreaming(data.live?.text || '');
         setThinking(data.live?.thinking || '');
         setLoadingNote(data.live?.detail || '');
+        setWaitInfo((data.live as { waitInfo?: unknown } | null)?.waitInfo ?? null);
       } else if (runSession.current !== id) {
         runSession.current = null;
         setRunId(null);
@@ -339,6 +346,12 @@ export function Chat() {
   useEffect(() => {
     if (isOwner()) api<{ scan: unknown; checklist: CheckItem[] }>('/api/discovery').then((data) => setChecklist(data.scan ? data.checklist || [] : [])).catch(() => undefined);
   }, []);
+  // Tick the "waiting 1m 20s" counter while a run waits.
+  useEffect(() => {
+    if (status !== 'waiting') { setConfirmForce(false); return; }
+    const timer = window.setInterval(() => setWaitTick((n) => n + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [status]);
   // Esc stops a running reply (when no dialog or menu has focus).
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -346,12 +359,15 @@ export function Chat() {
       // Ctrl/Cmd+Shift+I: this persona's info pane.
       if ((event.key === 'I' || event.key === 'i') && event.shiftKey && (event.metaKey || event.ctrlKey)) { event.preventDefault(); setPanel((value) => value === 'persona' || value === 'settings' ? null : 'persona'); return; }
       if (event.key !== 'Escape') return;
+      // An open menu or dialog handles its own Esc first.
+      if (document.querySelector('.menu-panel, [role="dialog"]')) return;
       if (rail) { setRail(false); return; }
+      if (trace) { event.preventDefault(); setTrace(false); return; }
       if (active && runId) { event.preventDefault(); void control('stop'); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [active, runId, rail]);
+  }, [active, runId, rail, trace]);
   // Grow the composer with its text, up to the CSS max height.
   useEffect(() => {
     const el = input.current;
@@ -387,10 +403,11 @@ export function Chat() {
         buffer.textTimer = null;
         buffer.thinkingTimer = null;
         setSteps(data.steps || []);
-        setStatus(data.statusDetail && data.run?.status === 'running' && /Waiting for memory/i.test(String(data.statusDetail)) ? 'waiting' : (data.run?.status || ''));
+        setStatus(data.statusDetail && data.run?.status === 'running' && /Waiting for memory|\(queued/i.test(String(data.statusDetail)) ? 'waiting' : (data.run?.status || ''));
         if (typeof data.streaming === 'string' && data.streaming) setStreaming(data.streaming);
         if (typeof data.thinking === 'string' && data.thinking) setThinking(data.thinking);
         if (typeof data.statusDetail === 'string' && data.statusDetail) setLoadingNote(data.statusDetail);
+        setWaitInfo(data.waitInfo ?? null);
         if (Array.isArray(data.messages) && data.run?.sessionId === currentRef.current) {
           setMessages((prev) => (data.messages.length >= prev.length ? data.messages : prev));
         }
@@ -488,6 +505,7 @@ export function Chat() {
       if (data.type === 'status') {
         setStatus(data.status);
         setLoadingNote(data.status === 'loading' || data.status === 'waiting' ? String(data.detail || (data.status === 'waiting' ? 'Waiting' : 'Loading model')) : '');
+        setWaitInfo(data.status === 'waiting' ? (data.waitInfo ?? null) : null);
       }
       if (data.type === 'secret' && data.request) setSecret(data.request);
       if (data.type === 'approval' || (data.type === 'status' && data.status === 'awaiting_approval')) void loadAsks(runId);
@@ -980,7 +998,14 @@ export function Chat() {
               </div>
             </form>
           )}
-          {messages.map((message, index) => {
+          {(() => { const items = groupWork(messages); const indexOf = new Map(messages.map((m, i) => [m.id, i])); return items.map((item, itemIndex) => {
+            if (item.kind === 'work') {
+              const live = Boolean(active) && itemIndex === items.length - 1;
+              const runs = new Set(item.runIds);
+              return <WorkGroupView key={item.id} group={item} live={live} diffs={edits.filter((edit) => edit.runId && runs.has(edit.runId)).map((edit) => edit.diff)} />;
+            }
+            const message = item.message;
+            const index = indexOf.get(message.id) ?? 0;
             const speaker = message.agentId ? agents.find((agent) => agent.id === message.agentId) : undefined;
             const fromAgent = message.role !== 'user' && message.role !== 'tool' && speaker;
             // The persona mark and name show only on the first reply of a streak.
@@ -1020,7 +1045,7 @@ export function Chat() {
               )}
             </article>
             );
-          })}
+          }); })()}
           {(thinking || streaming) && (
             <article className={persona ? 'msg from-agent streaming-msg' : 'msg streaming-msg'} style={persona ? { ['--accent' as string]: persona.accent || '#e4b56a' } : undefined}>
               {persona && <div className="who"><Face agent={persona} size={28} /><span className="meta">{persona.emoji ? `${persona.emoji} ` : ''}{persona.name}</span></div>}
@@ -1045,19 +1070,37 @@ export function Chat() {
               </div>
             </div>
           ))}
-          {status === 'waiting' && (
-            <div className="wait-banner" role="status">
-              <div className="grow">
-                <strong>{t('Waiting for memory')}</strong>
-                <p className="faint">{loadingNote || t('Checking available RAM (MemAvailable)…')}</p>
+          {status === 'waiting' && (() => {
+            const wait = waitStateOf(loadingNote, waitInfo);
+            const waited = waitedFor(wait.since);
+            return (
+              <div className={`wait-banner ${wait.kind}`} role="status" data-wait={wait.kind}>
+                <div className="grow">
+                  <strong>{wait.kind === 'queue' ? (wait.behind ? t('Queued behind {0}', [wait.behind]) : t('Queued')) : t('Waiting for memory')}</strong>
+                  <p className="faint">
+                    {wait.kind === 'queue'
+                      ? (wait.ahead > 1 ? t('{0} chats are ahead of this one. It starts on its own when they finish.', [wait.ahead]) : t('Another chat is using the large model. This one starts on its own when that finishes.'))
+                      : (loadingNote || t('Checking available RAM (MemAvailable)…'))}
+                    {waited ? <> · {t('waiting {0}', [waited])}</> : null}
+                  </p>
+                </div>
+                <div className="row">
+                  {wait.kind === 'memory' && <button type="button" className="btn ghost small" onClick={() => void post('/api/memory/recheck', {}).then(() => toast(t('Re-checked memory.'), 'info')).catch((e) => toast(errorText(e), 'error'))}>{t('Re-check')}</button>}
+                  {wait.canForce && <button type="button" className="btn primary small" onClick={() => setConfirmForce(true)}>{t('Force run')}</button>}
+                  <button type="button" className="btn danger small" onClick={() => void control('stop')}>{t('Cancel')}</button>
+                </div>
+                {confirmForce && wait.canForce && (
+                  <div className="wait-confirm" role="alertdialog" aria-label={t('Force run')}>
+                    <p>{t('Force run loads the model even though there is not enough free RAM. If another large model is loaded, the mini PC can freeze until it is restarted.')}</p>
+                    <div className="row">
+                      <button type="button" className="btn ghost small" onClick={() => setConfirmForce(false)}>{t('Cancel')}</button>
+                      <button type="button" className="btn danger small" onClick={() => { setConfirmForce(false); void control('force'); }}>{t('Force run anyway')}</button>
+                    </div>
+                  </div>
+                )}
               </div>
-              <div className="row">
-                <button type="button" className="btn ghost small" onClick={() => void post('/api/memory/recheck', {}).then(() => toast(t('Re-checked memory.'), 'info')).catch((e) => toast(errorText(e), 'error'))}>{t('Re-check')}</button>
-                <button type="button" className="btn primary small" onClick={() => void control('force')}>{t('Force run')}</button>
-                <button type="button" className="btn danger small" onClick={() => void control('stop')}>{t('Cancel')}</button>
-              </div>
-            </div>
-          )}
+            );
+          })()}
           {active && status !== 'waiting' && !streaming && !thinking && <div className="typing" aria-label={t('Working')}><span /><span /><span /> <em>{loadingNote || t('Working…')}</em></div>}
           {runError && !active && (
             <div className="banner error-card" role="alert">
@@ -1247,9 +1290,11 @@ export function Chat() {
           onOpenSession={(id) => { void openSession(id); if (!wide) setPanel(null); }} onOpenFile={(id) => setViewer({ source: { kind: 'file', id } })} onOpenPersona={() => setPanel('persona')} />
       )}
       <aside className={trace ? 'trace open' : 'trace'} aria-label={t('Trace')}>
-        <div className="sheet-head">
+        <div className="sheet-head trace-head">
+          <button className="icon-btn" aria-label={t('Back')} title={t('Back')} onClick={() => setTrace(false)}><ArrowLeft size={18} className="flip-rtl" /></button>
           <strong>{t('Trace')}</strong>
-          <button className="icon-btn" aria-label={t('Close trace')} onClick={() => setTrace(false)}><X size={18} /></button>
+          <span className="head-spacer" />
+          <button className="icon-btn" aria-label={t('Close trace')} title={t('Close trace')} onClick={() => setTrace(false)}><X size={18} /></button>
         </div>
         <p className="faint">{t('Every model call and tool call lands here, with the arguments the model actually sent.')}</p>
         {steps.map((step) => (

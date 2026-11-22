@@ -301,15 +301,8 @@ class LocalAgentClient(context: Context) {
     suspend fun listApprovals(runId: String? = null): List<ApprovalItem> {
         val json = requestJson("GET", "/api/approvals")
         val arr = json.optJSONArray("approvals") ?: JSONArray()
-        return List(arr.length()) { i ->
-            val a = arr.getJSONObject(i)
-            ApprovalItem(
-                id = a.getString("id"),
-                runId = a.getString("runId"),
-                toolName = a.optString("toolName", "tool"),
-                reason = a.optString("reason", ""),
-            )
-        }.filter { runId == null || it.runId == runId }
+        return List(arr.length()) { i -> com.localagent.app.approvals.ApprovalPolicy.parse(arr.getJSONObject(i)) }
+            .filter { runId == null || it.runId == runId }
     }
 
     suspend fun decideApproval(id: String, decision: String) {
@@ -469,6 +462,7 @@ class LocalAgentClient(context: Context) {
                 thinking = it.optString("thinking", ""),
                 status = it.optString("status", ""),
                 detail = it.optString("detail", ""),
+                waitInfo = it.optJSONObject("waitInfo"),
             )
         }
         return SessionDetail(

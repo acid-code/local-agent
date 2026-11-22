@@ -116,11 +116,13 @@ export class Engine {
       const started = Date.now();
       const label = kind === 'uncensored' ? 'the Qwen llama-server model' : 'the uncensored llama-server model';
       const detail = `Waiting for ${label} to finish in another chat (queued).`;
+      const waitInfo = { kind: 'queue', behind: label.replace(/^the /, ''), ahead: others().length, since: new Date(started).toISOString() };
       const live = this.liveStreams.get(runId) ?? { text: '', thinking: '', status: 'waiting' };
       live.status = 'waiting';
       live.detail = detail;
+      live.waitInfo = waitInfo;
       this.liveStreams.set(runId, live);
-      this.bus.publish({ type: 'status', runId, status: 'waiting', detail } as never);
+      this.bus.publish({ type: 'status', runId, status: 'waiting', detail, waitInfo } as never);
       while (others().length) {
         if (signal.aborted) throw new StopError();
         if (Date.now() - started > LARGE_WAIT_MS) {
@@ -131,7 +133,7 @@ export class Engine {
     }
     this.llamaLeases.set(runId, kind);
     const live = this.liveStreams.get(runId);
-    if (live) { live.status = 'running'; live.detail = undefined; }
+    if (live) { live.status = 'running'; live.detail = undefined; live.waitInfo = undefined; }
     if (queued) this.bus.publish({ type: 'status', runId, status: 'running', detail: undefined } as never);
   }
   /** llama-server ↔ Ollama GPU coexistence (see coexist.ts). */
@@ -2005,17 +2007,19 @@ export class Engine {
       const detail = `Waiting for ${blocking[0]} to finish (queued${blocking.length > 1 ? `, ${blocking.length} ahead` : ''}).`;
       if (detail !== shown) {
         shown = detail;
+        const waitInfo = { kind: 'queue', behind: blocking[0], ahead: blocking.length, since: new Date(started).toISOString() };
         const live = this.liveStreams.get(runId) ?? { text: '', thinking: '', status: 'waiting' };
         live.status = 'waiting';
         live.detail = detail;
+        live.waitInfo = waitInfo;
         this.liveStreams.set(runId, live);
-        this.bus.publish({ type: 'status', runId, status: 'waiting', detail });
+        this.bus.publish({ type: 'status', runId, status: 'waiting', detail, waitInfo } as never);
       }
       await new Promise((resolve) => setTimeout(resolve, 500));
       blocking = ahead();
     }
     const live = this.liveStreams.get(runId);
-    if (live) { live.status = 'running'; live.detail = undefined; }
+    if (live) { live.status = 'running'; live.detail = undefined; live.waitInfo = undefined; }
     this.bus.publish({ type: 'status', runId, status: 'running' });
   }
 

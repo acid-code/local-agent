@@ -1,75 +1,43 @@
 package com.localagent.app
 
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
 import android.content.Context
-import android.content.Intent
-import android.os.Build
-import androidx.core.app.NotificationCompat
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
 import androidx.work.Worker
 import androidx.work.WorkerParameters
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import org.json.JSONObject
+import com.localagent.app.approvals.ApprovalApi
+import com.localagent.app.approvals.ApprovalNotifier
 import java.util.concurrent.TimeUnit
 
+/**
+ * Background check for approvals while the app is closed. Posts one actionable notification per new pending
+ * approval and clears the ones that were decided elsewhere. While something is pending it re-checks every
+ * 2 minutes so decided ones disappear quickly; otherwise the 15-minute periodic job is the floor Android allows.
+ */
 class ApprovalWorker(context: Context, params: WorkerParameters) : Worker(context, params) {
     override fun doWork(): Result {
-        val prefs = applicationContext.getSharedPreferences("local-agent-native", Context.MODE_PRIVATE)
-        val base = prefs.getString("server_url", "")?.trimEnd('/') ?: ""
-        val token = prefs.getString("bearer_token", "") ?: ""
-        val cookie = prefs.getString("la_session_cookie", "") ?: ""
-        if (base.isBlank() || (token.isBlank() && cookie.isBlank())) return Result.success()
-
+        val api = ApprovalApi(applicationContext)
+        if (!api.signedIn) return Result.success()
         return try {
-            val client = OkHttpClient.Builder()
-                .connectTimeout(5, TimeUnit.SECONDS)
-                .readTimeout(8, TimeUnit.SECONDS)
-                .build()
-            val builder = Request.Builder().url("$base/api/approvals")
-            if (token.isNotBlank()) builder.header("Authorization", "Bearer $token")
-            if (cookie.isNotBlank()) builder.header("Cookie", cookie)
-
-            client.newCall(builder.build()).execute().use { resp ->
-                if (!resp.isSuccessful) return Result.success()
-                val arr = JSONObject(resp.body?.string().orEmpty()).optJSONArray("approvals")
-                    ?: return Result.success()
-                if (arr.length() == 0) return Result.success()
-                val first = arr.getJSONObject(0)
-                val title = if (arr.length() == 1) "Approval needed" else "${arr.length()} approvals waiting"
-                val text = "${first.optString("toolName", "tool")}: ${first.optString("reason", "")}"
-                postNotification(title, text)
-            }
+            val pending = api.pending()
+            ApprovalNotifier.sync(applicationContext, pending, post = !AppVisibility.foreground)
+            if (pending.isNotEmpty()) scheduleFollowUp(applicationContext)
             Result.success()
         } catch (_: Exception) {
             Result.retry()
         }
     }
 
-    private fun postNotification(title: String, body: String) {
-        val manager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
-        val channelId = "approvals"
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            manager.createNotificationChannel(
-                NotificationChannel(channelId, "Approvals", NotificationManager.IMPORTANCE_HIGH)
-            )
+    companion object {
+        fun scheduleFollowUp(context: Context) {
+            val req = OneTimeWorkRequestBuilder<ApprovalWorker>().setInitialDelay(2, TimeUnit.MINUTES).build()
+            WorkManager.getInstance(context).enqueueUniqueWork("local-agent-approvals-followup", ExistingWorkPolicy.REPLACE, req)
         }
-        val intent = Intent(applicationContext, MainActivity::class.java)
-        val pi = PendingIntent.getActivity(
-            applicationContext,
-            1,
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        val notification = NotificationCompat.Builder(applicationContext, channelId)
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle(title)
-            .setContentText(body)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setAutoCancel(true)
-            .setContentIntent(pi)
-            .build()
-        manager.notify(1001, notification)
     }
+}
+
+/** Set by MainActivity; the worker does not post notifications while the app is on screen. */
+object AppVisibility {
+    @Volatile var foreground: Boolean = false
 }

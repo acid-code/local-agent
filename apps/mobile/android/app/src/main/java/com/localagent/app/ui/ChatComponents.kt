@@ -221,40 +221,52 @@ private fun FormattedMessageBody(raw: String) {
     }
 }
 
+/** Queue or RAM wait. The queue has no Force run; the RAM wait asks before forcing. */
 @Composable
-fun MemoryWaitCard(detail: String, onRecheck: () -> Unit, onForce: () -> Unit, onCancel: () -> Unit) {
+fun MemoryWaitCard(wait: WaitState, onRecheck: () -> Unit, onForce: () -> Unit, onCancel: () -> Unit) {
+    var confirm by remember { mutableStateOf(false) }
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(wait.sinceIso) { while (true) { now = System.currentTimeMillis(); kotlinx.coroutines.delay(1000) } }
+    val waited = wait.sinceIso?.let { iso ->
+        runCatching { java.time.Instant.parse(iso).toEpochMilli() }.getOrNull()?.let { start ->
+            val s = ((now - start) / 1000).coerceAtLeast(0)
+            if (s < 60) "${s}s" else "${s / 60}m ${(s % 60).toString().padStart(2, '0')}s"
+        }
+    }
+    val accent = if (wait.queue) AccentBlue else AccentGold
     Surface(
-        color = AccentGold.copy(alpha = 0.14f),
-        shape = RoundedCornerShape(14.dp),
-        modifier = Modifier.fillMaxWidth().border(1.dp, AccentGold.copy(alpha = 0.5f), RoundedCornerShape(14.dp)),
+        color = accent.copy(alpha = 0.10f),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth().border(1.dp, accent.copy(alpha = 0.4f), RoundedCornerShape(16.dp)),
     ) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Waiting for memory", fontWeight = FontWeight.SemiBold, color = AccentGold)
-            Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (wait.queue) Icon(Icons.Default.HourglassTop, null, tint = accent, modifier = Modifier.size(18.dp))
+                else Icon(Icons.Default.Memory, null, tint = accent, modifier = Modifier.size(18.dp))
+                Text(wait.title, fontWeight = FontWeight.SemiBold, color = accent, style = MaterialTheme.typography.titleSmall)
+            }
+            Text(
+                wait.detail + (waited?.let { " · waiting $it" } ?: ""),
+                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onRecheck, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) { Text("Re-check") }
-                Button(onClick = onForce, contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) { Text("Force run") }
-                TextButton(onClick = onCancel) { Text("Cancel", color = MaterialTheme.colorScheme.error) }
+                if (!wait.queue) OutlinedButton(onClick = onRecheck, modifier = Modifier.heightIn(min = 44.dp)) { Text("Re-check") }
+                if (wait.canForce) Button(onClick = { confirm = true }, modifier = Modifier.heightIn(min = 44.dp)) { Text("Force run") }
+                TextButton(onClick = onCancel, modifier = Modifier.heightIn(min = 44.dp)) { Text("Cancel", color = MaterialTheme.colorScheme.error) }
             }
         }
     }
-}
-
-@Composable
-fun ApprovalCard(item: ApprovalItem, onApprove: () -> Unit, onDeny: () -> Unit) {
-    Surface(
-        color = MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(14.dp),
-        modifier = Modifier.fillMaxWidth().border(1.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(14.dp)),
-    ) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("Approval needed · ${item.toolName}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-            Text(item.reason, style = MaterialTheme.typography.bodyMedium)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onDeny) { Text("Deny") }
-                Button(onClick = onApprove) { Text("Approve") }
-            }
-        }
+    if (confirm) {
+        AlertDialog(
+            onDismissRequest = { confirm = false },
+            icon = { Icon(Icons.Default.WarningAmber, null, tint = MaterialTheme.colorScheme.error) },
+            title = { Text("Force run anyway?") },
+            text = { Text("This loads the model even though there is not enough free RAM. If another large model is loaded, the mini PC can freeze until it is restarted.") },
+            confirmButton = {
+                Button(onClick = { confirm = false; onForce() }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("Force run") }
+            },
+            dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } },
+        )
     }
 }
 
@@ -267,29 +279,48 @@ fun ComposerBar(
     onStop: () -> Unit,
     onVoice: () -> Unit,
 ) {
-    Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 3.dp, modifier = Modifier.fillMaxWidth().navigationBarsPadding()) {
-        Row(
-            Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.Bottom,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+    Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxWidth().navigationBarsPadding()) {
+        Surface(
+            color = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(26.dp),
+            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+            modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 10.dp),
         ) {
-            IconButton(onClick = onVoice) { Icon(Icons.Default.Mic, contentDescription = "Voice input") }
-            OutlinedTextField(
-                value = draft,
-                onValueChange = onDraftChange,
-                placeholder = { Text("Message…") },
-                maxLines = 5,
-                shape = RoundedCornerShape(22.dp),
-                modifier = Modifier.weight(1f),
-            )
-            if (isStreaming) {
-                FilledIconButton(
-                    onClick = onStop,
-                    colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.error),
-                ) { Icon(Icons.Default.Stop, contentDescription = "Stop") }
-            } else {
-                FilledIconButton(onClick = onSend, enabled = draft.isNotBlank()) {
-                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+            Row(
+                Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.Bottom,
+            ) {
+                IconButton(onClick = onVoice, modifier = Modifier.size(48.dp)) {
+                    Icon(Icons.Default.Mic, contentDescription = "Voice input", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                TextField(
+                    value = draft,
+                    onValueChange = onDraftChange,
+                    placeholder = { Text("Message") },
+                    maxLines = 6,
+                    textStyle = MaterialTheme.typography.bodyLarge,
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = Color.Transparent,
+                        unfocusedContainerColor = Color.Transparent,
+                        disabledContainerColor = Color.Transparent,
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent,
+                    ),
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                )
+                if (isStreaming) {
+                    FilledIconButton(
+                        onClick = onStop,
+                        modifier = Modifier.size(48.dp),
+                        colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.error),
+                    ) { Icon(Icons.Default.Stop, contentDescription = "Stop") }
+                } else {
+                    FilledIconButton(
+                        onClick = onSend, enabled = draft.isNotBlank(), modifier = Modifier.size(48.dp),
+                        colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.tertiary, contentColor = MaterialTheme.colorScheme.onTertiary),
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                    }
                 }
             }
         }

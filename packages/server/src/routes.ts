@@ -21,6 +21,7 @@ import type { Notifier } from './notify.js';
 import { createBackup, listBackups, preChangeBackup, shipBackup, stageRestore } from './ops.js';
 import { telegramQueue } from './notify.js';
 import { ollamaLoaded, ollamaRoot } from './ollama.js';
+import { approvalView } from './approval-view.js';
 import { doctorChecks, geminiStateOf, missingRoleModels, redactValue, searchLogs, zipStore, LOG_COMPONENTS, type LogComponent } from './debug.js';
 import { ensureDiskRoom, isDiskFullError, previewPrune, runPrune, snapshotResources } from './resources.js';
 import { speak, transcribe, voiceStatus, VoiceError, KOKORO_COMMAND, WHISPER_COMMAND } from './voice.js';
@@ -1286,11 +1287,23 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     return { run, steering: true };
   });
 
-  app.get('/api/approvals', async (req) => ({ approvals: store.listApprovals('pending').filter((approval) => ownerOf(store, 'run', approval.runId) === me(req)) }));
+  // Pending approvals of this account, with the chat they belong to and a risk tier, so a phone can list them and jump to the chat.
+  app.get('/api/approvals', async (req) => ({ approvals: store.listApprovals('pending').filter((approval) => ownerOf(store, 'run', approval.runId) === me(req)).map((approval) => approvalView(store, approval)) }));
+  app.get('/api/approvals/:id', async (req) => {
+    const id = (req.params as { id: string }).id;
+    mustOwn(store, req, 'approval', id, 'Approval not found.');
+    const approval = store.getApproval(id);
+    if (!approval) throw http(404, 'Approval not found.');
+    return { approval: approvalView(store, approval) };
+  });
   app.post('/api/approvals/:id', async (req) => {
-    mustOwn(store, req, 'approval', (req.params as { id: string }).id, 'Approval not found.');
+    const id = (req.params as { id: string }).id;
+    mustOwn(store, req, 'approval', id, 'Approval not found.');
     const body = parse(z.object({ decision: z.enum(['approve', 'deny']) }), req.body);
-    return { approval: engine.decideApproval((req.params as { id: string }).id, body.decision === 'approve' ? 'approved' : 'denied') };
+    // A stale button (an old notification, a second device) must not flip a decision that was already made.
+    const current = store.getApproval(id);
+    if (current && current.status !== 'pending') throw http(409, `Already ${current.status}.`);
+    return { approval: engine.decideApproval(id, body.decision === 'approve' ? 'approved' : 'denied') };
   });
 
   // Members with cloud off stay on local models, even when they pick one by hand.

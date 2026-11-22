@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { waitStateOf } from '@local-agent/shared';
 import { Store } from '../src/db.js';
 import type { ModelRow } from '../src/db.js';
 import { Engine } from '../src/engine.js';
@@ -140,6 +141,11 @@ describe('big-model queue', () => {
     expect(order).toEqual(['gemma:start']);
     const waiting = events.find((event) => event.runId === runB.id && event.type === 'status' && event.status === 'waiting');
     expect(String(waiting?.detail)).toMatch(/Waiting for gemma4:26b-a4b to finish \(queued/);
+    // The queue says what it waits behind, so the UI shows "Queued behind …" and no Force run.
+    expect((waiting as { waitInfo?: unknown }).waitInfo).toMatchObject({ kind: 'queue', behind: 'gemma4:26b-a4b', ahead: 1 });
+    const state = waitStateOf(String(waiting?.detail), (waiting as { waitInfo?: unknown }).waitInfo);
+    expect(state).toMatchObject({ kind: 'queue', title: 'Queued behind gemma4:26b-a4b', canForce: false });
+    expect((engine.getLiveStream(runB.id) as { waitInfo?: { kind?: string } } | null)?.waitInfo?.kind).toBe('queue');
     release();
     for (let i = 0; i < 50 && !['completed', 'failed'].includes(store.getRun(runB.id)!.status); i += 1) await new Promise((resolve) => setTimeout(resolve, 100));
     expect(store.getRun(runA.id)?.status).toBe('completed');
