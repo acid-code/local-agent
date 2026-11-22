@@ -141,7 +141,7 @@ describe('image generation per account', () => {
     await engine.startTurn({ sessionId: session.id, agentId: agent.id, content: '/image a strawberry cake with sprinkles', wait: true });
     const reply = store.listMessages(session.id).find((message) => message.role === 'assistant');
     expect(reply?.content).toMatch(/\[file:file_[\w]+\]/);
-    const tools = (engine as unknown as { tools: (agent: unknown) => { name: string }[] }).tools(store.getAgent(agent.id));
+    const tools = (engine as unknown as { tools: (...args: unknown[]) => { name: string }[] }).tools(store.getAgent(agent.id), undefined, undefined, undefined, false, undefined, true);
     expect(tools.map((tool) => tool.name)).toContain('generate_image');
   });
 });

@@ -38,6 +38,7 @@ import type { Settings } from './settings.js';
 import { CODING_TOOLS } from './coding.js';
 import { formatCitations, searchKnowledge } from './kb.js';
 import { kbSearchTool, loadSkillTool, toolsFor, type Tool, type ToolContext } from './tools.js';
+import { CORE_TOOLS, LEAN_MIN_TOOLS, SEED_TOOLS, findToolsTool, leanMenuEnabled, rankTools } from './toolsearch.js';
 import { runSkillScript, skillCatalog } from './skills.js';
 import { getWorkshop, workshopBrief } from './workshops.js';
 import { chatWorkspaceBrief, chatWorkspacePaths, getChatWorkspaces, setChatWorkspaces } from './chat-workspaces.js';
@@ -872,7 +873,7 @@ export class Engine {
       else await this.llama.switchToQwen();
     }
     const toolless = Boolean(current.cursor.noTools) || this.toolSupportOf(model) === false;
-    const tools = toolless ? [] : this.tools(agent, this.store.getSession(run.sessionId)?.mode, current.cursor.stage, current.cursor.toolSubset, Boolean(current.cursor.helperId)).map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
+    const tools = toolless ? [] : this.tools(agent, this.store.getSession(run.sessionId)?.mode, current.cursor.stage, current.cursor.toolSubset, Boolean(current.cursor.helperId), current).map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
     const sessionForCtx = this.store.getSession(run.sessionId);
     const repoTask = Boolean(sessionForCtx?.mode === 'code' || sessionForCtx?.workshopId || current.cursor.stage || turnRoots(this.store, current, this.libraryDir).length > 0);
     const roleForCtx = current.cursor.autoRole || contractForAgent(agent.name)?.modelRole || 'main';
@@ -1169,12 +1170,14 @@ export class Engine {
       if (completed.has(call.id)) continue;
       await this.waitIfPaused(run.id, signal);
       if (signal.aborted) throw new StopError();
-      const tools = this.tools(this.store.getAgent(run.agentId)!, this.store.getSession(run.sessionId)?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId));
+      const tools = this.tools(this.store.getAgent(run.agentId)!, this.store.getSession(run.sessionId)?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId), run, true);
       const tool = tools.find((item) => item.name === call.name);
+      // A permitted tool called before find_tools surfaced it still runs, and stays on the menu from now on.
+      if (tool && run.cursor.extraTools !== undefined && call.name !== 'find_tools' && !run.cursor.extraTools.includes(call.name)) this.addRunTools(run, [call.name]);
       let args = parseArgs(call.arguments);
       const speaker = this.store.getAgent(run.agentId);
       const contract = speaker ? contractForAgent(speaker.name) : null;
-      if (contract && contract.tools.length && !contract.tools.includes(call.name) && !CONTRACT_ALWAYS.has(call.name)) {
+      if (contract && speaker && !contractAllows(contract, call.name, this.allowedTools(speaker, this.store.getSession(run.sessionId)?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId)).servers)) {
         const message = `${contract.name} is not allowed to call ${call.name}.`;
         this.store.addStep({ runId: run.id, kind: 'contract', name: call.name, status: 'failed', input: args, output: message, toolCallId: call.id, turn: run.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: message, startedAt: now() });
         this.persistTool(run, call, message, 'failed');
@@ -1544,7 +1547,8 @@ export class Engine {
     // Hermes-style context: capped memory files, the project's own rule files, and a nudge to save a skill after hard tasks.
     const memoryNote = agent.memoryEnabled ? memoryBrief(this.store, agent.id) : '';
     const rulesNote = session ? projectRules(chatWorkspacePaths(this.store, run.sessionId, session.ownerId || OWNER_ID), disabledRules(this.store, run.sessionId)) : '';
-    const offeredTools = this.tools(agent, session?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId));
+    // Everything this persona can reach (found or not): notes about skills and teammates name what find_tools can surface.
+    const offeredTools = this.tools(agent, session?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId), run, true);
     const toolNames = offeredTools.map((tool) => tool.name);
     const nudge = run.cursor.helperId ? '' : skillNudge(run.cursor.turn, toolNames);
     const languageNote = languageHint(this.replyLang(agent, user?.content ?? ''));
@@ -1905,7 +1909,58 @@ export class Engine {
     return this.refreshing;
   }
 
-  private tools(agent: Agent, sessionMode?: string, stage?: 'plan' | 'implement', subset?: string[], helper = false) {
+  /**
+   * What the model is offered. Small allowlists get everything; larger ones get a lean menu (declared tools plus
+   * essentials), find_tools, and whatever this run found or was seeded with, appended in order so the prefix holds.
+   * `all` returns every permitted tool (for executing a call), plus find_tools.
+   */
+  private tools(agent: Agent, sessionMode?: string, stage?: 'plan' | 'implement', subset?: string[], helper = false, run?: RunRow, all = false): Tool[] {
+    const { tools: allowed, servers } = this.allowedTools(agent, sessionMode, stage, subset, helper);
+    // Tools the persona's contract would reject are never offered (they only cost tokens and a failed call).
+    const contract = contractForAgent(agent.name);
+    const permitted = allowed.filter((tool) => contractAllows(contract, tool.name, servers));
+    if (!leanMenuEnabled() || permitted.length <= LEAN_MIN_TOOLS) return permitted;
+    const core = new Set<string>([...agent.toolAllowlist, ...CORE_TOOLS]);
+    if (stage === 'plan') for (const name of ['plan', 'recall', 'consult_agent']) core.add(name);
+    if (stage === 'implement' || sessionMode === 'code') for (const tool of CODING_TOOLS) core.add(tool.name);
+    const base = permitted.filter((tool) => core.has(tool.name));
+    const baseNames = new Set(base.map((tool) => tool.name));
+    const discoverable = permitted.filter((tool) => !baseNames.has(tool.name));
+    if (!discoverable.length) return permitted;
+    if (run && run.cursor.extraTools === undefined) this.seedTools(run, discoverable, servers);
+    const extras = (run?.cursor.extraTools ?? []).map((name) => discoverable.find((tool) => tool.name === name)).filter((tool): tool is Tool => Boolean(tool));
+    const finder = findToolsTool({
+      discoverable, servers,
+      offered: () => new Set([...baseNames, ...(run?.cursor.extraTools ?? [])]),
+      add: (names) => { if (run) this.addRunTools(run, names); },
+    });
+    if (all) return [...base, finder, ...discoverable];
+    return [...base, finder, ...extras];
+  }
+
+  /** First step of a run: pre-load the few tools the request obviously needs, so it skips a find_tools round trip. */
+  private seedTools(run: RunRow, discoverable: Tool[], servers: Map<string, string>) {
+    const user = run.cursor.userMessageId ? this.store.listMessages(run.sessionId).find((message) => message.id === run.cursor.userMessageId) : undefined;
+    const seeds = user?.content ? rankTools(discoverable, user.content.slice(0, 2000), servers).filter((row) => row.score >= 3).slice(0, SEED_TOOLS).map((row) => row.tool.name) : [];
+    run.cursor.extraTools = [];
+    this.addRunTools(run, seeds);
+  }
+
+  /** Append tools to this run's menu (never removed, never reordered). */
+  private addRunTools(run: RunRow, names: string[]) {
+    const current = run.cursor.extraTools ?? [];
+    const next = [...current, ...names.filter((name) => !current.includes(name))];
+    run.cursor.extraTools = next;
+    const stored = this.store.getRun(run.id);
+    if (stored) {
+      const merged = [...(stored.cursor.extraTools ?? []), ...next.filter((name) => !(stored.cursor.extraTools ?? []).includes(name))];
+      run.cursor.extraTools = merged;
+      this.store.updateRun(run.id, { cursor: { ...stored.cursor, extraTools: merged } });
+    }
+  }
+
+  /** Every tool this persona may use in this run (allowlist, member and helper limits, disabled connectors). */
+  private allowedTools(agent: Agent, sessionMode?: string, stage?: 'plan' | 'implement', subset?: string[], helper = false): { tools: Tool[]; servers: Map<string, string> } {
     const names = new Set(agent.toolAllowlist);
     names.add('create_file');
     names.add('write_file');
@@ -1958,7 +2013,8 @@ export class Engine {
       seen.add(tool.name);
       return true;
     }).map((tool) => ({ ...tool, parameters: mergeToolParameters(tool.name, tool.parameters) }));
-    return names.has('run_tool_script') ? [...chosen, toolScript(chosen)] : chosen;
+    const servers = new Map(mcp.filter((row) => names.has(row.tool.name)).map((row) => [row.tool.name, row.serverName] as [string, string]));
+    return { tools: names.has('run_tool_script') ? [...chosen, toolScript(chosen)] : chosen, servers };
   }
 
   private contextFor(run: RunRow, signal: AbortSignal): ToolContext {
@@ -2562,8 +2618,14 @@ const CONTRACT_ALWAYS = new Set([
   'time_now', 'tasks', 'think', 'memory_file', 'search_chats', 'web_search', 'web_fetch',
   'spawn_agent', 'helpers', 'propose_skill', 'read_output', 'run_skill_script',
   'find_context', 'share_file', 'make_slides', 'read_slides', 'fetch_image', 'browse', 'create_project', 'vercel', 'turbo_inspect', 'read_image_text', 'understand_image', 'generate_image', 'repo_sync',
-  'create_file', 'write_file', 'read_file', 'list_dir', 'grep', 'glob', 'apply_patch',
+  'create_file', 'write_file', 'read_file', 'list_dir', 'grep', 'glob', 'apply_patch', 'find_tools',
 ]);
+
+/** A contract limits a persona's built-in tools; connector (MCP) tools it was granted by allowlist or template stay callable. */
+function contractAllows(contract: { tools: string[] } | null, name: string, servers: Map<string, string>): boolean {
+  if (!contract || !contract.tools.length) return true;
+  return contract.tools.includes(name) || CONTRACT_ALWAYS.has(name) || servers.has(name);
+}
 
 export function roughModelGiB(apiName: string): number {
   const size = Number(apiName.toLowerCase().match(/(\d+(?:\.\d+)?)b\b/)?.[1] ?? 4);

@@ -121,7 +121,7 @@ describe('agent self-management', () => {
     const folder = path.join(built.dir, 'users');
     fs.mkdirSync(folder, { recursive: true });
     // The member's persona never even sees manage_trigger.
-    const memberTools = (built.engine as unknown as { tools: (agent: unknown) => { name: string }[] }).tools(built.store.getAgent(mia.id));
+    const memberTools = (built.engine as unknown as { tools: (...args: unknown[]) => { name: string }[] }).tools(built.store.getAgent(mia.id), undefined, undefined, undefined, false, undefined, true);
     expect(memberTools.map((row) => row.name)).not.toContain('manage_trigger');
     expect(memberTools.map((row) => row.name)).toContain('manage_timer');
     // And cannot read another account's chat context.

@@ -110,7 +110,7 @@ describe('agents call installed MCP tools', () => {
     await mcp.connect(server.id);
     const owner = store.createAgent({ name: 'Owner star', systemPrompt: 'x', toolAllowlist: ['mcp:*'], workspacePath: dir });
     const member = store.createAgent({ name: 'Member star', systemPrompt: 'x', toolAllowlist: ['mcp:*'], workspacePath: dir, ownerId: 'acct_member_x' });
-    const names = (agent: Agent) => (engine as unknown as { tools: (a: Agent) => { name: string }[] }).tools(agent).map((tool) => tool.name);
+    const names = (agent: Agent) => (engine as unknown as { tools: (...args: unknown[]) => { name: string }[] }).tools(agent, undefined, undefined, undefined, false, undefined, true).map((tool) => tool.name);
     expect(names(owner)).toContain(mcpToolName('Echo', 'echo'));
     expect(names(member).some((name) => name.startsWith('mcp_'))).toBe(false);
   });
@@ -121,8 +121,8 @@ describe('agents call installed MCP tools', () => {
     await mcp.connect(server.id);
     const coder = store.createAgent({ name: 'Coder t', systemPrompt: 'x', toolAllowlist: [], workspacePath: dir });
     const templated = { ...coder, templateId: 'coder' } as Agent;
-    const plain = (engine as unknown as { tools: (a: Agent) => { name: string }[] }).tools(coder).map((tool) => tool.name);
-    const viaTemplate = (engine as unknown as { tools: (a: Agent) => { name: string }[] }).tools(templated).map((tool) => tool.name);
+    const plain = (engine as unknown as { tools: (...args: unknown[]) => { name: string }[] }).tools(coder, undefined, undefined, undefined, false, undefined, true).map((tool) => tool.name);
+    const viaTemplate = (engine as unknown as { tools: (...args: unknown[]) => { name: string }[] }).tools(templated, undefined, undefined, undefined, false, undefined, true).map((tool) => tool.name);
     expect(plain.some((name) => name.startsWith('mcp_github_'))).toBe(false);
     // The Coder template lists the GitHub connector.
     expect(viaTemplate.some((name) => name.startsWith('mcp_github_'))).toBe(true);
