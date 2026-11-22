@@ -2505,3 +2505,27 @@ button.state-card:hover, a.state-card:hover { background: var(--bg-3); }
 .earlier-runs { padding-inline-start: 12px; display: flex; flex-direction: column; gap: 4px; }
 .earlier-toggle { align-self: flex-start; font-size: calc(12px * var(--fs)); color: var(--muted); }
 .earlier-list { gap: 4px; }
+
+/* Final collapsed sidebar rail rules (after all later .side-top / .pin-faces overrides). */
+@media (min-width: 981px) {
+  .app.collapsed { grid-template-columns: 64px minmax(0, 1fr); }
+  .app.collapsed .sidebar { padding: 12px 6px; overflow-x: hidden; align-items: center; gap: 10px; }
+  .app.collapsed .side-top { flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 0; min-height: auto; width: 100%; }
+  .app.collapsed .side-top .grow,
+  .app.collapsed .side-top .menu-trigger,
+  .app.collapsed .side-top .icon-btn:not(.sidebar-toggle),
+  .app.collapsed .pin-face-name,
+  .app.collapsed .persona-text,
+  .app.collapsed .persona-row .menu-trigger,
+  .app.collapsed .side-alert-x,
+  .app.collapsed .side-foot .user-chip { display: none; }
+  .app.collapsed .pin-faces { display: grid; grid-template-columns: 1fr; justify-items: center; gap: 6px; padding: 4px 0; border: 0; width: 100%; }
+  .app.collapsed .pin-face { width: 44px; height: 44px; padding: 0; justify-content: center; border-radius: 50%; }
+  .app.collapsed .pin-face-art { width: 34px; height: 34px; transform: none; display: inline-grid; place-items: center; }
+  .app.collapsed .pin-face-art .face { width: 34px !important; height: 34px !important; }
+  .app.collapsed .persona-list { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 4px 0; width: 100%; }
+  .app.collapsed .persona-list .persona-row { display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; padding: 0; border: 0; background: transparent; }
+  .app.collapsed .persona-open { position: relative; width: 44px; height: 44px; padding: 0; justify-content: center; border-radius: 50%; }
+  .app.collapsed .persona-open .unread-dot { position: absolute; top: 3px; inset-inline-end: 3px; margin: 0; }
+  .app.collapsed .side-foot { justify-content: center; align-items: center; padding: 6px 0 0; width: 100%; }
+}
