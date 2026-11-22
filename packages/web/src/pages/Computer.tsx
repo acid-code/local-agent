@@ -57,14 +57,15 @@ export function Computer() {
   const wsPath = typeof window !== 'undefined' ? `${wsProto}//${window.location.host}/api/computer/vnc` : '';
   const takenOver = Boolean(state?.takenOver);
   const driving = state?.browser?.activePersona;
+  const browserLive = state?.browser?.state === 'running' || state?.browser?.state === 'idle';
   const entries = (state?.shellTail ?? []).filter((e) => !runFilter || e.runId === runFilter);
 
   return (
     <div className="page computer-page">
-      <header className="page-head">
-        <div>
+      <header className="page-head page-head-row">
+        <div className="page-head-text">
           <h1><Monitor size={20} aria-hidden /> {t('Live computer')}</h1>
-          <p className="faint">
+          <p className="lede">
             {driving
               ? t('Driven by {0}', [driving])
               : t('View-only by default. Click Take over to interact or sign in.')}
@@ -83,7 +84,7 @@ export function Computer() {
         </div>
       </header>
 
-      {error && <p className="error-note">{error}</p>}
+      {error && <p className="banner err">{error}</p>}
 
       {state?.pausedForLogin && (
         <div className="login-pause-banner" role="alert">
@@ -110,12 +111,19 @@ export function Computer() {
           {state?.browser?.activeRunId && <span className="faint mono">{state.browser.activeRunId}</span>}
         </div>
         <div className={`computer-viewport${takenOver ? ' interactive' : ' view-only'}`} data-vnc-ws={wsPath}>
-          <iframe
-            title={t('Live computer')}
-            src={`/novnc/vnc_lite.html?path=${encodeURIComponent('api/computer/vnc')}&autoconnect=1&resize=scale&view_only=${takenOver ? '0' : '1'}`}
-            className="computer-iframe"
-            style={{ pointerEvents: takenOver ? 'auto' : 'none' }}
-          />
+          {browserLive ? (
+            <iframe
+              title={t('Live computer')}
+              src={`/novnc/vnc_lite.html?path=${encodeURIComponent('api/computer/vnc')}&autoconnect=1&resize=scale&view_only=${takenOver ? '0' : '1'}`}
+              className="computer-iframe"
+              style={{ pointerEvents: takenOver ? 'auto' : 'none' }}
+            />
+          ) : (
+            <div className="computer-viewport-empty">
+              <Monitor size={32} aria-hidden />
+              <p className="faint">{t('Browser is not running yet. Start a browse task to see the live view.')}</p>
+            </div>
+          )}
         </div>
       </section>
 

@@ -178,6 +178,7 @@ export const en: Record<string, string> = {
   "Browse Docker's MCP catalog (images pinned by digest) or the official MCP registry. Everything is vetted first; community servers need your explicit OK.": "Browse Docker's MCP catalog (images pinned by digest) or the official MCP registry. Everything is vetted first; community servers need your explicit OK.",
   "Browse servers": "Browse servers",
   "Browser default": "Browser default",
+  "Browser is not running yet. Start a browse task to see the live view.": "Browser is not running yet. Start a browse task to see the live view.",
   "Buddy": "Buddy",
   "Budgets and spending": "Budgets and spending",
   "Build": "Build",
