@@ -1528,4 +1528,11 @@ export const he: Record<string, string> = {
   "Not confirmed. Nothing was deleted.": "לא אושר. שום דבר לא נמחק.",
   "Deleted {0} rows. Backup {1}.": "נמחקו {0} שורות. גיבוי {1}.",
   "Start fresh…": "התחלה מחדש…",
+  "You: ": "את/ה: ",
+  "Run summary": "סיכום הריצה",
+  "total": "סה״כ",
+  "steps": "שלבים",
+  "failed": "נכשלו",
+  "tokens": "טוקנים",
+  "stopped": "נעצר",
 };

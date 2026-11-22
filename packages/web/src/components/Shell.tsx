@@ -35,7 +35,7 @@ const GROUPS: { title: string; items: NavItem[] }[] = [
   ] },
 ];
 
-interface Persona extends FaceAgent { id: string; title?: string; pinned?: boolean; hidden?: boolean; unread?: number; notify?: 'all' | 'mute'; templateId?: string | null; lastMessage?: { text: string; role: string; at: string } | null }
+interface Persona extends FaceAgent { id: string; title?: string; pinned?: boolean; hidden?: boolean; unread?: number; notify?: 'all' | 'mute'; templateId?: string | null; lastMessage?: { text: string; role: string; at: string } | null; chat?: { id: string; title: string; titleSource?: string } | null }
 
 /** Short relative time for the persona list ("now", "5m", "3h", "Mon", "12 Nov"). */
 function when(iso?: string) {
@@ -242,11 +242,11 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
           {personas.map((persona, index) => (
             <div key={persona.id} role="listitem" className={activePersona === persona.id ? 'persona-row on' : 'persona-row'} style={{ ['--accent' as string]: persona.accent || 'var(--brass)' }}
               onContextMenu={(event) => { event.preventDefault(); (event.currentTarget.querySelector('.menu-trigger') as HTMLButtonElement | null)?.click(); }}>
-              <button className="persona-open" aria-current={activePersona === persona.id ? 'true' : undefined} title={persona.title ? `${persona.name} · ${persona.title}` : persona.name} onClick={() => { navigate(`/?persona=${persona.id}`); setOpen(false); }}>
+              <button className="persona-open" aria-current={activePersona === persona.id ? 'true' : undefined} title={[persona.chat?.title && persona.chat.title !== 'New chat' ? `${persona.chat.title} · ${persona.name}` : persona.name, persona.lastMessage ? `\n${persona.lastMessage.role === 'user' ? t('You: ') : ''}\u2068${persona.lastMessage.text.slice(0, 280)}\u2069` : ''].join('')} onClick={() => { navigate(`/?persona=${persona.id}`); setOpen(false); }}>
                 <Face agent={persona} size={36} />
                 <span className="label persona-text">
-                  <span className="row persona-line"><span className="ellipsis persona-row-name" dir="auto">{persona.emoji ? `${persona.emoji} ` : ''}{persona.name}</span><span className="faint persona-when">{when(persona.lastMessage?.at)}</span></span>
-                  <span className="ellipsis faint persona-preview" dir="auto">{persona.lastMessage ? `${persona.lastMessage.role === 'user' ? 'You: ' : ''}${persona.lastMessage.text}` : (persona.title || t('Say hi'))}</span>
+                  <span className="row persona-line"><span className="ellipsis persona-row-name" dir="auto">{persona.chat?.title && persona.chat.title !== 'New chat' ? persona.chat.title : `${persona.emoji ? `${persona.emoji} ` : ''}${persona.name}`}</span><span className="faint persona-when">{when(persona.lastMessage?.at)}</span></span>
+                  <span className="ellipsis faint persona-preview" dir="auto">{persona.lastMessage ? `${persona.lastMessage.role === 'user' ? t('You: ') : ''}${persona.lastMessage.text}` : (persona.title || t('Say hi'))}</span>
                 </span>
                 {persona.unread && persona.notify !== 'mute' ? <span className="unread-dot" role="status" aria-label={`${persona.unread} unread`} /> : null}
               </button>

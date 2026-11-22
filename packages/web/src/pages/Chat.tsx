@@ -18,6 +18,7 @@ import { PersonaChip, greetingFor, startersFor } from '../components/ChatChips';
 import { ContextPanel } from '../components/ContextPanel';
 import { ContextRing } from '../components/ContextRing';
 import { TypingDots, WorkGroupView } from '../components/WorkSteps';
+import { TraceList } from '../components/TraceList';
 import { groupWork } from '../lib/work-steps';
 import { ContextNudgeBanner, DecisionTimeline, BulkDiffCard, LocalRepoPicker, MiniAgentStrip, type MiniAgentRow } from '../components/ChatUpgrades';
 import { parseSources, toolSummary, waitStateOf, waitedFor, type ContextBreakdown } from '@local-agent/shared';
@@ -1385,13 +1386,7 @@ export function Chat() {
           <button className="icon-btn" aria-label={t('Close trace')} title={t('Close trace')} onClick={() => setTrace(false)}><X size={18} /></button>
         </div>
         <p className="faint">{t('Every model call and tool call lands here, with the arguments the model actually sent.')}</p>
-        {steps.map((step) => (
-          <div key={step.id} className="step">
-            <div className="row"><span className={`dot ${step.status === 'completed' ? 'ok' : step.status === 'failed' ? 'bad' : 'live'}`} /><strong>{step.kind}</strong> <span className="muted ellipsis">{step.name}</span></div>
-            <div className="faint">{step.status}{step.latencyMs ? t(' · {0} ms', [step.latencyMs]) : ''}</div>
-            {step.error && <div className="badge bad wrap">{step.error}</div>}
-          </div>
-        ))}
+        <div className="trace-pane"><TraceList steps={steps} /></div>
       </aside>
     </div>
     </CiteContext.Provider>

@@ -65,12 +65,15 @@ import { GALLERY } from './gallery.js';
 import { disabledRules } from './rules.js';
 import { CONNECTOR_TOOLS, disabledConnectorTools } from './connectors.js';
 import { memoryBrief, memoryFileTool, projectRules, proposeSkillTool, searchChatsTool, skillNudge } from './learning.js';
+import { cleanText, fallbackTitle, isNotice, needsTitle, parseTitle, titlePrompt } from './chat-titles.js';
 import { LlamaWatch, isLlamaServerProvider, isNonChatModel, isOllamaProvider, isUncensoredProvider } from './coexist.js';
 
 /** A run in one of these states can still use the answer to a secret request or approval. */
 const WAITING_RUN_STATUSES = new Set(['running', 'paused', 'awaiting_approval', 'awaiting_secret']);
 /** Unanswered secret requests are denied after a day, so the run carries on and the notice clears. */
 export const SECRET_REQUEST_TTL_MS = 24 * 60 * 60 * 1000;
+
+const ACTIVE_RUN_STATUSES = new Set(['queued', 'running', 'loading', 'waiting', 'paused', 'awaiting_approval', 'awaiting_secret']);
 
 export class Engine {
   private readonly inflight = new Map<string, { abort: AbortController; paused: boolean; resumePause: () => void }>();
@@ -265,6 +268,8 @@ export class Engine {
         this.liveStreams.delete(runId);
         releaseRepoLocks(this.store, runId);
         const ended = this.store.getRun(runId);
+        // Steps still marked running when their run ends did not finish: record them as stopped, not running forever.
+        if (ended && !ACTIVE_RUN_STATUSES.has(ended.status)) this.store.db.prepare(`UPDATE run_steps SET status = 'stopped' WHERE run_id = ? AND status IN ('running', 'pending', 'queued')`).run(runId);
         this.bus.publish({ type: 'done', runId, run: ended });
         this.sweepStaleWaits();
         // Helper results are delivered from the run's own record, so they survive a restart (no in-memory callback needed).
@@ -272,6 +277,8 @@ export class Engine {
         if (ended && ended.status === 'completed' && !ended.cursor.helperId && !process.env.VITEST) {
           void this.maybeAutoCompact(ended.sessionId);
         }
+        // After the first exchange the side model names the chat (3-6 words, the chat's language).
+        if (ended && !ended.cursor.helperId && ['completed', 'stopped', 'failed'].includes(ended.status)) this.queueTitles([ended.sessionId]);
       } catch { /* shutting down */ }
     }
   }
@@ -1919,6 +1926,70 @@ export class Engine {
     return models.find((item) => usable(item) && (item.apiName.toLowerCase() === wanted || item.name.toLowerCase() === wanted))
       ?? models.find((item) => usable(item) && item.sizeClass === 'small' && /gemma/i.test(item.apiName))
       ?? main;
+  }
+
+  private titleQueue: string[] = [];
+  private titleBusy = false;
+  /** Queues chats for a generated title (after a run, or lazily for old chats a list shows). One at a time. */
+  queueTitles(sessionIds: string[]) {
+    // Engine tests count model calls exactly; titles are covered by their own unit tests.
+    if (process.env.VITEST) return;
+    for (const id of sessionIds) if (!this.titleQueue.includes(id)) this.titleQueue.push(id);
+    if (this.titleBusy) return;
+    this.titleBusy = true;
+    void (async () => {
+      try {
+        while (this.titleQueue.length) {
+          const id = this.titleQueue.shift()!;
+          try { await this.titleSession(id); } catch { /* a title is never worth failing anything */ }
+        }
+      } finally { this.titleBusy = false; }
+    })();
+  }
+
+  /** Names one chat from its first exchange, unless the user named it or it already has a generated title. */
+  async titleSession(sessionId: string): Promise<string | null> {
+    const session = this.store.getSession(sessionId);
+    if (!session || !needsTitle(session.titleSource)) return null;
+    const messages = this.store.listMessages(sessionId);
+    const user = messages.find((m) => m.role === 'user' && cleanText(m.content));
+    if (!user) return null;
+    const reply = messages.find((m) => m.role === 'assistant' && m.seq > user.seq && cleanText(m.content) && !isNotice(m.content));
+    if (!reply && session.titleSource === 'fallback') return null;
+    const model = this.titleModel();
+    let title: string | null = null;
+    if (model) {
+      try {
+        const provider = this.provider(model);
+        let out = '';
+        for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: titlePrompt(user.content, reply?.content ?? '') }], paceMs: 0, noThink: true, sampling: samplingFor(`${model.apiName} ${model.name}`, { thinking: false, task: 'general' }), maxTokens: 40, signal: AbortSignal.timeout(20_000) })) {
+          if (event.type === 'token') out += event.text;
+        }
+        title = parseTitle(out);
+      } catch { title = null; }
+    }
+    const source = title ? 'auto' : 'fallback';
+    title = title ?? fallbackTitle(user.content);
+    if (session.titleSource === 'fallback' && source === 'fallback') return null;
+    const fresh = this.store.getSession(sessionId);
+    if (!fresh || fresh.titleSource === 'user') return null;
+    this.store.setSessionTitle(sessionId, title, source);
+    this.bus.publish({ type: 'title', sessionId, agentId: session.agentId, title } as never);
+    return title;
+  }
+
+  /** The small local model for titles (LA_SIDE_MODEL, gemma3:4b by default); null = no model, use the fallback. */
+  private titleModel(): ModelRow | null {
+    const wanted = (process.env.LA_SIDE_MODEL ?? 'gemma3:4b').trim().toLowerCase();
+    if (wanted === 'off') return null;
+    const usable = (item: ModelRow) => {
+      const owner = this.store.getProvider(item.providerId);
+      return item.enabled && !item.embedding && item.local && item.profileId !== 'rehearsal' && owner && !isLlamaServerProvider(owner) && !isUncensoredProvider(owner) && !this.llama.blocks(item, owner);
+    };
+    const models = this.store.listModels();
+    return models.find((item) => usable(item) && (item.apiName.toLowerCase() === wanted || item.name.toLowerCase() === wanted))
+      ?? models.find((item) => usable(item) && item.sizeClass === 'small' && /gemma/i.test(item.apiName))
+      ?? null;
   }
 
   private async trySummarize(model: ModelRow, prompt: string): Promise<string | null> {
