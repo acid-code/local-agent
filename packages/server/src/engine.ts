@@ -30,7 +30,7 @@ import {
 } from '@local-agent/shared';
 import { Bus } from './bus.js';
 import { vercelTools } from './vercel.js';
-import type { Agent, ModelRow, RunRow, Store } from './db.js';
+import type { Agent, ModelRow, ProviderRow, RunRow, Store } from './db.js';
 import type { DockerCtl } from './docker.js';
 import { indexText, retrieve, type VectorIndex } from './embeddings.js';
 import { countGeminiTokens, maxTokensFor, ollamaNumCtx, providerFor, samplingFor, type ModelProvider } from './providers.js';
@@ -1036,6 +1036,18 @@ export class Engine {
         })!;
         return;
       }
+      // llama-server restarted or dropped the connection mid-stream: back off, wait for /health, retry the same step.
+      if (!signal.aborted && isTransientModelError(message) && (current.cursor.transientRetries ?? 0) < transientRetryCap()) {
+        const attempt = (current.cursor.transientRetries ?? 0) + 1;
+        const delay = transientDelayMs(attempt);
+        this.store.updateStep(step.id, { status: 'failed', error: message, endedAt: now(), latencyMs: Date.now() - started });
+        this.store.addLog('warn', `${model.name} connection dropped (${message.slice(0, 120)}). Retry ${attempt}/${transientRetryCap()} in ${Math.round(delay / 1000)}s.`, undefined, 'providers');
+        await this.waitForModelServer(providerRow, delay, signal);
+        if (signal.aborted) throw new StopError();
+        const fresh = this.store.getRun(run.id) ?? current;
+        current = this.store.updateRun(run.id, { cursor: { ...fresh.cursor, transientRetries: attempt, phase: 'model' } })!;
+        return;
+      }
       if (isProviderOutage(message) && !current.cursor.providerFallback) {
         const localCandidates = this.candidates(this.store.getSettings(), run.agentId).filter((item) => item.local && item.id !== model.id);
         const local = localCandidates.filter((item) => item.contextWindow >= 16_384).sort((a, b) => b.contextWindow - a.contextWindow)[0]
@@ -1174,6 +1186,15 @@ export class Engine {
       const tool = tools.find((item) => item.name === call.name);
       // A permitted tool called before find_tools surfaced it still runs, and stays on the menu from now on.
       if (tool && run.cursor.extraTools !== undefined && call.name !== 'find_tools' && !run.cursor.extraTools.includes(call.name)) this.addRunTools(run, [call.name]);
+      // Malformed arguments go back to the model as a fixable error instead of running the tool with {}.
+      const badJson = argumentsError(call.name, call.arguments);
+      if (badJson) {
+        this.store.addStep({ runId: run.id, kind: 'contract', name: call.name, status: 'failed', input: { raw: call.arguments.slice(0, 2000) }, output: badJson, toolCallId: call.id, turn: run.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: badJson, startedAt: now() });
+        this.persistTool(run, call, badJson, 'failed', false);
+        completed.add(call.id);
+        this.bumpTools(run.id, completed);
+        continue;
+      }
       let args = parseArgs(call.arguments);
       const speaker = this.store.getAgent(run.agentId);
       const contract = speaker ? contractForAgent(speaker.name) : null;
@@ -1959,6 +1980,20 @@ export class Engine {
     }
   }
 
+  /** Sleep the backoff, then (for llama-server) poll /health until it answers or a minute passes. */
+  private async waitForModelServer(provider: ProviderRow | null | undefined, delayMs: number, signal: AbortSignal) {
+    const sleep = (ms: number) => new Promise<void>((resolve) => { const timer = setTimeout(resolve, ms); signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true }); });
+    await sleep(delayMs);
+    if (!provider?.baseUrl || !(isLlamaServerProvider(provider) || isUncensoredProvider(provider))) return;
+    const root = provider.baseUrl.replace(/\/$/, '').replace(/\/v1$/, '');
+    const until = Date.now() + Math.max(delayMs, Number(process.env.LA_HEALTH_WAIT_MS || 60_000));
+    while (!signal.aborted && Date.now() < until) {
+      const ok = await this.fetchImpl(`${root}/health`, { signal: AbortSignal.timeout(2500) }).then((r) => r.ok).catch(() => false);
+      if (ok) return;
+      await sleep(Math.min(2000, Math.max(50, delayMs)));
+    }
+  }
+
   /** Every tool this persona may use in this run (allowlist, member and helper limits, disabled connectors). */
   private allowedTools(agent: Agent, sessionMode?: string, stage?: 'plan' | 'implement', subset?: string[], helper = false): { tools: Tool[]; servers: Map<string, string> } {
     const names = new Set(agent.toolAllowlist);
@@ -2405,6 +2440,15 @@ function isToolParseError(message: string): boolean {
   return /failed to parse tool call arguments as json|json\.exception\.parse_error|invalid tool call/i.test(message);
 }
 
+/** A dropped or refused connection, or a server that is restarting: worth a retry on the same model after a pause. */
+export function isTransientModelError(message: string): boolean {
+  if (isToolParseError(message)) return false;
+  return /fetch failed|\bterminated\b|socket hang up|other side closed|ECONNRESET|ECONNREFUSED|EPIPE|ETIMEDOUT|UND_ERR_SOCKET|\(503\)|status 503|loading model/i.test(message);
+}
+function transientRetryCap() { return Math.max(0, Number(process.env.LA_TRANSIENT_RETRIES ?? 4)); }
+/** 2s, 4s, 8s, 16s… capped at 30s (LA_TRANSIENT_BASE_MS scales it). */
+export function transientDelayMs(attempt: number) { return Math.min(30_000, Number(process.env.LA_TRANSIENT_BASE_MS ?? 2000) * 2 ** (attempt - 1)); }
+
 function isProviderOutage(message: string): boolean {
   if (isToolParseError(message)) return false;
   return /\(429\)|\(5\d\d\)|status 429|status 5\d\d|rate limit|too many requests/i.test(message);
@@ -2587,6 +2631,27 @@ function requestSecretTool(): Tool {
       return `Requested ${args.name}. Wait for the handle. Do not invent a value.`;
     },
   };
+}
+
+/** Null when the arguments parse to an object; otherwise a message the model can act on (where it broke, how big, what to do). */
+export function argumentsError(name: string, raw: string | undefined): string | null {
+  const text = (raw ?? '').trim();
+  if (!text) return null;
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return null;
+    return `Nothing ran: the arguments for ${name} must be a JSON object like {"key": "value"}, not ${Array.isArray(parsed) ? 'an array' : typeof parsed}. Call ${name} again with an object.`;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const position = Number(detail.match(/position (\d+)/)?.[1]);
+    const near = Number.isFinite(position) ? ` near character ${position}: …${text.slice(Math.max(0, position - 40), position + 20).replace(/\s+/g, ' ')}…` : '';
+    const big = text.length > 6000;
+    return [
+      `Nothing ran: the arguments for ${name} were not valid JSON (${text.length} characters; ${detail.replace(/\s+in JSON.*$/, '')}${near}).`,
+      'Call it again with valid JSON: escape double quotes and backslashes inside strings, write newlines as \\n, and close every brace.',
+      big ? 'The payload is large: split it (write the first part, then append or apply_patch the rest in further calls).' : '',
+    ].filter(Boolean).join(' ');
+  }
 }
 
 function parseArgs(value: string): Record<string, unknown> {
