@@ -1838,20 +1838,56 @@ export class Engine {
     const setting = agent.hebrewCleanup && agent.hebrewCleanup !== 'inherit' ? agent.hebrewCleanup : member.cleanup;
     if (!wantsCleanup(setting, model)) return text;
     this.bus.publish({ type: 'status', runId: run.id, status: 'running', detail: 'Polishing the Hebrew' });
-    const result = await cleanupHebrew(text, async (prompt) => {
-      const provider = this.provider(model);
+    const side = this.sideModel(model);
+    const ask = async (target: ModelRow, prompt: string) => {
+      const provider = this.provider(target);
       let out = '';
-      for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, signal: AbortSignal.timeout(60_000), noThink: true, sampling: samplingFor(`${model.apiName} ${model.name}`, { thinking: false, task: 'general' }), maxTokens: Math.max(1536, Math.ceil(prompt.length / 2)) })) {
+      for await (const event of provider.complete({ model: target.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, signal: AbortSignal.timeout(60_000), noThink: true, sampling: samplingFor(`${target.apiName} ${target.name}`, { thinking: false, task: 'general' }), maxTokens: Math.max(1536, Math.ceil(prompt.length / 2)) })) {
         if (event.type === 'token') out += event.text;
       }
       return out;
+    };
+    // Off Qwen's single llama-server slot when a small Ollama model is there; the main model if that fails.
+    const result = await cleanupHebrew(text, async (prompt) => {
+      if (side.id === model.id) return ask(model, prompt);
+      try { return await ask(side, prompt); } catch { return ask(model, prompt); }
     });
     if (result.changed) this.store.addLog('info', `Hebrew cleanup: ${result.before} → ${result.after} foreign words.`, run.id, 'router');
     else if (result.reason !== 'already clean') this.store.addLog('info', `Hebrew cleanup kept the original: ${result.reason}.`, run.id, 'router');
     return result.text;
   }
 
+  /**
+   * Side work (summaries, Hebrew polish) for a model on llama-server goes to a small Ollama model (gemma3:4b by
+   * default, LA_SIDE_MODEL to change, "off" to disable), so it does not queue behind or evict the chat on Qwen's
+   * single slot. Falls back to the main model when none is installed or llama-server would block it.
+   */
+  private sideModel(main: ModelRow): ModelRow {
+    const wanted = (process.env.LA_SIDE_MODEL ?? 'gemma3:4b').trim().toLowerCase();
+    if (wanted === 'off' || main.profileId === 'rehearsal') return main;
+    const provider = this.store.getProvider(main.providerId);
+    if (!provider || !(isLlamaServerProvider(provider) || isUncensoredProvider(provider))) return main;
+    const usable = (item: ModelRow) => {
+      const owner = this.store.getProvider(item.providerId);
+      return item.enabled && !item.embedding && item.local && owner && !isLlamaServerProvider(owner) && !isUncensoredProvider(owner) && !this.llama.blocks(item, owner);
+    };
+    const models = this.store.listModels();
+    return models.find((item) => usable(item) && (item.apiName.toLowerCase() === wanted || item.name.toLowerCase() === wanted))
+      ?? models.find((item) => usable(item) && item.sizeClass === 'small' && /gemma/i.test(item.apiName))
+      ?? main;
+  }
+
   private async trySummarize(model: ModelRow, prompt: string): Promise<string | null> {
+    const side = this.sideModel(model);
+    if (side.id !== model.id) {
+      const text = await this.summarizeOn(side, prompt);
+      if (text) return text;
+      this.store.addLog('warn', `Summary on ${side.name} failed; using ${model.name}.`, undefined, 'context');
+    }
+    return this.summarizeOn(model, prompt);
+  }
+
+  private async summarizeOn(model: ModelRow, prompt: string): Promise<string | null> {
     if (model.profileId === 'rehearsal') return prompt.split('\n').filter((line) => line.startsWith('user:') || line.startsWith('assistant:')).slice(0, 6).join(' ').slice(0, 800) || 'Summary stored.';
     try {
       const provider = this.provider(model);

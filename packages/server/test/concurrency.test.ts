@@ -280,3 +280,31 @@ describe('fallback-control auth', () => {
     ]);
   });
 });
+
+describe('side work off the llama-server slot', () => {
+  it('summaries go to gemma3:4b when the chat model is on llama-server, and fall back to it on failure', async () => {
+    const { store } = newStore();
+    store.upsertProvider({ id: 'prov_ollama', kind: 'openai_compat', name: 'Ollama', baseUrl: 'http://127.0.0.1:11434/v1', enabled: true });
+    store.upsertProvider({ id: 'prov_llama', kind: 'openai_compat', name: 'llama-server', baseUrl: 'http://127.0.0.1:8080/v1', enabled: true });
+    store.upsertModel(model('ollama_gemma3', 'prov_ollama', 'gemma3:4b', 3.4, 'small'));
+    store.upsertModel(model('llama_qwen', 'prov_llama', 'qwen3.6-35b-a3b', 23, 'large'));
+    const used: string[] = [];
+    let gemmaDown = false;
+    const engine = engineWith(store, uncensoredUp, (m) => {
+      used.push(m.apiName);
+      if (m.apiName === 'gemma3:4b' && gemmaDown) return { async *complete() { throw new Error('fetch failed'); } } as unknown as ModelProvider;
+      return new ScriptedProvider([{ text: `summary by ${m.apiName}` }]);
+    });
+    const internals = engine as unknown as { sideModel: (m: ModelRow) => ModelRow; trySummarize: (m: ModelRow, p: string) => Promise<string | null> };
+    const qwen = store.getModel('llama_qwen')!;
+    expect(internals.sideModel(qwen).apiName).toBe('gemma3:4b');
+    expect(internals.sideModel(store.getModel('ollama_gemma3')!).apiName).toBe('gemma3:4b');
+    expect(await internals.trySummarize(qwen, 'user: hi')).toBe('summary by gemma3:4b');
+    gemmaDown = true;
+    used.length = 0;
+    expect(await internals.trySummarize(qwen, 'user: hi')).toBe('summary by qwen3.6-35b-a3b');
+    expect(used).toEqual(['gemma3:4b', 'qwen3.6-35b-a3b']);
+    process.env.LA_SIDE_MODEL = 'off';
+    try { expect(internals.sideModel(qwen).id).toBe('llama_qwen'); } finally { delete process.env.LA_SIDE_MODEL; }
+  });
+});
