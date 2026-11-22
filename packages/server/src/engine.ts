@@ -41,7 +41,7 @@ import { kbSearchTool, loadSkillTool, toolsFor, type Tool, type ToolContext } fr
 import { runSkillScript, skillCatalog } from './skills.js';
 import { getWorkshop, workshopBrief } from './workshops.js';
 import { chatWorkspaceBrief, chatWorkspacePaths, getChatWorkspaces, setChatWorkspaces } from './chat-workspaces.js';
-import { checkOrRepair, contractForAgent, pickAutoRole, toolArgumentsSchema, toolParameters } from './contracts.js';
+import { checkOrRepair, contractForAgent, mergeToolParameters, pickAutoRole, toolArgumentsSchema } from './contracts.js';
 import { addProjectNote, changesSince, ensureTaskBranch, isSmallEdit, listSharedRepos, matchRepos, refreshRepo, releaseRepoLocks, repoSyncTool, sharedRepoBrief, taskBranchName, tryLockRepo, type GitIdentity } from './repos.js';
 import { isMissingModelError, isToolUnsupportedError, ollamaCapabilities, ollamaRoot } from './ollama.js';
 import { scanMachine } from './discovery.js';
@@ -1904,7 +1904,7 @@ export class Engine {
       if (!names.has(tool.name) || seen.has(tool.name)) return false;
       seen.add(tool.name);
       return true;
-    }).map((tool) => ({ ...tool, parameters: toolParameters(tool.name).properties ? toolParameters(tool.name) : tool.parameters }));
+    }).map((tool) => ({ ...tool, parameters: mergeToolParameters(tool.name, tool.parameters) }));
     return names.has('run_tool_script') ? [...chosen, toolScript(chosen)] : chosen;
   }
 
