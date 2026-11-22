@@ -1,3 +1,4 @@
+import { keepAliveFor } from './pinned.js';
 import fs from 'node:fs';
 import {
   decideAuto,
@@ -868,7 +869,7 @@ export class Engine {
         model: model.apiName, messages: built.messages, tools, signal,
         paceMs: model.profileId === 'rehearsal' && process.env.NODE_ENV !== 'test' ? 10 : 0,
         numCtx,
-        keepAlive: model.local ? (model.sizeClass === 'large' ? '30m' : '5m') : undefined,
+        keepAlive: model.local ? keepAliveFor(model) : undefined,
         think: Boolean(current.cursor.reasoning) && !current.cursor.noThink,
         noThink: Boolean(current.cursor.noThink),
       })) {
