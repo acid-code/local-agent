@@ -247,7 +247,22 @@ private fun ChatScreen(state: AppUiState, vm: ChatViewModel, onVoiceDictation: (
             val visibleMessages = remember(state.messages) {
                 state.messages.filter { it.role == "user" || it.role == "assistant" || it.role == "tool" }
             }
-            LaunchedEffect(visibleMessages.size, state.streamingText.length, state.approvals.size) {
+            val workItems = remember(visibleMessages) { WorkSteps.group(visibleMessages) }
+            val lastWork = (workItems.lastOrNull() as? WorkSteps.Item.Work)?.group
+            val liveWork = state.isStreaming && (lastWork != null || visibleMessages.lastOrNull()?.role == "user" || visibleMessages.isEmpty())
+            val inlinedApprovalIds = remember(lastWork, state.approvals, liveWork) {
+                if (!liveWork || lastWork == null) emptySet()
+                else {
+                    val used = mutableSetOf<String>()
+                    lastWork.rows.filterIsInstance<WorkSteps.Row.Step>().mapNotNull { step ->
+                        WorkSteps.approvalFor(step, state.approvals.filter { it.id !in used })?.also { used += it.id }?.id
+                    }.toSet()
+                }
+            }
+            val leftoverApprovals = state.approvals.filter { it.id !in inlinedApprovalIds }
+            // Scroll when structure changes, not on every streamed token (that flicker-scrolled the list).
+            val lastStepCount = lastWork?.stepCount ?: 0
+            LaunchedEffect(workItems.size, lastStepCount, leftoverApprovals.size, state.isStreaming, state.runStatus) {
                 val total = listState.layoutInfo.totalItemsCount
                 if (total > 0) listState.animateScrollToItem(total - 1)
             }
@@ -261,21 +276,53 @@ private fun ChatScreen(state: AppUiState, vm: ChatViewModel, onVoiceDictation: (
                 if (visibleMessages.isEmpty() && !state.isStreaming) {
                     item { EmptyWelcomeCard(persona = state.activePersona, onPickPrompt = { vm.setDraft(it) }) }
                 }
-                items(visibleMessages, key = { it.id }) { msg ->
-                    MessageBubble(
-                        msg = msg,
-                        persona = msg.agentId?.let { id -> state.personas.firstOrNull { it.id == id } },
-                        isSpeaking = state.speakingId == msg.id,
-                        onSpeak = { vm.speakMessage(msg.id, msg.content, msg.agentId) },
-                    )
-                }
-                if (state.streamingThinking.isNotBlank() || state.streamingText.isNotBlank()) {
-                    item(key = "streaming_live") {
-                        StreamingBubble(persona = state.activePersona, thinking = state.streamingThinking, text = state.streamingText)
+                items(workItems, key = { it.key }) { item ->
+                    when (item) {
+                        is WorkSteps.Item.Message -> {
+                            val msg = item.message
+                            MessageBubble(
+                                msg = msg,
+                                persona = msg.agentId?.let { id -> state.personas.firstOrNull { it.id == id } },
+                                isSpeaking = state.speakingId == msg.id,
+                                onSpeak = { vm.speakMessage(msg.id, msg.content, msg.agentId) },
+                            )
+                        }
+                        is WorkSteps.Item.Work -> {
+                            val live = liveWork && item.group.id == lastWork?.id
+                            WorkGroupCard(
+                                group = item.group,
+                                live = live,
+                                liveThought = if (live) state.streamingThinking.takeIf { it.isNotBlank() } else null,
+                                diffs = if (live || item.group.id == lastWork?.id) state.edits.map { it.diff } else emptyList(),
+                                approvals = if (live) state.approvals else emptyList(),
+                                focusApprovalId = state.focusApprovalId,
+                                onApprove = { vm.decideApproval(it, "approve") },
+                                onDeny = { vm.decideApproval(it, "deny") },
+                            )
+                        }
                     }
                 }
-                if (state.steps.isNotEmpty() && (state.coderMode || state.isStreaming)) {
-                    item(key = "decision_timeline") { CursorTimelineCard(steps = state.steps, live = state.isStreaming) }
+                if (liveWork && lastWork == null) {
+                    item(key = "work_live") {
+                        WorkGroupCard(
+                            group = livePlaceholderGroup(),
+                            live = true,
+                            liveThought = state.streamingThinking.takeIf { it.isNotBlank() },
+                            approvals = state.approvals,
+                            focusApprovalId = state.focusApprovalId,
+                            onApprove = { vm.decideApproval(it, "approve") },
+                            onDeny = { vm.decideApproval(it, "deny") },
+                        )
+                    }
+                }
+                if (state.streamingText.isNotBlank()) {
+                    item(key = "streaming_live") {
+                        StreamingBubble(
+                            persona = state.activePersona,
+                            thinking = if (liveWork) "" else state.streamingThinking,
+                            text = state.streamingText,
+                        )
+                    }
                 }
                 if (state.coderMode || state.edits.isNotEmpty()) {
                     items(state.edits, key = { "edit_${it.id}" }) { edit ->
@@ -292,21 +339,13 @@ private fun ChatScreen(state: AppUiState, vm: ChatViewModel, onVoiceDictation: (
                         )
                     }
                 }
-                items(state.approvals, key = { "approval_${it.id}" }) { approval ->
+                items(leftoverApprovals, key = { "approval_${it.id}" }) { approval ->
                     ApprovalCard(
                         item = approval,
                         highlighted = approval.id == state.focusApprovalId,
                         onApprove = { vm.decideApproval(approval.id, "approve") },
                         onDeny = { vm.decideApproval(approval.id, "deny") },
                     )
-                }
-                if (state.isStreaming && state.runStatus != "waiting" && state.approvals.isEmpty() && state.streamingText.isBlank() && state.streamingThinking.isBlank()) {
-                    item(key = "typing") {
-                        Row(Modifier.padding(vertical = 6.dp, horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.tertiary)
-                            Text(state.statusDetail.ifBlank { "Working…" }, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
                 }
                 if (!state.runError.isNullOrBlank()) {
                     item(key = "run_error") {

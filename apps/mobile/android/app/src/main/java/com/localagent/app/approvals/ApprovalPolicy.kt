@@ -54,6 +54,7 @@ object ApprovalPolicy {
             sessionTitle = json.str("sessionTitle"),
             agentName = json.str("agentName"),
             createdAt = json.optString("createdAt", ""),
+            toolCallId = json.optString("toolCallId", ""),
         )
     }
 

@@ -1,3 +1,4 @@
+import { withoutHarmlessRedirects } from './guard.js';
 /**
  * Risk-based approval tiers. Every tool call gets a tier; the approval mode decides which tiers ask first.
  *   safe   read-only (read, list, search, fetch): never asks
@@ -19,8 +20,10 @@ const HIGH_ACTION = /(^|_)(send|post|publish|delete|remove|destroy|pay|purchase|
 export function riskOf(tool: string, args: Record<string, unknown>, declared: string | null): { tier: RiskTier; why: string } {
   if (tool === 'shell') {
     const command = String(args.command ?? '');
+    // 2>/dev/null and 2>&1 must not count as writes; same rule as assessCommand.
+    const cleaned = withoutHarmlessRedirects(command);
     if (HIGH_SHELL.some((pattern) => pattern.test(command))) return { tier: 'high', why: `Shell command with effects outside the workspace: ${command.slice(0, 160)}` };
-    if (MEDIUM_SHELL.some((pattern) => pattern.test(command))) return { tier: 'medium', why: `Shell command changes or deletes files: ${command.slice(0, 160)}` };
+    if (MEDIUM_SHELL.some((pattern) => pattern.test(cleaned))) return { tier: 'medium', why: `Shell command changes or deletes files: ${command.slice(0, 160)}` };
     return { tier: 'low', why: `Shell command: ${command.slice(0, 160)}` };
   }
   if (tool === 'docker_rm') return { tier: 'high', why: declared ?? 'Remove a container' };
