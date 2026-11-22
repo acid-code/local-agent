@@ -17,3 +17,4 @@ coverage
 e2e-report/
 test-results/
 *.apk
+scripts/eval/results/

@@ -1,0 +1,11 @@
+{
+  "id": "find-tools-reminder",
+  "persona": "House",
+  "prompt": "Remind me in 10 minutes to drink water.",
+  "expect": {
+    "toolsAnyOf": ["manage_timer"],
+    "replyNotMatches": ["can'?t|cannot|unable"],
+    "maxSteps": 6,
+    "maxSeconds": 120
+  }
+}

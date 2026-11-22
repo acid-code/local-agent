@@ -1,0 +1,13 @@
+{
+  "id": "read-range",
+  "persona": "Coder",
+  "mode": "code",
+  "prompt": "In package.json of the workspace, what does line 1 to 5 say? Read only those lines.",
+  "expect": {
+    "toolsUsed": ["read_file"],
+    "argsInclude": { "read_file": ["startLine"] },
+    "replyMatches": ["\\{"],
+    "maxSteps": 6,
+    "maxSeconds": 180
+  }
+}

@@ -19,7 +19,8 @@
     "eval:local": "node scripts/eval-local.mjs",
     "doctor": "tsx packages/server/src/doctor-cli.ts",
     "reset-owner": "tsx packages/server/src/doctor-cli.ts --reset-owner",
-    "e2e": "playwright test -c e2e/playwright.config.ts"
+    "e2e": "playwright test -c e2e/playwright.config.ts",
+    "eval": "node scripts/eval/run.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.65.1",
