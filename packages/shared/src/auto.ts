@@ -31,9 +31,24 @@ export interface AutoCandidate {
   embedding: boolean;
   sizeClass: 'small' | 'large';
   providerKind: string;
+  /** Display name of the provider, e.g. Ollama or llama-server. */
+  providerName?: string;
   quotaOpen?: boolean;
   practicalBudget: number;
   enabled: boolean;
+}
+
+export interface RoleResolution {
+  role: AutoRole;
+  wanted: string;
+  modelId?: string;
+  modelName?: string;
+  apiName?: string;
+  providerKind?: string;
+  providerName?: string;
+  fallback: boolean;
+  available: boolean;
+  note: string;
 }
 
 export interface ChatCommand {
@@ -91,14 +106,41 @@ function chatLocals(models: AutoCandidate[]) {
   return models.filter((model) => model.enabled && model.local && !model.embedding && model.providerKind !== 'rehearsal');
 }
 
+export function modelLabel(model: Pick<AutoCandidate, 'apiName' | 'name'>): string {
+  return `${model.apiName} ${model.name}`;
+}
+
+/** llama.cpp / Ollama Qwen3.6 35B-A3B, the box's main brain. */
+export function isQwenMain(model: Pick<AutoCandidate, 'apiName' | 'name'>): boolean {
+  const label = modelLabel(model);
+  return /qwen3\.?6/i.test(label) || (/35b/i.test(label) && /a3b/i.test(label));
+}
+
 export function detectMain(models: AutoCandidate[]): AutoCandidate | undefined {
   const pool = chatLocals(models);
-  const label = (model: AutoCandidate) => `${model.apiName} ${model.name}`;
-  const gemma = pool.find((model) => /gemma/i.test(label(model)) && /(26b|a4b)/i.test(label(model)));
-  const qwen = pool.find((model) => /qwen3\.?6/i.test(label(model)) || (/35b/i.test(label(model)) && /a3b/i.test(label(model))));
+  const gemma = pool.find((model) => /gemma/i.test(modelLabel(model)) && /(26b|a4b)/i.test(modelLabel(model)));
+  const qwen = pool.find(isQwenMain);
   // Qwen3.6 on llama-server is the main brain. Preferring gemma4 here made Auto fall back to it whenever
   // the main slot was empty, which loaded 18 GB in Ollama next to llama-server.
   return qwen ?? gemma ?? pool.find((model) => model.sizeClass === 'large') ?? pool[0];
+}
+
+/** gemma3:4b first (titles, short replies), then the smallest local chat model. */
+export function detectFast(models: AutoCandidate[]): AutoCandidate | undefined {
+  const pool = chatLocals(models);
+  const gemma4b = pool.find((model) => /gemma3/i.test(modelLabel(model)) && /4b/i.test(modelLabel(model)));
+  const small = pool.filter((model) => model.sizeClass === 'small').sort((a, b) => a.practicalBudget - b.practicalBudget)[0];
+  return gemma4b ?? small;
+}
+
+/** gpt-oss (or another non-Qwen coder) when present, else the llama.cpp Qwen main model. */
+export function detectCoder(models: AutoCandidate[]): AutoCandidate | undefined {
+  const pool = chatLocals(models);
+  const label = (model: AutoCandidate) => modelLabel(model);
+  return pool.find((model) => /gpt[-_.: ]?oss|devstral|codestral|deepseek[-_.: ]?coder/i.test(label(model)))
+    ?? pool.find((model) => /coder/i.test(label(model)) && !/qwen/i.test(label(model)))
+    ?? pool.find((model) => /coder/i.test(label(model)))
+    ?? pool.find(isQwenMain);
 }
 
 function fallbackModel(models: AutoCandidate[]): AutoCandidate {
@@ -107,41 +149,112 @@ function fallbackModel(models: AutoCandidate[]): AutoCandidate {
   return model;
 }
 
-function resolveRole(role: AutoRole, map: AutoMap, models: AutoCandidate[]): { model: AutoCandidate; reasoning: boolean; quotaFallback: false | 'quota' | 'off' } {
-  const fallback = fallbackModel(models);
-  const main = (map.main && matchAutoModel(models, map.main)) || detectMain(models) || fallback;
-  if (role === 'fast') {
-    const named = matchAutoModel(chatLocals(models), map.fast);
-    const small = chatLocals(models).filter((model) => model.sizeClass === 'small').sort((a, b) => a.practicalBudget - b.practicalBudget)[0];
-    return { model: named ?? small ?? main, reasoning: false, quotaFallback: false };
-  }
-  if (role === 'coder') {
-    const named = matchAutoModel(models, map.coder)
-      ?? chatLocals(models).find((model) => /gpt[-_.: ]?oss|devstral|codestral|deepseek[-_.: ]?coder/i.test(`${model.apiName} ${model.name}`))
-      ?? chatLocals(models).find((model) => /coder/i.test(`${model.apiName} ${model.name}`) && !/qwen/i.test(`${model.apiName} ${model.name}`))
-      ?? chatLocals(models).find((model) => /coder/i.test(`${model.apiName} ${model.name}`));
-    return { model: named ?? main, reasoning: false, quotaFallback: false };
-  }
-  if (role === 'thinking') {
-    const named = map.thinking ? matchAutoModel(models, map.thinking) : undefined;
-    return { model: named ?? main, reasoning: true, quotaFallback: false };
-  }
-  if (role === 'cloud') {
-    const named = map.cloud ? matchAutoModel(models, map.cloud) : undefined;
-    if (named && (named.local || named.quotaOpen !== false)) return { model: named, reasoning: false, quotaFallback: false };
-    const gemini = models.filter((model) => model.enabled && !model.local && model.providerKind === 'gemini' && model.quotaOpen !== false)
-      .sort((a, b) => b.practicalBudget - a.practicalBudget)[0];
-    if (gemini) return { model: gemini, reasoning: false, quotaFallback: false };
-    const anyGemini = models.some((model) => model.enabled && !model.local && model.providerKind === 'gemini');
-    return { model: main, reasoning: false, quotaFallback: anyGemini ? 'quota' : 'off' };
-  }
-  return { model: main, reasoning: false, quotaFallback: false };
+export interface ResolvedRole {
+  model: AutoCandidate;
+  reasoning: boolean;
+  quotaFallback: false | 'quota' | 'off';
+  wanted: string;
+  matched: boolean;
+  fallback: boolean;
+  note: string;
 }
 
-/**
- * How well a model writes Hebrew, 0 = not at all. Gemini is best; Gemma and Qwen handle it, bigger is better;
- * tiny English-first models (SmolLM, TinyLlama, Phi) are poor. Used only to rank, never to block.
- */
+function namedOrNull(models: AutoCandidate[], wanted: string | undefined): AutoCandidate | undefined {
+  return wanted ? matchAutoModel(models, wanted) : undefined;
+}
+
+function describeResolution(input: {
+  role: AutoRole;
+  wanted: string;
+  model: AutoCandidate;
+  matched: boolean;
+  quotaFallback: false | 'quota' | 'off';
+}): Pick<ResolvedRole, 'fallback' | 'note'> {
+  const { role, wanted, model, matched, quotaFallback } = input;
+  if (quotaFallback === 'quota') return { fallback: true, note: `Gemini quota is used up; using ${model.name}.` };
+  if (wanted && !matched) return { fallback: true, note: `Configured "${wanted}" is not installed; using ${model.name}.` };
+  if (quotaFallback === 'off' && role === 'cloud' && wanted) return { fallback: true, note: `Configured "${wanted}" is not available; using ${model.name}.` };
+  return { fallback: false, note: '' };
+}
+
+export function resolveRole(role: AutoRole, map: AutoMap, models: AutoCandidate[]): ResolvedRole {
+  const fallback = fallbackModel(models);
+  const wantedMain = (map.main || '').trim();
+  const matchedMain = namedOrNull(models, wantedMain);
+  const main = matchedMain || detectMain(models) || fallback;
+  const wrap = (wanted: string, model: AutoCandidate, matched: boolean, reasoning: boolean, quotaFallback: false | 'quota' | 'off' = false): ResolvedRole => ({
+    model, reasoning, quotaFallback, wanted, matched, ...describeResolution({ role, wanted, model, matched, quotaFallback }),
+  });
+  if (role === 'fast') {
+    const wanted = (map.fast || '').trim();
+    const named = namedOrNull(chatLocals(models), wanted);
+    return wrap(wanted, named ?? detectFast(models) ?? main, Boolean(named), false);
+  }
+  if (role === 'coder') {
+    const wanted = (map.coder || '').trim();
+    const named = namedOrNull(models, wanted);
+    return wrap(wanted, named ?? detectCoder(models) ?? main, Boolean(named), false);
+  }
+  if (role === 'thinking') {
+    const wanted = (map.thinking || '').trim();
+    const named = namedOrNull(models, wanted);
+    return wrap(wanted, named ?? main, Boolean(named), true);
+  }
+  if (role === 'cloud') {
+    const wanted = (map.cloud || '').trim();
+    const named = namedOrNull(models, wanted);
+    if (named && (named.local || named.quotaOpen !== false)) return wrap(wanted, named, true, false);
+    const gemini = models.filter((model) => model.enabled && !model.local && model.providerKind === 'gemini' && model.quotaOpen !== false)
+      .sort((a, b) => b.practicalBudget - a.practicalBudget)[0];
+    if (gemini) return wrap(wanted, gemini, Boolean(named), false);
+    const anyGemini = models.some((model) => model.enabled && !model.local && model.providerKind === 'gemini');
+    return wrap(wanted, main, Boolean(named), false, wanted || anyGemini ? (anyGemini ? 'quota' : 'off') : false);
+  }
+  return wrap(wantedMain, main, Boolean(matchedMain), false);
+}
+
+function isUsable(model: AutoCandidate | undefined): model is AutoCandidate {
+  return Boolean(model && model.enabled && model.providerKind !== 'rehearsal');
+}
+
+/** How each Auto role resolves against the models that are actually present. */
+export function describeAutoRoles(map: AutoMap, models: AutoCandidate[]): RoleResolution[] {
+  const roles: AutoRole[] = ['fast', 'main', 'coder', 'thinking', 'cloud'];
+  const real = models.filter((model) => model.enabled && !model.embedding);
+  const hasReal = real.some(isUsable);
+  return roles.map((role) => {
+    const wanted = (map[role] || '').trim();
+    if (!hasReal) {
+      return {
+        role, wanted, fallback: Boolean(wanted), available: false,
+        note: wanted ? `Configured "${wanted}" is not installed, and no other model is available.` : 'No usable model is installed.',
+      };
+    }
+    const resolved = resolveRole(role, map, models);
+    const available = isUsable(resolved.model);
+    return {
+      role, wanted, fallback: resolved.fallback, available,
+      modelId: resolved.model.id, modelName: resolved.model.name, apiName: resolved.model.apiName,
+      providerKind: resolved.model.providerKind, providerName: resolved.model.providerName,
+      note: available ? resolved.note : (resolved.note || 'No usable model is installed.'),
+    };
+  });
+}
+
+export function autoRoleHealth(map: AutoMap, models: AutoCandidate[]): { ok: boolean; detail: string; roles: RoleResolution[] } {
+  const roles = describeAutoRoles(map, models);
+  const missing = roles.filter((row) => !row.available);
+  const line = (row: RoleResolution) => {
+    if (!row.available) return `${row.role}: no usable model` + (row.wanted ? ` (wanted ${row.wanted})` : '');
+    const who = row.providerName ? `${row.modelName} (${row.providerName})` : row.modelName!;
+    return row.note ? `${row.role} → ${who} — ${row.note}` : `${row.role} → ${who}`;
+  };
+  const detail = missing.length
+    ? `No usable model for ${missing.map((row) => row.role).join(', ')}. ${roles.map(line).join('; ')}`
+    : `Auto roles: ${roles.map(line).join('; ')}`;
+  return { ok: missing.length === 0, detail, roles };
+}
+
 export function hebrewScore(model: Pick<AutoCandidate, 'apiName' | 'name' | 'local' | 'providerKind'>): number {
   const label = `${model.apiName} ${model.name}`.toLowerCase();
   if (!model.local && model.providerKind === 'gemini') return 100;
@@ -218,7 +331,7 @@ export function decideAuto(input: {
   if (input.hebrew && role !== 'coder' && why !== 'smart') {
     const hebrew = pickHebrewModel(input.models, input.fits);
     if (hebrew && hebrewScore(hebrew) > hebrewScore(resolved.model) && (hebrew.local || why !== 'task' || hebrewScore(resolved.model) < 60)) {
-      resolved = { model: hebrew, reasoning: resolved.reasoning, quotaFallback: false };
+      resolved = { ...resolved, model: hebrew, quotaFallback: false, fallback: true, matched: false, note: `Switched to ${hebrew.name} for Hebrew.` };
       const decision = {
         role, modelId: hebrew.id, modelName: hebrew.name, reasoning: resolved.reasoning, switched: hebrew.id !== main.id, escalated: why !== 'task',
         reason: `Switched to ${hebrew.name} — it writes the best Hebrew of the models that fit.`, unload: unloadOf(hebrew), trace: `auto:hebrew:${role}`,
@@ -239,6 +352,7 @@ export function decideAuto(input: {
   else if (role === 'coder' && switched) reason = `Switched to ${resolved.model.name} — this turn changes code.`;
   else if (role === 'thinking' && switched) reason = `Switched to ${resolved.model.name} with reasoning on — this turn is a plan.`;
   if (!switched && !resolved.quotaFallback) reason = `Staying on ${resolved.model.name}.`;
+  if (resolved.fallback && resolved.note && !resolved.quotaFallback && !reason.includes(resolved.note)) reason = `${reason} ${resolved.note}`;
   return {
     role, modelId: resolved.model.id, modelName: resolved.model.name, reasoning: resolved.reasoning,
     switched, escalated, reason, unload: unloadOf(resolved.model), trace: why === 'task' ? `auto:${role}` : `auto:${why}`,

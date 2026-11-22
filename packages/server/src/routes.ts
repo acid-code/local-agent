@@ -22,7 +22,8 @@ import { createBackup, listBackups, preChangeBackup, shipBackup, stageRestore } 
 import { telegramQueue } from './notify.js';
 import { ollamaLoaded, ollamaRoot } from './ollama.js';
 import { approvalView } from './approval-view.js';
-import { doctorChecks, geminiStateOf, missingRoleModels, redactValue, searchLogs, zipStore, LOG_COMPONENTS, type LogComponent } from './debug.js';
+import { doctorChecks, geminiStateOf, redactValue, searchLogs, zipStore, LOG_COMPONENTS, type LogComponent } from './debug.js';
+import { autoRoleReport } from './auto-roles.js';
 import { ensureDiskRoom, isDiskFullError, previewPrune, runPrune, snapshotResources } from './resources.js';
 import { speak, transcribe, voiceStatus, VoiceError, KOKORO_COMMAND, WHISPER_COMMAND } from './voice.js';
 import { formatSearch, listWorkspace, readWorkspaceFile, searxngHealth, searxngQuery } from './tools.js';
@@ -1351,7 +1352,8 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       return { ...row, rpm: { ...row.rpm, used: local.rpm }, tpm: { ...row.tpm, used: local.tpm }, rpd: { ...row.rpd, used: local.rpd }, availability: quotaAvailability(row, local) };
     });
     const geminiConnected = Boolean(process.env.GEMINI_API_KEY);
-    return { models: store.listModels(), providers: store.listProviders(), resident: lastScan?.resident ?? [], quota, quotaObservedAt: FREE_TIER_OBSERVED_AT, geminiConnected };
+    const autoRoles = await autoRoleReport(store, fetchImpl).catch(() => null);
+    return { models: store.listModels(), providers: store.listProviders(), resident: lastScan?.resident ?? [], quota, quotaObservedAt: FREE_TIER_OBSERVED_AT, geminiConnected, autoRoles };
   });
   /** What the model pickers may offer this account right now (Auto is always on top in the UI). */
   app.get('/api/models/usable', async (req) => {
@@ -1934,14 +1936,7 @@ async function healthChecks(store: Store, docker: DockerCtl, fetchImpl: typeof f
   const dbFile = path.join(dataDir, 'local-agent.db');
   const dbBytes = fs.existsSync(dbFile) ? fs.statSync(dbFile).size : 0;
   const embedWarning = ollamaOk ? await embedRoleWarning(store, fetchImpl) : null;
-  let installed: string[] | null = null;
-  if (ollamaOk) {
-    try {
-      const tags = await fetchImpl(`${(process.env.OLLAMA_HOST || 'http://127.0.0.1:11434').replace(/\/$/, '')}/api/tags`, { signal: AbortSignal.timeout(1500) });
-      if (tags.ok) installed = ((await tags.json()) as { models?: { name: string }[] }).models?.map((model) => model.name) ?? [];
-    } catch { installed = null; }
-  }
-  const missingRoles = installed ? missingRoleModels(settings.autoModels as unknown as Record<string, string>, installed) : [];
+  const roleReport = await autoRoleReport(store, fetchImpl);
   return [...doctorChecks({
     ollamaOk, loaded, dockerOk: await docker.ping(), mcpCount: mcp.length, mcpErrors: mcp.filter((item) => item.lastError).length,
     searxngOk: searx.ok, searxngDetail: searx.detail, telegramQueued: telegramQueue(dataDir).length, dbBytes,
@@ -1950,7 +1945,7 @@ async function healthChecks(store: Store, docker: DockerCtl, fetchImpl: typeof f
   }), { id: 'embed', ok: !embedWarning, detail: embedWarning || (ollamaOk ? 'The embed role is an embedding model.' : 'Ollama is down, so the embed role was not checked.') },
   await imageCheck(store, dataDir, fetchImpl),
   { id: 'ram-budget', ...(memory ? await budgetReport(memory, budgetConfig(settings)) : { ok: true, detail: `RAM budget ${settings.ramBudgetGiB} GB (not tracked in this build).` }) },
-  { id: 'roles', ok: missingRoles.length === 0, detail: installed === null ? 'Ollama is down, so the Auto roles were not checked.' : missingRoles.length ? `Auto roles point at models Ollama does not have: ${missingRoles.join(', ')}. Pull them or change Defaults in Setup.` : 'Every Auto role points at an installed model.' }];
+  { id: 'roles', ok: roleReport.ok, detail: roleReport.detail, roles: roleReport.roles }];
 }
 
 async function imageCheck(store: Store, dataDir: string, fetchImpl: typeof fetch) {

@@ -21,13 +21,23 @@ interface SecretRequest { id: string; name: string; reason: string; status: stri
 interface SettingsShape { codeApproval: string; geminiTier: string; sandbox: string; autoResume: boolean; approvalForDestructive: boolean; approvalMode?: string; readOnly?: boolean; dailyTokenLimit?: number | null; killSwitch?: boolean; searxngUrl?: string }
 interface ProviderItem { id: string; kind: string; name: string; baseUrl: string | null; enabled: boolean }
 interface ModelItem { id: string; name: string; apiName: string; local: boolean; enabled: boolean; providerId: string; parameterSize?: string | null; practicalBudget?: number }
+interface AutoRoleRow { role: string; wanted: string; modelName?: string; providerName?: string; fallback: boolean; available: boolean; note: string }
+interface AutoRoles { ok: boolean; detail: string; roles: AutoRoleRow[] }
+function autoRoleLabel(role: string) {
+  if (role === 'fast') return tr('Fast');
+  if (role === 'main') return tr('Main');
+  if (role === 'coder') return tr('Coder');
+  if (role === 'thinking') return tr('Thinking');
+  if (role === 'cloud') return tr('Cloud');
+  return role;
+}
 
 interface Def { id: string; label: string; icon: LucideIcon; blurb: string; words: string; owner?: boolean; group: 'General' | 'Admin' }
 /** One page, in this order. Old deep links (#models, #setup, #vault, #policy, #backups…) land on the matching section. */
 const SECTIONS: Def[] = [
   { id: 'appearance', group: 'General', label: tr('Appearance'), icon: Palette, blurb: tr('Theme, font, bubbles and wallpaper for your account.'), words: 'theme dark light font wallpaper color bubbles density accent' },
   { id: 'language', group: 'General', label: tr('Language'), icon: Languages, blurb: tr('Interface language and Hebrew polishing.'), words: 'language hebrew עברית english rtl locale translate' },
-  { id: 'system', group: 'General', label: tr('System'), icon: Cpu, blurb: tr('Models, Ollama pulls, llama-server, SearXNG web search, and image generation.'), words: 'system models ollama llama-server pull refresh searxng search url gemini image limits quota tier setup' },
+  { id: 'system', group: 'General', label: tr('System'), icon: Cpu, blurb: tr('Models, Ollama pulls, llama-server, SearXNG web search, and image generation.'), words: 'system models ollama llama-server pull refresh searxng search url gemini image limits quota tier setup auto roles fast coder main' },
   { id: 'personas', group: 'General', label: tr('Personas'), icon: Bot, blurb: tr('Who you talk to. Edit one from the chat with its name.'), words: 'personas agents prompt instructions tools skills face voice' },
   { id: 'workspaces', group: 'General', label: tr('Workspaces'), icon: FolderGit2, blurb: tr('Folders and repos chats can attach.'), words: 'workspaces folders repos git clone sets' },
   { id: 'data', group: 'General', label: tr('Data'), icon: Archive, blurb: tr('Your account, backups and exports.'), words: 'backups snapshot restore export password account diagnostics' },
@@ -176,6 +186,7 @@ function SystemBlock({ owner, settings, patchSettings }: { owner: boolean; setti
   const usable = useUsableModels();
   const [providers, setProviders] = useState<ProviderItem[]>([]);
   const [allModels, setAllModels] = useState<ModelItem[]>([]);
+  const [autoRoles, setAutoRoles] = useState<AutoRoles | null>(null);
   const [resident, setResident] = useState<string[]>([]);
   const [llamaUrl, setLlamaUrl] = useState('http://host.docker.internal:8080/v1');
   const [savingLlama, setSavingLlama] = useState(false);
@@ -190,10 +201,11 @@ function SystemBlock({ owner, settings, patchSettings }: { owner: boolean; setti
 
   const loadModels = () => {
     if (!owner) return;
-    void api<{ models: ModelItem[]; providers: ProviderItem[]; resident: string[] }>('/api/models').then((data) => {
+    void api<{ models: ModelItem[]; providers: ProviderItem[]; resident: string[]; autoRoles?: AutoRoles | null }>('/api/models').then((data) => {
       setAllModels(data.models || []);
       setProviders(data.providers || []);
       setResident(data.resident || []);
+      setAutoRoles(data.autoRoles ?? null);
       const llama = (data.providers || []).find((p) => p.id === 'prov_llama');
       if (llama?.baseUrl) setLlamaUrl(llama.baseUrl);
     }).catch(() => undefined);
@@ -243,6 +255,28 @@ function SystemBlock({ owner, settings, patchSettings }: { owner: boolean; setti
                     </div>
                   );
                 })}
+              </div>
+            )}
+            {autoRoles && autoRoles.roles.length > 0 && (
+              <div style={{ marginBottom: 12 }}>
+                <h4>{tr('Auto roles')}</h4>
+                <p className="faint">{tr('How Auto picks a model for each role. If a configured model is missing, Auto uses the best installed one instead.')}</p>
+                <div className="item-list">
+                  {autoRoles.roles.map((row) => (
+                    <div key={row.role} className="item-row">
+                      <span className={row.available ? (row.fallback ? 'dot warn' : 'dot ok') : 'dot bad'} aria-hidden />
+                      <span className="grow">
+                        <strong>{autoRoleLabel(row.role)}</strong>
+                        <span className="faint">
+                          {row.available
+                            ? `${row.modelName || ''}${row.providerName ? ` · ${row.providerName}` : ''}`
+                            : tr('No usable model')}
+                          {row.note ? ` — ${row.note}` : ''}
+                        </span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </>
