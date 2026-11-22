@@ -13,6 +13,7 @@ import { Activity, Archive, Bot, Bug, Check, Cpu, FolderGit2, Globe, KeyRound, P
 import { useWorkspaces } from '../components/PersonaPanel';
 import { Face, type FaceAgent } from '../components/Face';
 import { t as tr } from '../i18n';
+import { UpdatesBlock } from '../components/Updates';
 
 interface Secret { id: string; name: string; handle: string; scope: string; revokedAt: string | null }
 interface Audit { id: number; action: string; actor: string; createdAt: string }
@@ -30,6 +31,7 @@ const SECTIONS: Def[] = [
   { id: 'personas', group: 'General', label: tr('Personas'), icon: Bot, blurb: tr('Who you talk to. Edit one from the chat with its name.'), words: 'personas agents prompt instructions tools skills face voice' },
   { id: 'workspaces', group: 'General', label: tr('Workspaces'), icon: FolderGit2, blurb: tr('Folders and repos chats can attach.'), words: 'workspaces folders repos git clone sets' },
   { id: 'data', group: 'General', label: tr('Data'), icon: Archive, blurb: tr('Your account, backups and exports.'), words: 'backups snapshot restore export password account diagnostics' },
+  { id: 'updates', group: 'General', label: tr('About & updates'), icon: RefreshCw, blurb: tr('App and server versions. Check for a new Windows app.'), words: 'about version update updates upgrade check download release installer apk windows desktop' },
   { id: 'people', group: 'Admin', owner: true, label: tr('People'), icon: Users, blurb: tr('Member accounts and what they may use.'), words: 'members accounts users invite quota' },
   { id: 'health', group: 'Admin', owner: true, label: tr('Health'), icon: Activity, blurb: tr('Ollama, Docker, SearXNG, RAM budget and the rest.'), words: 'ollama docker searxng ram memory status doctor' },
   { id: 'policy', group: 'Admin', owner: true, label: tr('Safety & limits'), icon: ShieldCheck, blurb: tr('Approvals, read-only mode, the kill switch and token caps.'), words: 'approvals read-only kill switch tokens caps limits safety emergency gemini tier' },
@@ -38,7 +40,7 @@ const SECTIONS: Def[] = [
   { id: 'debug', group: 'Admin', owner: true, label: tr('Debug'), icon: Bug, blurb: tr('Logs, run inspector and diagnostics. Nothing leaves this machine.'), words: 'logs inspector replay tool test diagnostics' },
   { id: 'remote', group: 'Admin', owner: true, label: tr('Remote access'), icon: Globe, blurb: tr('Reach this box from your phone or laptop.'), words: 'tailscale phone lan network access cloudflare' },
 ];
-const ALIASES: Record<string, string> = { backups: 'data', account: 'data', models: 'system', setup: 'system', quota: 'system', images: 'system', searxng: 'system' };
+const ALIASES: Record<string, string> = { about: 'updates', version: 'updates', backups: 'data', account: 'data', models: 'system', setup: 'system', quota: 'system', images: 'system', searxng: 'system' };
 
 /** Autosave feedback: a "Saved" tick in the header for a moment after any change lands. */
 function useSavedTick() {
@@ -322,6 +324,7 @@ export function Settings({ role = 'owner' }: { role?: 'owner' | 'member' }) {
           {show('personas') && <Block id="personas"><PersonasBlock /></Block>}
           {show('workspaces') && <Block id="workspaces"><WorkspacesBlock /></Block>}
           {show('data') && <Block id="data"><AccountCard /></Block>}
+          {show('updates') && <Block id="updates"><UpdatesBlock /></Block>}
         </>}
       </SettingsPage>
     );
@@ -539,6 +542,7 @@ function OwnerSettings() {
         <p><a className="btn" href="/api/debug/bundle">{tr('Download redacted diagnostics')}</a></p>
         <p className="faint">{tr('Over SSH:')}{' '}<span className="mono">{tr('npm run doctor')}</span>. To recover a forgotten password: <span className="mono">{tr('npm run reset-owner')}</span>.</p>
       </div>}
+      {show('updates') && <Block id="updates"><UpdatesBlock /></Block>}
       {show('remote') && <Block id="remote">{null}</Block>}
       {show('remote') && <div className="card" id="remote">
         <h3>{tr('Tailscale (recommended)')}</h3>

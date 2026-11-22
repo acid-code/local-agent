@@ -7,6 +7,14 @@ contextBridge.exposeInMainWorld('localAgent', {
   openSetup: (message) => ipcRenderer.invoke('open-setup', message),
   getAppInfo: () => ipcRenderer.invoke('get-app-info'),
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+  getUpdateStatus: () => ipcRenderer.invoke('get-update-status'),
+  installUpdate: () => ipcRenderer.invoke('install-update'),
+  openReleasePage: () => ipcRenderer.invoke('open-release-page'),
+  onUpdateStatus: (callback) => {
+    const listener = (_event, status) => callback(status);
+    ipcRenderer.on('update-status', listener);
+    return () => ipcRenderer.removeListener('update-status', listener);
+  },
 });
 
 // Lets the web app make its header the window's title bar (drag region, room for the window controls).

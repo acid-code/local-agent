@@ -2,7 +2,7 @@ const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require('electron')
 // Downloads (Save in the file viewer) ask where to put the file with the native save dialog.
 const fs = require('fs');
 const path = require('path');
-const { startUpdates, checkUpdates } = require('./updater');
+const updates = require('./updater');
 
 const SETUP = path.join(__dirname, 'setup.html');
 
@@ -146,7 +146,7 @@ function createWindow() {
         },
         {
           label: `Check for updates…  (v${app.getVersion()})`,
-          click: () => { void checkUpdates(win).catch((error) => dialog.showErrorBox('Update check failed', error.message)); },
+          click: () => { void updates.checkUpdatesInteractive(win).catch((error) => dialog.showErrorBox('Update check failed', error.message)); },
         },
         { type: 'separator' },
         { role: 'quit' },
@@ -177,14 +177,17 @@ ipcMain.handle('get-app-info', () => ({
   name: app.getName(),
   version: app.getVersion(),
   packaged: app.isPackaged,
+  portable: Boolean(process.env.PORTABLE_EXECUTABLE_FILE),
   platform: process.platform,
 }));
 
-ipcMain.handle('check-for-updates', (event) => {
-  const win = BrowserWindow.fromWebContents(event.sender);
-  if (!win) return { ok: false, error: 'Window unavailable.' };
-  return checkUpdates(win).then((result) => ({ ok: true, result })).catch((error) => ({ ok: false, error: error.message }));
+// Settings → About & updates. check resolves with the status; progress arrives on 'update-status'.
+ipcMain.handle('get-update-status', () => updates.getStatus());
+ipcMain.handle('check-for-updates', async () => {
+  try { return { ok: true, result: await updates.check() }; } catch (error) { return { ok: false, error: error.message }; }
 });
+ipcMain.handle('install-update', () => ({ ok: updates.install() }));
+ipcMain.handle('open-release-page', () => { updates.openReleasePage(); return { ok: true }; });
 
 ipcMain.handle('open-setup', (event, message) => {
   const win = BrowserWindow.fromWebContents(event.sender);
@@ -228,7 +231,7 @@ if (!gotLock) {
   app.whenReady().then(() => {
     app.setAppUserModelId('com.localagent.desktop');
     createWindow();
-    startUpdates(BrowserWindow.getAllWindows()[0]);
+    updates.startUpdates();
   });
 
   app.on('window-all-closed', () => {

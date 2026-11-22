@@ -2383,3 +2383,18 @@ button.state-card:hover, a.state-card:hover { background: var(--bg-3); }
   .work-row { min-height: 40px; font-size: calc(14px * var(--fs)); flex-wrap: wrap; row-gap: 2px; }
   .work-file { max-width: 140px; }
 }
+
+/* Settings → About & updates */
+.updates-card .version-list { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0 0 14px; }
+.updates-card .version-list dt { color: var(--muted, #8a8f98); }
+.updates-card .version-list dd { margin: 0; }
+.updates-card .update-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.updates-card .update-row .btn { display: inline-flex; align-items: center; gap: 6px; }
+.updates-card .update-status { margin: 10px 0 0; font-size: 13px; }
+.updates-card .update-status.ok { color: #3fb27f; }
+.updates-card .update-status.busy, .updates-card .update-status.muted { color: var(--muted, #8a8f98); }
+.updates-card .update-status.action { color: var(--brass, #d4a24c); font-weight: 600; }
+.updates-card .update-status.error { color: #e5484d; }
+.updates-card .update-progress { width: 100%; max-width: 360px; height: 6px; margin-top: 8px; accent-color: var(--brass, #d4a24c); }
+.updates-card svg.spin { animation: la-update-spin 1s linear infinite; }
+@keyframes la-update-spin { to { transform: rotate(360deg); } }

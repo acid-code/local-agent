@@ -22,6 +22,7 @@ data class AppUiState(
     val username: String = "",
     val role: String = "owner",
     val serverUrl: String = "",
+    val serverVersion: String? = null,
     val authError: String? = null,
     val connecting: Boolean = false,
     val personas: List<Persona> = emptyList(),
@@ -519,6 +520,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun selectTab(tab: AppTab) {
         _ui.update { it.copy(tab = tab, focusApprovalId = if (tab == AppTab.Approvals) it.focusApprovalId else null) }
         if (tab == AppTab.Approvals) refreshPendingApprovals()
+        if (tab == AppTab.System) refreshServerVersion()
+    }
+
+    fun refreshServerVersion() {
+        viewModelScope.launch {
+            val version = runCatching { client.serverVersion() }.getOrNull()
+            _ui.update { it.copy(serverVersion = version) }
+        }
     }
 
     /** From a notification tap: open the Approvals tab on that exact approval. */

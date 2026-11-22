@@ -148,6 +148,10 @@ class LocalAgentClient(context: Context) {
         }.getOrDefault(false)
     }
 
+    suspend fun serverVersion(): String? = withContext(Dispatchers.IO) {
+        runCatching { requestJson("GET", "/api/health").optString("version").ifBlank { null } }.getOrNull()
+    }
+
     suspend fun me(): AuthMe {
         val json = requestJson("GET", "/api/auth/me")
         return AuthMe(

@@ -1,9 +1,20 @@
 name: android
+# Every push and PR builds the release APK signed with the real release key and uploads it as a workflow
+# artifact, so a branch can be installed and checked before merging. Only pushes to main publish a GitHub release.
 on:
   push:
-    branches: [main]
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
 permissions:
   contents: write
+concurrency:
+  group: android-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+env:
+  # SHA-256 of the release signing certificate (public, not secret). Every release since Nov 15 is signed with it;
+  # an APK with another certificate cannot install over the app, so the build fails instead of publishing one.
+  RELEASE_CERT_SHA256: c845384b0925270c2cdf68eeaf72f94568e3db12ed7be84a918fd5121dcd89ff
 jobs:
   apk:
     runs-on: ubuntu-latest
@@ -18,47 +29,90 @@ jobs:
           # The action's default list still asks for the removed "tools" package.
           # AGP 8.7.2 with compileSdk 35 needs platform 35 and build-tools 35.0.0.
           packages: platform-tools platforms;android-35 build-tools;35.0.0
-      - name: Choose a signing key
+      - name: Load the release signing key
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
           set -euo pipefail
           if [ -n "${ANDROID_KEYSTORE_BASE64}" ] && [ -n "${ANDROID_KEYSTORE_PASSWORD}" ] && [ -n "${ANDROID_KEY_ALIAS}" ] && [ -n "${ANDROID_KEY_PASSWORD}" ]; then
-            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
-            echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
-            echo "ANDROID_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
-            echo "ANDROID_KEY_ALIAS=$ANDROID_KEY_ALIAS" >> "$GITHUB_ENV"
-            echo "ANDROID_KEY_PASSWORD=$ANDROID_KEY_PASSWORD" >> "$GITHUB_ENV"
-            echo "APK_NOTE=release-signed" >> "$GITHUB_ENV"
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            {
+              echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/release.keystore"
+              echo "ANDROID_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD"
+              echo "ANDROID_KEY_ALIAS=$ANDROID_KEY_ALIAS"
+              echo "ANDROID_KEY_PASSWORD=$ANDROID_KEY_PASSWORD"
+              echo "SIGNING=release"
+            } >> "$GITHUB_ENV"
+          elif [ "$FORK_PR" = "true" ]; then
+            # Pull requests from forks never see secrets. Build a throwaway-key APK so the code still compiles.
+            keytool -genkeypair -keystore "$RUNNER_TEMP/throwaway.keystore" -storepass android -alias throwaway -keypass android -keyalg RSA -keysize 2048 -validity 30 -dname "CN=local-agent fork PR (not installable over the app)"
+            {
+              echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/throwaway.keystore"
+              echo "ANDROID_KEYSTORE_PASSWORD=android"
+              echo "ANDROID_KEY_ALIAS=throwaway"
+              echo "ANDROID_KEY_PASSWORD=android"
+              echo "SIGNING=throwaway"
+            } >> "$GITHUB_ENV"
           else
-            keytool -genkeypair -keystore "$RUNNER_TEMP/debug.keystore" -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=local-agent debug"
-            echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/debug.keystore" >> "$GITHUB_ENV"
-            echo "ANDROID_KEYSTORE_PASSWORD=android" >> "$GITHUB_ENV"
-            echo "ANDROID_KEY_ALIAS=androiddebugkey" >> "$GITHUB_ENV"
-            echo "ANDROID_KEY_PASSWORD=android" >> "$GITHUB_ENV"
-            echo "APK_NOTE=debug-signed (release keystore secrets were not all set)" >> "$GITHUB_ENV"
+            echo "::error::The release keystore secrets (ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD) are not all set. Refusing to build an APK that cannot install over the app."
+            exit 1
           fi
-      - name: Build the APK
+      - name: Unit tests and release APK
         working-directory: apps/mobile/android
-        run: chmod +x ./gradlew && ./gradlew assembleRelease --no-daemon
+        run: chmod +x ./gradlew && ./gradlew testDebugUnitTest assembleRelease --no-daemon
+      - name: Verify signature and version
+        run: |
+          set -euo pipefail
+          apk="$(find apps/mobile/android/app/build/outputs/apk/release -name '*.apk' -print -quit)"
+          test -n "$apk"
+          bt="$ANDROID_HOME/build-tools/35.0.0"
+          "$bt/apksigner" verify --print-certs "$apk" > "$RUNNER_TEMP/certs.txt"
+          digest="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$RUNNER_TEMP/certs.txt")"
+          badging="$("$bt/aapt2" dump badging "$apk" | head -1)"
+          code="$(printf '%s' "$badging" | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p")"
+          name="$(printf '%s' "$badging" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")"
+          echo "certificate SHA-256: $digest"
+          echo "versionCode $code, versionName $name"
+          if [ "$SIGNING" = "release" ] && [ "$digest" != "$RELEASE_CERT_SHA256" ]; then
+            echo "::error::APK is signed with $digest, expected the release certificate $RELEASE_CERT_SHA256. It would not install over the app."
+            exit 1
+          fi
+          out="local-agent-android-${name}.apk"
+          [ "$SIGNING" = "release" ] || out="local-agent-android-${name}-UNOFFICIAL-throwaway-key.apk"
+          cp "$apk" "$out"
+          {
+            echo "APK_FILE=$out"
+            echo "APK_VERSION_CODE=$code"
+          } >> "$GITHUB_ENV"
+          {
+            echo "### Android APK"
+            echo "- File: \`$out\`"
+            echo "- versionCode: $code (versionName $name)"
+            echo "- Signing: $SIGNING, certificate SHA-256 \`$digest\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: local-agent-android-apk
+          path: ${{ env.APK_FILE }}
+          if-no-files-found: error
       - name: Publish the GitHub release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && env.SIGNING == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           short="${GITHUB_SHA::7}"
           tag="main-${short}"
-          apk="$(find apps/mobile/android/app/build/outputs/apk/release -name '*.apk' -print -quit)"
-          test -n "$apk"
-          cp "$apk" "local-agent-${short}.apk"
-          note="Native Android app (Jetpack Compose / Material 3). ${APK_NOTE}."
-          # The Windows workflow publishes the same tag. Create the release, or upload if it already exists.
+          note="Android: ${APK_FILE} (versionCode ${APK_VERSION_CODE}), signed with the release key."
+          # The Windows workflow publishes to the same tag and is the one that marks it Latest (the desktop updater
+          # reads releases/latest/download/latest.yml), so this job never marks a release Latest by itself.
           for attempt in 1 2 3 4 5 6; do
             if gh release view "$tag" >/dev/null 2>&1; then
-              gh release upload "$tag" "local-agent-${short}.apk" --clobber
+              gh release upload "$tag" "$APK_FILE" --clobber
               body="$(gh release view "$tag" --json body --jq .body)"
               case "$body" in
                 *"$note"*) ;;
@@ -66,10 +120,7 @@ jobs:
               esac
               exit 0
             fi
-            if gh release create "$tag" "local-agent-${short}.apk" \
-              --title "local-agent ${short}" \
-              --latest \
-              --notes "$note"; then
+            if gh release create "$tag" "$APK_FILE" --title "local-agent ${short}" --latest=false --notes "$note"; then
               exit 0
             fi
             sleep 10

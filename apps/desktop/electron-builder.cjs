@@ -16,9 +16,17 @@ module.exports = {
   appId: 'com.localagent.desktop',
   productName: 'local-agent',
   directories: { output: 'release' },
-  files: ['main.js', 'preload.js', 'updater.js', 'setup.html', 'package.json'],
+  files: ['main.js', 'preload.js', 'updater.js', 'update-state.js', 'setup.html', 'package.json'],
   extraMetadata: { version: `0.2.${buildNumber()}`, buildCommit: commit(), buildTime: new Date().toISOString(), updateRepo: 'acid-code/local-agent' },
+  // Unsigned (no code-signing certificate in the repo secrets). electron-updater only verifies a signature
+  // when publisherName is set, so leave it unset until a certificate exists, then set both together.
   win: { signAndEditExecutable: false, target: ['portable', 'nsis'] },
-  portable: { artifactName: 'local-agent-portable.${ext}' },
-  nsis: { artifactName: 'local-agent-setup.${ext}', oneClick: true, perMachine: false, allowToChangeInstallationDirectory: false },
+  // Writes latest.yml (version, file name, sha512) next to the installer. The release job uploads it with the
+  // installer and its blockmap; electron-updater reads it from .../releases/latest/download/latest.yml.
+  publish: [{ provider: 'generic', url: 'https://github.com/acid-code/local-agent/releases/latest/download' }],
+  portable: { artifactName: 'local-agent-${version}-portable.${ext}' },
+  // Never change appId or the package name: the NSIS uninstall GUID and install folder
+  // (%LOCALAPPDATA%\Programs\local-agent-desktop) come from them, and a new one would install side by side.
+  // The installer closes a running local-agent, upgrades in place, and keeps %APPDATA% (deleteAppDataOnUninstall: false).
+  nsis: { artifactName: 'local-agent-${version}-setup.${ext}', oneClick: true, perMachine: false, allowToChangeInstallationDirectory: false, deleteAppDataOnUninstall: false, differentialPackage: true },
 };
