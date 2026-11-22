@@ -53,7 +53,7 @@ export function checkFinalReply(steps: StepRow[], reply: string, rounds: number,
     };
   }
   const verdict = falseSuccess(steps, reply, 'completed');
-  if (!verdict.flagged) return { action: 'ok' };
+  if (!verdict.flagged) return doneCheck(steps, reply, rounds, turnsLeft, availableTools);
   const failed = steps.filter((step) => verdict.failedTools.includes(step.name) && (step.status === 'failed' || step.error));
   const detail = failed.slice(-3).map((step) => `${step.name}: ${String(step.error ?? step.output ?? 'failed').slice(0, 200)}`).join('\n');
   if (rounds < MAX_RECOVERY_ROUNDS && turnsLeft > 1) {
@@ -67,4 +67,56 @@ export function checkFinalReply(steps: StepRow[], reply: string, rounds: number,
     action: 'footer', reason: verdict.reason,
     footer: hebrew ? `\n\n⚠️ שימו לב: ${names} נכשל ולא תוקן, כך שחלק מהמשימה כנראה לא בוצע. בדקו את התוצאה.` : `\n\n⚠️ Note: ${names} failed and was not fixed, so part of this may not have happened. Please check the result.`,
   };
+}
+
+// ── Done check ────────────────────────────────────────────────────────────────────────────────────────────────
+const ACTION_VERBS = 'check|run|create|fix|update|implement|continue|start|proceed|look|read|write|search|install|build|test|deploy|add|open|edit|apply|make|do|try|verify|go ahead|begin|investigate|patch|refactor|commit|push';
+const PROMISE_EN = new RegExp(`^(?:ok(?:ay)?[,!.]?\\s*|great[,!.]?\\s*|now,?\\s*|next,?\\s*|first,?\\s*)*(?:i'?ll|i will|let me|i'?m going to|i am going to|i'?m now going to)\\s+(?:now\\s+|first\\s+|quickly\\s+)?(?:${ACTION_VERBS})\\b`, 'i');
+const PROMISE_HE = /^(?:עכשיו |כעת |קודם |בסדר[,.]? )*(?:אני )?(?:אבדוק|אריץ|אתקן|אצור|אמשיך|אעדכן|אתחיל|אכתוב|אחפש|אתקין|אבנה|אפתח|אנסה|אוסיף)/;
+const CODE_FILE = /[\w./-]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|swift|rb|php|cs|c|cc|cpp|h|hpp|vue|svelte)\b/gi;
+const EDIT_TOOLS = new Set(['create_file', 'write_file', 'apply_patch', 'edit_file']);
+
+/** The reply only announces what it is about to do ("I'll now run the tests.") instead of doing it or answering. */
+export function promiseOnly(reply: string): boolean {
+  const text = reply.trim();
+  if (!text || text.length > 1500 || /\?\s*$/.test(text)) return false;
+  const sentences = text.split(/(?<=[.!:…])\s+|\n+/).map((part) => part.trim()).filter(Boolean);
+  const last = sentences.at(-1) ?? '';
+  if (/let me know/i.test(last)) return false;
+  return PROMISE_EN.test(last) || PROMISE_HE.test(last);
+}
+
+/** Code files edited after the last shell command: nothing ran tests, a build or the code since. */
+export function unverifiedEdits(steps: Pick<StepRow, 'kind' | 'name' | 'status' | 'input' | 'index'>[]): string[] {
+  const done = steps.filter((step) => step.kind === 'tool' && step.status === 'completed');
+  const lastShell = Math.max(-1, ...done.filter((step) => step.name === 'shell' || step.name === 'run_tests').map((step) => step.index));
+  const files = new Set<string>();
+  for (const step of done) {
+    if (!EDIT_TOOLS.has(step.name) || step.index < lastShell) continue;
+    for (const match of JSON.stringify(step.input ?? '').slice(0, 20_000).match(CODE_FILE) ?? []) files.add(match.replace(/^[ab]\//, ''));
+  }
+  return [...files].slice(0, 8);
+}
+
+function alreadyAsked(steps: Pick<StepRow, 'kind' | 'name' | 'output'>[], marker: string) {
+  return steps.some((step) => step.kind === 'contract' && step.name === 'verify' && String(step.output ?? '').includes(marker));
+}
+
+/** After the honesty checks: no promise-only endings, and code edits get verified before the run ends (once each). */
+export function doneCheck(steps: StepRow[], reply: string, rounds: number, turnsLeft: number, availableTools: string[] = []): { action: 'ok' } | { action: 'retry'; note: string; reason: string } {
+  if (turnsLeft <= 1 || rounds >= MAX_RECOVERY_ROUNDS) return { action: 'ok' };
+  if (promiseOnly(reply) && !alreadyAsked(steps, 'Promised')) {
+    return {
+      action: 'retry', reason: 'Promised a next step instead of doing it',
+      note: '\n\nKEEP GOING: your last message only said what you were about to do. Do it now with the tools (call them in this step), then answer with the result. If you are truly finished, give the final answer instead.',
+    };
+  }
+  const edited = availableTools.includes('shell') ? unverifiedEdits(steps) : [];
+  if (edited.length && !alreadyAsked(steps, 'Unverified code edits')) {
+    return {
+      action: 'retry', reason: `Unverified code edits (${edited.join(', ')})`,
+      note: `\n\nVERIFY BEFORE ANSWERING: you changed ${edited.join(', ')} but ran nothing since. Run the project's tests, typecheck or build (or execute the changed code) with shell, fix what fails, then answer with what you ran and its result. If nothing can be run here, say so plainly in your answer.`,
+    };
+  }
+  return { action: 'ok' };
 }
