@@ -815,7 +815,7 @@ export class Engine {
         runId: run.id, kind: 'config', name: 'config', status: 'completed', input: { from: current.cursor.configVersion, to: settings.version },
         output: 'Applied the new config between steps.', toolCallId: null, turn: current.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now(),
       });
-      current = this.store.updateRun(run.id, { cursor: { ...current.cursor, modelId: undefined, agentUpdatedAt: agent.updatedAt, configVersion: settings.version } })!;
+      current = this.store.updateRun(run.id, { cursor: { ...current.cursor, modelId: undefined, frozen: undefined, agentUpdatedAt: agent.updatedAt, configVersion: settings.version } })!;
     }
     if (!current.cursor.modelId) {
       await this.ensureSomeModel(agent.id);
@@ -1580,8 +1580,10 @@ export class Engine {
       ? '\n\nWeb lookup rule: always call web_search (SearXNG) first before calling web_fetch or browse; never invent URLs.'
       : '';
     const sharedRepoNote = sharedRepoBrief(this.store);
-    // llama-server reuses the longest cached prompt prefix. Keep the system prompt identical across turns and
-    // carry the per-turn parts (workspace changes, stage, nudges, KB passages, skills) on the newest user message.
+    // llama-server reuses the longest cached prompt prefix, and the hybrid Qwen3.6 cannot roll back into the middle of
+    // it. So for these models the prompt only ever grows within a run: the preamble and the per-run context are frozen
+    // at the first step, and notes (recovery, steering, nudges) are pinned once after the message that was last when
+    // they appeared, instead of being rewritten into an earlier message each step.
     const cacheFriendly = this.cacheFriendly(model);
     const system = cacheFriendly
       ? `${agent.systemPrompt}${sharedRepoNote}${rulesNote}${memoryNote}${teamNote}${searchFirstNote}${kbHint}${CITE_HINT}${HONESTY_RULE}${run.cursor.helperId ? '' : TASKS_HINT}${languageNote}`
@@ -1599,20 +1601,39 @@ export class Engine {
       ? estimateTokens(JSON.stringify(offeredTools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }))), tok)
       : 0;
     const optionalParts = [{ label: 'knowledge base passages', text: kbNote }, { label: 'workshop brief', text: workshopNote }, { label: 'skills catalog', text: skillNote }].filter((part) => part.text.trim());
+    const frozen = cacheFriendly && run.cursor.frozen?.modelId === model.id ? run.cursor.frozen : undefined;
     let turnContext = '';
     if (cacheFriendly) {
-      const parts = [`${chatWorkspaces}${stageNote}${roleNote}${nudge}${recoveryNote}`.trim(), ...optionalParts.map((part) => part.text.trim())];
-      const cap = (run.cursor.budgetOverride || budget) * 0.4;
-      while (parts.length > 1 && estimateTokens(parts.join('\n\n'), tok) > cap) parts.pop();
-      turnContext = parts.filter(Boolean).join('\n\n');
+      if (frozen) {
+        turnContext = frozen.turnContext;
+      } else {
+        const parts = [chatWorkspaces.trim(), ...optionalParts.map((part) => part.text.trim())];
+        const cap = (run.cursor.budgetOverride || budget) * 0.4;
+        while (parts.length > 1 && estimateTokens(parts.join('\n\n'), tok) > cap) parts.pop();
+        turnContext = parts.filter(Boolean).join('\n\n');
+      }
     }
+    // Pin new notes once (split on blank lines so a growing recovery note does not repeat its earlier paragraphs).
+    const pinnedNotes = [...(run.cursor.notes ?? [])];
+    if (cacheFriendly) {
+      const seen = new Set(pinnedNotes.map((note) => note.text));
+      const anchorId = messages.at(-1)?.id ?? user?.id ?? '';
+      for (const piece of [stageNote, roleNote, nudge, recoveryNote].flatMap((text) => text.split(/\n{2,}/)).map((text) => text.trim()).filter(Boolean)) {
+        if (seen.has(piece)) continue;
+        seen.add(piece);
+        pinnedNotes.push({ anchorId, text: piece });
+      }
+    }
+    const notesTokens = pinnedNotes.reduce((sum, note) => sum + estimateTokens(note.text, tok) + 8, 0);
     const turnContextTokens = turnContext ? estimateTokens(turnContext, tok) + 16 : 0;
+    const runMessageIds = messages.filter((message) => message.runId === run.id || message.id === user?.id).map((message) => message.id);
     const plan = planContext({
-      strategy, contextWindow: model.contextWindow, practicalBudget: (run.cursor.budgetOverride || budget) - turnContextTokens, outputReserve: settings.outputReserveTokens,
+      strategy, contextWindow: model.contextWindow, practicalBudget: (run.cursor.budgetOverride || budget) - turnContextTokens - notesTokens - (toolSchemaTokens <= (run.cursor.budgetOverride || budget) * 0.35 ? toolSchemaTokens : 0), outputReserve: settings.outputReserveTokens,
       system, optional: cacheFriendly ? [] : optionalParts,
       pinned: notes.filter((note) => note.pinned).map((note) => note.content),
       summaries, retrieved, tokenizer: tok,
       messages: this.uncoveredMessages(messages, summaries).map((message) => ({ id: message.id, role: message.role as 'user', content: message.content })),
+      run: { messageIds: runMessageIds, digestIds: run.cursor.digestIds, historyFloorId: run.cursor.historyFloorId },
       breakdownHints: {
         systemPrompt: estimateTokens(`${CITE_HINT}${HONESTY_RULE}${TASKS_HINT}${searchFirstNote}${languageNote}${stageNote}${roleNote}${recoveryNote}`, tok),
         personaAndTools: estimateTokens(`${agent.systemPrompt}${teamNote}${skillNote}`, tok) + toolSchemaTokens,
@@ -1620,6 +1641,24 @@ export class Engine {
         files: estimateTokens(`${sharedRepoNote}${chatWorkspaces}${rulesNote}${workshopNote}`, tok),
       },
     });
+    if (frozen) plan.preamble = frozen.system;
+    const digestsBefore = run.cursor.digestIds?.length ?? 0;
+    // Keep the run's context decisions on the run, so every later step renders the same prefix.
+    const patch: Partial<RunCursor> = {
+      digestIds: plan.digestIds,
+      historyFloorId: plan.historyFloorId,
+      ...(cacheFriendly ? { notes: pinnedNotes, frozen: frozen ?? { modelId: model.id, system: plan.preamble, turnContext } } : {}),
+    };
+    Object.assign(run.cursor, patch);
+    const stored = this.store.getRun(run.id);
+    if (stored) this.store.updateRun(run.id, { cursor: { ...stored.cursor, ...patch } });
+    if ((plan.digestIds?.length ?? 0) > digestsBefore) {
+      this.store.addStep({
+        runId: run.id, kind: 'context', name: 'digest', status: 'completed', input: { digestIds: plan.digestIds },
+        output: plan.notes.find((note) => note.startsWith('Condensed')) || 'Condensed older tool results.', toolCallId: null,
+        turn: run.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now(),
+      });
+    }
     if (plan.trimmed.length) {
       this.store.addStep({
         runId: run.id, kind: 'context', name: 'trim', status: 'completed', input: { trimmed: plan.trimmed },
@@ -1643,7 +1682,9 @@ export class Engine {
     this.lastContext.set(run.sessionId, plan.breakdown);
     this.bus.publish({ type: 'context', runId: run.id, used: plan.breakdown.used, budget: plan.breakdown.budget, breakdown: plan.breakdown });
     const recent = new Map(messages.map((message) => [message.id, message]));
+    const runIds = new Set(runMessageIds);
     const chat: ChatMessage[] = [{ role: 'system', content: plan.preamble }];
+    const chatIds: string[] = [''];
     for (const item of plan.recent) {
       const message = recent.get(item.id);
       if (!message) continue;
@@ -1651,16 +1692,24 @@ export class Engine {
       chat.push({
         role: message.role as ChatMessage['role'], content: spoken, toolCallId: message.toolCallId ?? undefined,
         name: message.toolName ?? undefined, toolCalls: (message.toolCalls as ToolCall[] | null) ?? undefined, imageUrl: message.imageUrl ?? undefined,
+        // This run's reasoning goes back to llama-server (the template keeps it after the last user turn).
+        reasoning: cacheFriendly && message.role === 'assistant' && runIds.has(message.id) ? message.thinking ?? undefined : undefined,
       });
+      chatIds.push(message.id);
     }
     if (turnContext) {
-      const lastUser = chat.map((message) => message.role).lastIndexOf('user');
-      if (lastUser > 0) {
-        const target = chat[lastUser]!;
-        chat[lastUser] = { ...target, content: `<turn_context>\n${turnContext}\n</turn_context>\n\n${target.content}` };
+      const userIndex = user ? chatIds.indexOf(user.id) : -1;
+      const target = userIndex > 0 ? userIndex : chat.map((message) => message.role).lastIndexOf('user');
+      if (target > 0) {
+        chat[target] = { ...chat[target]!, content: `<turn_context>\n${turnContext}\n</turn_context>\n\n${chat[target]!.content}` };
       } else {
         chat[0] = { ...chat[0]!, content: `${chat[0]!.content}\n\n${turnContext}` };
       }
+    }
+    for (const note of cacheFriendly ? pinnedNotes : []) {
+      let index = chatIds.indexOf(note.anchorId);
+      if (index <= 0) index = chat.length - 1;
+      chat[index] = { ...chat[index]!, content: `${chat[index]!.content}\n\n<note>\n${note.text}\n</note>` };
     }
     return { plan, messages: chat, cutNote };
   }

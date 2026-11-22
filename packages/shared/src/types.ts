@@ -116,6 +116,17 @@ export interface RunCursor {
   researchRetried?: boolean;
   /** One automatic nudge when a high-confidence skill was not loaded. */
   skillRetried?: boolean;
+  /** Run-aware context: tool results of this run shown as digests (only grows), and the fixed oldest history message. */
+  digestIds?: string[];
+  historyFloorId?: string;
+  /** System prompt and per-run context frozen at the first model step, so the prompt prefix stays byte-identical. */
+  frozen?: { modelId: string; system: string; turnContext: string };
+  /** Notes for the model (recovery, steering, nudges), each pinned after the message that was last when it was added. */
+  notes?: { anchorId: string; text: string }[];
+  /** Tools found with find_tools during this run. Appended to the offered list, never removed. */
+  extraTools?: string[];
+  /** Retries after llama-server dropped the connection or restarted. */
+  transientRetries?: number;
 }
 
 export interface ContextBreakdown {
