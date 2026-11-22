@@ -9,6 +9,7 @@ import { nid, now } from './util.js';
 import { locatePath, projectPath } from './workshops.js';
 import type { Agent } from './db.js';
 import type { DockerCtl } from './docker.js';
+import { workbenchEnabled } from './workbench.js';
 import type { Store } from './db.js';
 import type { Settings } from './settings.js';
 
@@ -17,6 +18,8 @@ export interface ToolContext {
   workspace: string;
   signal: AbortSignal;
   docker: DockerCtl;
+  /** Shared long-lived shell container (LA_SHELL=workbench, the default). */
+  workbench?: import('./workbench.js').Workbench | null;
   fetchImpl: typeof fetch;
   searxngUrl: string;
   sandbox: Settings['sandbox'];
@@ -242,13 +245,14 @@ export const BUILTIN_TOOLS: Tool[] = [
   },
   {
     name: 'shell',
-    description: 'Run a shell command. Docker sandbox when Docker is available, otherwise a workspace-jailed host process. Destructive commands need approval.',
+    description: 'Run a shell command. Runs in the shared workbench computer (Debian, node 22, python3, git; network on; installs and caches persist; Python projects get a .venv automatically) when Docker is available, otherwise a workspace-jailed host process. Destructive commands need approval.',
     parameters: obj({ command: { type: 'string' }, cwd: { type: 'string', description: 'Workshop project label, when this chat has more than one.' } }, ['command']),
     mutates: (args) => assessCommand(String(args.command || '')) !== 'ok',
     approval: (args) => {
       const command = String(args.command || '');
       const assessment = assessCommand(command);
       if (assessment === 'blocked') return null;
+      if (/\bapt(-get)?\s+install\b/i.test(command)) return `Installs system packages in the shared workbench (affects all personas): ${command.slice(0, 180)}`;
       if (assessment === 'mutating') return `Shell command looks destructive: ${command.slice(0, 180)}`;
       return null;
     },
@@ -258,6 +262,14 @@ export const BUILTIN_TOOLS: Tool[] = [
       if (command.length > 4000) throw new Error('Command is too long.');
       if (assessCommand(command) === 'blocked') throw new Error('That command is blocked.');
       const cwd = (ctx.roots?.length ?? 0) > 0 ? projectPath(ctx.roots!, args.cwd ? String(args.cwd) : undefined, ctx.workspace, command) : ctx.workspace;
+      if (ctx.sandbox !== 'host' && ctx.docker.available() && ctx.workbench && workbenchEnabled()) {
+        try {
+          const result = await ctx.workbench.run(command, cwd, shellTimeoutMs());
+          if (result) return `exit ${result.code}\n${clipToolOutput(result.output)}`;
+        } catch (error) {
+          ctx.store.addLog('warn', `Workbench unavailable, using a throwaway container: ${(error as Error).message}`, undefined, 'workbench');
+        }
+      }
       if (ctx.sandbox !== 'host' && ctx.docker.available()) {
         const hostCwd = toHostBindPath(cwd);
         const image = await pickShellImage(cwd, ctx.docker);

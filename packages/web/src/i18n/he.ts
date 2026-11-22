@@ -1543,4 +1543,13 @@ export const he: Record<string, string> = {
   "Saved skill {0} (v{1}).": "נשמרה מיומנות {0} (גרסה {1}).",
   "Skill deleted.": "המיומנות נמחקה.",
   "That skill no longer exists.": "המיומנות הזו כבר לא קיימת.",
+  "Stopped": "עצור",
+  "Shared workbench": "סביבת עבודה משותפת",
+  "Idle": "בהמתנה",
+  "Ephemeral mode": "מצב זמני",
+  "Docker unavailable": "Docker לא זמין",
+  "RAM free: {0} / {1} GB": "RAM פנוי: {0} / {1} GB",
+  "GTT: {0} / {1} GB": "GTT: {0} / {1} GB",
+  "Resident models": "מודלים טעונים",
+  "No resident models": "אין מודלים טעונים",
 };

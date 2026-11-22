@@ -22,6 +22,7 @@ export function riskOf(tool: string, args: Record<string, unknown>, declared: st
     const command = String(args.command ?? '');
     // 2>/dev/null and 2>&1 must not count as writes; same rule as assessCommand.
     const cleaned = withoutHarmlessRedirects(command);
+    if (/\bapt(-get)?\s+install\b/i.test(command)) return { tier: 'high', why: `Installs system packages in the shared workbench (affects all personas): ${command.slice(0, 160)}` };
     if (HIGH_SHELL.some((pattern) => pattern.test(command))) return { tier: 'high', why: `Shell command with effects outside the workspace: ${command.slice(0, 160)}` };
     if (MEDIUM_SHELL.some((pattern) => pattern.test(cleaned))) return { tier: 'medium', why: `Shell command changes or deletes files: ${command.slice(0, 160)}` };
     return { tier: 'low', why: `Shell command: ${command.slice(0, 160)}` };
