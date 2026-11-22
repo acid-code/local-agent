@@ -40,6 +40,8 @@ export interface Room { id: string; name: string; createdAt: string; agentIds: s
 export interface Session {
   id: string; agentId: string | null; roomId: string | null; title: string; summary: string;
   activeModelId: string | null; modelPin: string | null; archived: boolean; mode: 'chat' | 'code'; workshopId: string | null; createdAt: string; updatedAt: string; ownerId: string;
+  /** '' = first-message stub, 'auto' = generated, 'fallback' = heuristic, 'user' = renamed. */
+  titleSource: string;
 }
 export interface Message {
   id: string; sessionId: string; seq: number; role: string; content: string; toolCallId: string | null;
@@ -269,6 +271,7 @@ export class Store {
     addCol('triggers', 'origin_session_id', 'origin_session_id TEXT');
     addCol('triggers', 'created_by', `created_by TEXT NOT NULL DEFAULT 'user'`);
     addCol('chat_sessions', 'helper_of', 'helper_of TEXT');
+    addCol('chat_sessions', 'title_source', `title_source TEXT NOT NULL DEFAULT ''`);
     addCol('edit_batches', 'kept_at', 'kept_at TEXT');
     addCol('edit_batches', 'kept_files', `kept_files TEXT NOT NULL DEFAULT '[]'`);
     addCol('edit_batches', 'reverted_files', `reverted_files TEXT NOT NULL DEFAULT '[]'`);
@@ -649,6 +652,12 @@ export class Store {
     this.db.prepare('UPDATE chat_sessions SET title=?, summary=?, active_model_id=?, model_pin=?, archived=?, mode=?, workshop_id=?, agent_id=?, updated_at=? WHERE id=?').run(
       next.title, next.summary, next.activeModelId, next.modelPin, next.archived ? 1 : 0, next.mode, next.workshopId, next.agentId, next.updatedAt, id,
     );
+    return this.getSession(id);
+  }
+
+  /** Sets a chat's title without moving it up the list (titles are written after the fact). */
+  setSessionTitle(id: string, title: string, source: string) {
+    this.db.prepare('UPDATE chat_sessions SET title=?, title_source=? WHERE id=?').run(title, source, id);
     return this.getSession(id);
   }
 
@@ -1100,7 +1109,7 @@ function mapSession(row: Raw): Session {
     title: String(row.title), summary: String(row.summary ?? ''), activeModelId: row.active_model_id ? String(row.active_model_id) : null,
     modelPin: row.model_pin ? String(row.model_pin) : null,
     archived: Boolean(row.archived), mode: row.mode === 'code' ? 'code' : 'chat', workshopId: row.workshop_id ? String(row.workshop_id) : null, createdAt: String(row.created_at), updatedAt: String(row.updated_at),
-    ownerId: String(row.owner_id || 'owner'),
+    ownerId: String(row.owner_id || 'owner'), titleSource: String(row.title_source ?? ''),
   };
 }
 

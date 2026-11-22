@@ -1,3 +1,4 @@
+import { needsTitle, previewOf } from './chat-titles.js';
 import { execFile } from 'node:child_process';
 import { safeInside } from './pathsafe.js';
 import fs from 'node:fs';
@@ -431,15 +432,28 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   }
   const memberTools = (req: Parameters<typeof accountOf>[0], tools: string[]) => accountOf(req).role === 'member' ? tools.filter((tool) => !MEMBER_DENIED_TOOLS.has(tool)) : tools;
   // Each persona's latest message, for the sidebar preview.
-  const lastMessage = store.db.prepare(`SELECT m.content AS content, m.role AS role, m.created_at AS at FROM messages m JOIN chat_sessions s ON s.id = m.session_id
-    WHERE s.agent_id = ? AND s.helper_of IS NULL AND s.archived = 0 AND m.role IN ('user', 'assistant') AND m.content <> '' ORDER BY m.rowid DESC LIMIT 1`);
-  app.get('/api/agents', async (req) => ({
-    agents: store.listAgents(me(req)).map((agent) => {
-      const last = lastMessage.get(agent.id) as { content: string; role: string; at: string } | undefined;
-      return { ...agent, lastMessage: last ? { text: last.content.replace(/[*_`#>]+/g, '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\s+/g, ' ').trim().slice(0, 120), role: last.role, at: last.at } : null };
-    }),
-    templates: TEMPLATES, faces: FACES,
-  }));
+  // Newest messages first; the preview skips our own notices and markers (see previewOf).
+  const lastMessages = store.db.prepare(`SELECT m.content AS content, m.role AS role, m.created_at AS at FROM messages m JOIN chat_sessions s ON s.id = m.session_id
+    WHERE s.agent_id = ? AND s.helper_of IS NULL AND s.archived = 0 AND m.role IN ('user', 'assistant') AND m.content <> '' ORDER BY m.rowid DESC LIMIT 12`);
+  app.get('/api/agents', async (req) => {
+    const owner = me(req);
+    const untitled: string[] = [];
+    const agents = store.listAgents(owner).map((agent) => {
+      const rows = (lastMessages.all(agent.id) as { content: string; role: string; at: string }[]).reverse();
+      const preview = previewOf(rows);
+      const at = rows.at(-1)?.at;
+      const chat = store.latestSessionForAgent(agent.id, owner);
+      if (chat && needsTitle(chat.titleSource) && rows.length) untitled.push(chat.id);
+      return {
+        ...agent,
+        lastMessage: preview && at ? { text: preview.text, role: preview.role, at } : null,
+        chat: chat ? { id: chat.id, title: chat.title, titleSource: chat.titleSource } : null,
+      };
+    });
+    // Old chats get their generated title lazily, the first time a list shows them.
+    if (untitled.length) engine.queueTitles(untitled.slice(0, 10));
+    return { agents, templates: TEMPLATES, faces: FACES };
+  });
   // Persona gallery: ready-made personas with skills, rules, tools and connectors. One click adds one.
   app.get('/api/gallery', async (req) => {
     const mine = store.listAgents(me(req));
@@ -852,7 +866,10 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   });
   app.get('/api/sessions', async (req) => {
     const query = parse(z.object({ limit: z.coerce.number().int().min(1).max(500).optional(), cursor: z.string().optional() }), req.query);
-    return store.pageSessions({ limit: query.limit ?? 100, cursor: query.cursor || null, ownerId: me(req) });
+    const page = store.pageSessions({ limit: query.limit ?? 100, cursor: query.cursor || null, ownerId: me(req) });
+    const untitled = page.sessions.filter((row) => needsTitle(row.titleSource) && row.title !== 'New chat').slice(0, 10).map((row) => row.id);
+    if (untitled.length) engine.queueTitles(untitled);
+    return page;
   });
   app.post('/api/sessions', async (req) => {
     const body = parse(z.object({ agentId: z.string().optional(), roomId: z.string().optional(), title: z.string().optional(), mode: z.enum(['chat', 'code']).optional() }), req.body);
@@ -943,7 +960,10 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     mustOwn(store, req, 'session', (req.params as { id: string }).id, 'Chat not found.');
     if (body.agentId) mustOwn(store, req, 'agent', body.agentId, 'Persona not found.');
     if (body.modelPin) body.modelPin = allowedModel(req, chatModelId(store, body.modelPin));
-    return { session: store.updateSession((req.params as { id: string }).id, body) };
+    const id = (req.params as { id: string }).id;
+    // A title typed by the user is theirs: generated titles never replace it.
+    if (body.title !== undefined) { const title = body.title.trim().slice(0, 120); delete body.title; if (title) store.setSessionTitle(id, title, 'user'); }
+    return { session: store.updateSession(id, body) };
   });
   /** The workspaces this chat works in (its context), sets expanded, with branch and uncommitted count. */
   app.get('/api/sessions/:id/workspaces', async (req) => {
@@ -1888,6 +1908,8 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
         if (event.runId) {
           if (!runOwner.has(event.runId)) runOwner.set(event.runId, ownerOf(store, 'run', event.runId));
           owner = runOwner.get(event.runId) ?? null;
+        } else if (event.type === 'title' && (event as { sessionId?: string }).sessionId) {
+          owner = ownerOf(store, 'session', String((event as { sessionId?: string }).sessionId));
         }
         if (owner !== accountId) return;
         try { socket.send(JSON.stringify(event)); } catch { /* closed */ }

@@ -74,7 +74,7 @@ function WorkGroupViewInner({ group, live, diffs, defaultOpen, liveThought }: Gr
       </button>
       {open && (
         <ol className="work-rows">
-          {group.rows.map((row) => <WorkRowView key={row.id} row={row} />)}
+          {group.rows.map((row) => <WorkRowView key={row.id} row={row} live={live} />)}
           {liveThought && <LiveThoughtRow text={liveThought} />}
         </ol>
       )}
@@ -82,11 +82,12 @@ function WorkGroupViewInner({ group, live, diffs, defaultOpen, liveThought }: Gr
   );
 }
 
-const WorkRowView = memo(function WorkRowView({ row }: { row: WorkRow }) {
+const WorkRowView = memo(function WorkRowView({ row, live }: { row: WorkRow; live: boolean }) {
   if (row.type === 'narration') return <li className="work-narration" dir="auto"><Markdown text={row.text} /></li>;
   if (row.type === 'thought') return <ThoughtRow text={row.text} />;
-  return <StepRow step={row} />;
-}, (a, b) => sameRow(a.row, b.row));
+  // A step without a result in a run that is no longer live did not finish: it was stopped, not still running.
+  return <StepRow step={row} stopped={row.pending && !live} />;
+}, (a, b) => a.live === b.live && sameRow(a.row, b.row));
 
 function ThoughtRow({ text }: { text: string }) {
   const [open, setOpen] = useState(false);
@@ -103,12 +104,12 @@ function ThoughtRow({ text }: { text: string }) {
   );
 }
 
-function StepRow({ step }: { step: WorkStep }) {
+function StepRow({ step, stopped }: { step: WorkStep; stopped: boolean }) {
   const [open, setOpen] = useState(false);
   const Icon = ICONS[step.icon] ?? Wrench;
   const argsText = step.args ? JSON.stringify(step.args, null, 2) : '';
   return (
-    <li className={`work-step${open ? ' open' : ''}${step.failed ? ' failed' : ''}${step.pending ? ' pending' : ''}`}>
+    <li className={`work-step${open ? ' open' : ''}${step.failed ? ' failed' : ''}${step.pending && !stopped ? ' pending' : ''}${stopped ? ' stopped' : ''}`}>
       <button type="button" className="work-row" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
         <Icon size={15} className="work-icon" aria-hidden />
         <span className="work-verb">{step.verb}</span>
@@ -117,7 +118,7 @@ function StepRow({ step }: { step: WorkStep }) {
           <span key={file} className="work-file mono" title={file}><FileCode2 size={12} aria-hidden />{file.split('/').pop()}</span>
         ))}
         <span className="work-spacer" />
-        {step.pending ? <span className="work-time faint">{t('running…')}</span> : step.durationMs != null && <span className="work-time faint">{formatDuration(step.durationMs)}</span>}
+        {stopped ? <span className="work-time faint">{t('stopped')}</span> : step.pending ? <span className="work-time faint">{t('running…')}</span> : step.durationMs != null && <span className="work-time faint">{formatDuration(step.durationMs)}</span>}
       </button>
       {open && (
         <div className="work-detail">

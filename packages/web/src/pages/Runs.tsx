@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import { api, post } from '../lib/api';
 import { EmptyState, PageHeader } from '../components/ui';
 import { Activity } from 'lucide-react';
+import { TraceList } from '../components/TraceList';
 import { t } from '../i18n';
 
 interface Run { id: string; status: string; modelId: string | null; routingNote: string | null; inputTokens: number; outputTokens: number; costUsd: number; error: string | null; startedAt: string }
@@ -15,7 +16,6 @@ export function Runs() {
   const [selected, setSelected] = useState<string | null>(params.id || null);
   const [steps, setSteps] = useState<Step[]>([]);
   const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
-  const [open, setOpen] = useState<string | null>(null);
 
   useEffect(() => { api<{ runs: Run[] }>('/api/runs').then((data) => setRuns(data.runs)); }, []);
   useEffect(() => {
@@ -59,12 +59,7 @@ export function Runs() {
               {selected && <button className="btn" onClick={() => post(`/api/runs/${selected}/control`, { action: 'retry_from', checkpointId: checkpoint.id })}>{t('Retry from here')}</button>}
             </div>
           ))}
-          {steps.map((step) => (
-            <button key={step.id} className="card step-card" aria-expanded={open === step.id} onClick={() => setOpen(open === step.id ? null : step.id)}>
-              <strong>{step.index}. {step.kind}</strong> · {step.name} · {step.status} · {step.latencyMs} ms
-              {open === step.id && <pre className="command">{JSON.stringify({ input: step.input, output: step.output, error: step.error }, null, 2)}</pre>}
-            </button>
-          ))}
+          <TraceList steps={steps} />
         </div>
       </div>
     </div>
