@@ -7,7 +7,8 @@ FROM mcr.microsoft.com/playwright:v1.52.0-noble
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
      xvfb x11vnc novnc websockify fluxbox \
-  && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/* \
+  && npm install -g playwright@1.52.0
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
@@ -17,7 +18,8 @@ ENV DISPLAY=:99 \
     SCREEN_HEIGHT=800 \
     CDP_PORT=9222 \
     VNC_PORT=5900 \
-    NOVNC_PORT=6080
+    NOVNC_PORT=6080 \
+    NODE_PATH=/usr/lib/node_modules
 
 VOLUME ["/profiles"]
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
