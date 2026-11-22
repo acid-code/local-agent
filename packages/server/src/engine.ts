@@ -251,8 +251,10 @@ export class Engine {
       try {
         const ended = this.store.getRun(runId);
         const endedSession = ended ? this.store.getSession(ended.sessionId) : null;
-        if (ended?.modelId && endedSession && !ended.cursor.helperId && endedSession.activeModelId !== ended.modelId && this.store.getModel(ended.modelId)) {
-          this.store.updateSession(endedSession.id, { activeModelId: ended.modelId });
+        // The uncensored fallback is for one step only: the chat keeps the model the run came from.
+        const keep = ended?.cursor.uncensoredFrom && this.store.getModel(ended.cursor.uncensoredFrom) ? ended.cursor.uncensoredFrom : ended?.modelId;
+        if (keep && endedSession && !ended?.cursor.helperId && endedSession.activeModelId !== keep && this.store.getModel(keep)) {
+          this.store.updateSession(endedSession.id, { activeModelId: keep });
         }
       } catch { /* the store closed while shutting down */ }
       // No automatic switch back to Qwen here: the next run that needs Qwen switches lazily under its lease.
@@ -805,6 +807,17 @@ export class Engine {
       })!;
       this.bus.publish({ type: 'steering', runId: run.id, messageId: steering.id, status: 'applied' });
     }
+    // The uncensored fallback answers one step after a refusal; then the run goes back to the model it came from.
+    if (current.cursor.uncensoredFrom && current.cursor.uncensoredAt !== undefined && current.cursor.turn > current.cursor.uncensoredAt) {
+      const back = this.store.getModel(current.cursor.uncensoredFrom);
+      if (back && back.enabled !== false) {
+        const reason = `Back to ${back.name} after one step on the uncensored fallback.`;
+        this.store.addLog('info', reason, undefined, 'router');
+        current = this.store.updateRun(run.id, { cursor: { ...current.cursor, modelId: back.id, uncensoredFrom: undefined, uncensoredAt: undefined, routingReason: reason }, modelId: back.id, routingNote: reason })!;
+      } else {
+        current = this.store.updateRun(run.id, { cursor: { ...current.cursor, uncensoredFrom: undefined, uncensoredAt: undefined } })!;
+      }
+    }
     if (current.cursor.turn >= maxSteps) {
       this.store.updateRun(run.id, { cursor: { ...current.cursor, phase: 'summarize' } });
       return;
@@ -962,7 +975,7 @@ export class Engine {
           this.store.addLog('warn', reason, undefined, 'router');
           this.store.updateStep(step.id, { status: 'failed', error: 'The selected model refused the request.', endedAt: now(), latencyMs: Date.now() - started });
           this.store.updateRun(run.id, {
-            cursor: { ...current.cursor, modelId: fallback.id, uncensoredRetry: true, phase: 'model', switched: true, routingReason: reason },
+            cursor: { ...current.cursor, modelId: fallback.id, uncensoredRetry: true, uncensoredFrom: model.id, uncensoredAt: current.cursor.turn, phase: 'model', switched: true, routingReason: reason },
             modelId: fallback.id,
             switched: true,
             routingNote: reason,

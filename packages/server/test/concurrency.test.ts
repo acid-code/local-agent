@@ -68,7 +68,7 @@ describe('GPU coexistence with the uncensored llama-server', () => {
 });
 
 describe('sticky chat model', () => {
-  it('stays on the uncensored model after a refusal fallback instead of re-routing to gemma', async () => {
+  it('uses the uncensored model for one step after a refusal, then the chat goes back to its model', async () => {
     const { dir, store } = newStore();
     store.upsertProvider({ id: 'prov_ollama', kind: 'openai_compat', name: 'Ollama', baseUrl: 'http://127.0.0.1:11434/v1', enabled: true });
     store.upsertProvider({ id: 'prov_uncensored', kind: 'openai_compat', name: 'llama-server (uncensored)', baseUrl: 'http://127.0.0.1:8081/v1', enabled: true });
@@ -82,22 +82,39 @@ describe('sticky chat model', () => {
         : new ScriptedProvider([{ text: "I'm sorry, I can't assist with that request because it violates the terms of service." }]);
     });
     await engine.llama.refresh();
-    const agent = agentIn(store, dir);
+    const agent = store.createAgent({ name: 'House', description: '', systemPrompt: 'Be brief.', modelId: 'ollama_gemma3', routing: 'pinned', strategy: 'rolling', toolAllowlist: [], memoryEnabled: false, workspacePath: dir });
     const session = store.createSession({ agentId: agent.id, title: 'Chat' });
     const first = await engine.startTurn({ sessionId: session.id, agentId: agent.id, content: 'Please search the marketplace listings for a used bike and save them', wait: true });
     expect(store.getRun(first.id)?.modelId).toBe('unc_inkling');
-    expect(store.getSession(session.id)?.activeModelId).toBe('unc_inkling');
+    expect(used).toContain('inkling-2-mini-uncensored');
+    // The chat keeps the model it was on, not the fallback.
+    expect(store.getSession(session.id)?.activeModelId).toBe('ollama_gemma3');
 
-    used.length = 0;
-    const second = await engine.startTurn({ sessionId: session.id, agentId: agent.id, content: 'What was your last action?', wait: true });
-    const routing = store.listSteps(second.id).find((step) => step.kind === 'routing');
-    expect(routing?.name).toBe('inkling-2-mini-uncensored');
-    expect(JSON.stringify(routing?.output)).toMatch(/this chat's model/);
-    expect(used.some((name) => name.startsWith('gemma'))).toBe(false);
-
-    // An explicit /auto re-routes.
+    // An explicit /auto still re-routes.
     await engine.startTurn({ sessionId: session.id, agentId: agent.id, content: '/auto', wait: true });
     expect(store.getSession(session.id)?.activeModelId).toBeNull();
+  });
+
+  it('returns to the original model for the step after the fallback answered', async () => {
+    const { dir, store } = newStore();
+    store.upsertProvider({ id: 'prov_ollama', kind: 'openai_compat', name: 'Ollama', baseUrl: 'http://127.0.0.1:11434/v1', enabled: true });
+    store.upsertProvider({ id: 'prov_uncensored', kind: 'openai_compat', name: 'llama-server (uncensored)', baseUrl: 'http://127.0.0.1:8081/v1', enabled: true });
+    store.upsertModel(model('ollama_gemma3', 'prov_ollama', 'gemma3:4b', 3.4, 'small'));
+    store.upsertModel(model('unc_inkling', 'prov_uncensored', 'inkling-2-mini-uncensored', 8, 'large'));
+    const used: string[] = [];
+    const gemma = new ScriptedProvider([
+      { text: "I'm sorry, I can't assist with that request because it violates the terms of service." },
+      { text: 'Here is the summary of the listings.' },
+    ]);
+    const inkling = new ScriptedProvider([{ toolCalls: [{ id: 't1', name: 'time_now', arguments: '{}' }] }]);
+    const engine = engineWith(store, uncensoredUp, (m) => { used.push(m.apiName); return m.apiName.includes('inkling') ? inkling : gemma; });
+    await engine.llama.refresh();
+    const agent = store.createAgent({ name: 'House', description: '', systemPrompt: 'Be brief.', modelId: 'ollama_gemma3', routing: 'pinned', strategy: 'rolling', toolAllowlist: [], memoryEnabled: false, workspacePath: dir });
+    const session = store.createSession({ agentId: agent.id, title: 'Chat' });
+    const run = await engine.startTurn({ sessionId: session.id, agentId: agent.id, content: 'Please search the marketplace listings for a used bike and save them', wait: true });
+    expect(used).toEqual(['gemma3:4b', 'inkling-2-mini-uncensored', 'gemma3:4b']);
+    expect(store.getRun(run.id)?.modelId).toBe('ollama_gemma3');
+    expect(store.getRun(run.id)?.status).toBe('completed');
   });
 });
 
