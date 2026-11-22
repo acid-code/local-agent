@@ -112,6 +112,8 @@ export interface RunCursor {
   uncensoredRetry?: boolean;
   /** Switched once to a tool-capable model because the chosen one cannot call tools. */
   toolFallback?: boolean;
+  /** Tool calls with malformed arguments so far in this run (capped). */
+  badArgs?: number;
   /** Model the run left for the uncensored fallback, and the turn the fallback answers; the run returns after it. */
   uncensoredFrom?: string;
   uncensoredAt?: number;

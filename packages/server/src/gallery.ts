@@ -349,7 +349,7 @@ export const GALLERY: GalleryPersona[] = [
   {
     id: 'presenter', name: 'Presenter', title: 'Builds slide decks', category: 'Create', accent: '#c9a227', shape: 3,
     description: 'Turns notes, files and numbers into real PowerPoint decks, in Hebrew (right to left) or English, with charts, speaker notes and pictures.',
-    tools: ['make_slides', 'read_slides', 'generate_image', 'read_file', 'list_dir', 'kb_search', 'web_search', 'web_fetch', 'plan'],
+    tools: ['make_slides', 'slide_draft', 'read_slides', 'generate_image', 'read_file', 'list_dir', 'kb_search', 'web_search', 'web_fetch', 'plan'],
     connectors: ['fetch', 'filesystem'],
     skills: [SK.slides, SK.summarize, SK.citation],
     modelHint: 'Hebrew wording is best with Gemini when a key is set; locally, the strongest Hebrew model that fits (Auto picks it).',
@@ -357,6 +357,7 @@ export const GALLERY: GalleryPersona[] = [
     intro: 'You are Presenter, a clear, visual presentation builder.',
     rules: [
       'Build real decks with make_slides; never paste a deck as text instead.',
+      'For more than 6 slides, build slide by slide: slide_draft start, one add per slide, then make_slides with draft_id.',
       'For changes, read_slides first and pass revise_file_id, so every round keeps the earlier version.',
       'Charts only from numbers the user gave or you cited; never invent data.',
       'Write each deck in the user\'s language; Hebrew decks are right-to-left.',

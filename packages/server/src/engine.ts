@@ -1212,10 +1212,18 @@ export class Engine {
       // A permitted tool called before find_tools surfaced it still runs, and stays on the menu from now on.
       if (tool && run.cursor.extraTools !== undefined && call.name !== 'find_tools' && !run.cursor.extraTools.includes(call.name)) this.addRunTools(run, [call.name]);
       // Malformed arguments go back to the model as a fixable error instead of running the tool with {}.
-      const badJson = argumentsError(call.name, call.arguments);
+      const badAttempt = (this.store.getRun(run.id)?.cursor.badArgs ?? 0) + 1;
+      const badJson = argumentsError(call.name, call.arguments, badAttempt);
       if (badJson) {
+        const latestRun = this.store.getRun(run.id)!;
+        run.cursor.badArgs = badAttempt;
+        // Past the cap the run stops calling tools and answers with what it has (one more model step, no tools).
+        const stop = badAttempt >= BAD_ARGS_CAP;
+        if (stop) run.cursor.noTools = true;
+        this.store.updateRun(run.id, { cursor: { ...latestRun.cursor, badArgs: badAttempt, ...(stop ? { noTools: true } : {}) } });
+        if (stop) this.store.addLog('warn', `Run ${run.id}: ${badAttempt} malformed tool calls; finishing without tools.`, undefined, 'engine');
         this.store.addStep({ runId: run.id, kind: 'contract', name: call.name, status: 'failed', input: { raw: call.arguments.slice(0, 2000) }, output: badJson, toolCallId: call.id, turn: run.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: badJson, startedAt: now() });
-        this.persistTool(run, call, badJson, 'failed', false);
+        this.persistTool(run, call, stop ? `${badJson}\nThat was the last try: no more tool calls in this run. Answer now with what you have and say what you could not do.` : badJson, 'failed', false);
         completed.add(call.id);
         this.bumpTools(run.id, completed);
         continue;
@@ -2026,6 +2034,7 @@ export class Engine {
     if (!leanMenuEnabled() || permitted.length <= LEAN_MIN_TOOLS) return permitted;
     const core = new Set<string>([...agent.toolAllowlist, ...CORE_TOOLS]);
     if (stage === 'plan') for (const name of ['plan', 'recall', 'consult_agent']) core.add(name);
+    if (core.has('make_slides')) core.add('slide_draft');
     if (stage === 'implement' || sessionMode === 'code') for (const tool of CODING_TOOLS) core.add(tool.name);
     const base = permitted.filter((tool) => core.has(tool.name));
     const baseNames = new Set(base.map((tool) => tool.name));
@@ -2105,6 +2114,7 @@ export class Engine {
     names.add('share_file');
     names.add('make_slides');
     names.add('read_slides');
+    names.add('slide_draft');
     names.add('fetch_image');
     names.add('browse');
     names.add('web_search');
@@ -2727,25 +2737,38 @@ function requestSecretTool(): Tool {
   };
 }
 
-/** Null when the arguments parse to an object; otherwise a message the model can act on (where it broke, how big, what to do). */
-export function argumentsError(name: string, raw: string | undefined): string | null {
+export const BAD_ARGS_CAP = 3;
+
+/**
+ * Null when the arguments parse to an object; otherwise a structured error the model can act on: what broke, where,
+ * how big the payload was, how many tries are left, and what to do (split big payloads; decks go through slide_draft).
+ */
+export function argumentsError(name: string, raw: string | undefined, attempt = 1, cap = BAD_ARGS_CAP): string | null {
   const text = (raw ?? '').trim();
   if (!text) return null;
+  let problem: string;
+  let position: number | undefined;
   try {
     const parsed = JSON.parse(text) as unknown;
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return null;
-    return `Nothing ran: the arguments for ${name} must be a JSON object like {"key": "value"}, not ${Array.isArray(parsed) ? 'an array' : typeof parsed}. Call ${name} again with an object.`;
+    problem = `arguments must be a JSON object like {"key": "value"}, not ${Array.isArray(parsed) ? 'an array' : typeof parsed}`;
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    const position = Number(detail.match(/position (\d+)/)?.[1]);
-    const near = Number.isFinite(position) ? ` near character ${position}: …${text.slice(Math.max(0, position - 40), position + 20).replace(/\s+/g, ' ')}…` : '';
-    const big = text.length > 6000;
-    return [
-      `Nothing ran: the arguments for ${name} were not valid JSON (${text.length} characters; ${detail.replace(/\s+in JSON.*$/, '')}${near}).`,
-      'Call it again with valid JSON: escape double quotes and backslashes inside strings, write newlines as \\n, and close every brace.',
-      big ? 'The payload is large: split it (write the first part, then append or apply_patch the rest in further calls).' : '',
-    ].filter(Boolean).join(' ');
+    problem = `not valid JSON: ${detail.replace(/\s+in JSON.*$/, '')}`;
+    const found = Number(detail.match(/position (\d+)/)?.[1]);
+    if (Number.isFinite(found)) position = found;
   }
+  const big = text.length > 6000;
+  const fix = [
+    'Call the tool again with one valid JSON object: escape double quotes and backslashes inside strings, write newlines as \\n, close every brace and bracket.',
+    big ? (name === 'make_slides' ? 'The deck is too big for one call: use slide_draft (start, then one add per slide) and make_slides {draft_id}.' : 'The payload is large: split it (write the first part, then append or apply_patch the rest in further calls).') : '',
+  ].filter(Boolean).join(' ');
+  const info = {
+    error: 'invalid_tool_arguments', tool: name, problem, length: text.length,
+    ...(position !== undefined ? { position, near: text.slice(Math.max(0, position - 40), position + 20).replace(/\s+/g, ' ') } : {}),
+    attempt, attempts_left: Math.max(0, cap - attempt), fix,
+  };
+  return `Nothing ran: the arguments for ${name} were ${problem.startsWith('not valid') ? 'not valid JSON' : 'not a JSON object'} (${text.length} characters). ${fix}\n${JSON.stringify(info)}`;
 }
 
 function parseArgs(value: string): Record<string, unknown> {
@@ -2784,7 +2807,7 @@ const CONTRACT_ALWAYS = new Set([
   'request_secret', 'kb_search', 'load_skill', 'manage_timer', 'manage_trigger',
   'time_now', 'tasks', 'think', 'memory_file', 'search_chats', 'web_search', 'web_fetch',
   'spawn_agent', 'helpers', 'propose_skill', 'read_output', 'run_skill_script',
-  'find_context', 'share_file', 'make_slides', 'read_slides', 'fetch_image', 'browse', 'create_project', 'vercel', 'turbo_inspect', 'read_image_text', 'understand_image', 'generate_image', 'repo_sync',
+  'find_context', 'share_file', 'make_slides', 'read_slides', 'slide_draft', 'fetch_image', 'browse', 'create_project', 'vercel', 'turbo_inspect', 'read_image_text', 'understand_image', 'generate_image', 'repo_sync',
   'create_file', 'write_file', 'read_file', 'list_dir', 'grep', 'glob', 'apply_patch', 'find_tools',
 ]);
 

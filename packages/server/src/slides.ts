@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -423,13 +424,15 @@ async function loadImages(store: Store, deps: SlideDeps, spec: DeckSpec, ctx: Im
 export function slidesTools(deps: SlideDeps): Tool[] {
   const make: Tool = {
     name: 'make_slides',
-    description: 'Create or revise a PowerPoint deck (.pptx) that looks designed, not like a text dump. Pass the whole deck as JSON: {title, lang:"he"|"en"|"auto", font:"Heebo"|"Assistant", theme:"clinical"|"ocean"|"light"|"dark"|"warm", slides:[{layout, title, kicker?, subtitle?, bullets?, stats?, chart?, image?, source?, notes?}]}. Layouts: "title" (hero, put image on it), "section" (big number divider), "split" (full-height picture on one half + 3-4 bullets), "image" (full-bleed picture with caption), "cards" (3-6 short points as numbered cards), "stats" (stats:[{value:"1 in 3", label:"..."}] big-number tiles, 2-4), "chart" (chart:{type:"bar"|"line"|"pie"|"doughnut", labels, series:[{name, values}], title?} + optional bullets), "quote", "bullets" (plain, use sparingly). DESIGN RULES: at least 60% of slides carry a real picture: image:{query:"short English photo search words, e.g. osteoclast bone resorption diagram"} finds a real photo/diagram (Wikimedia Commons), image:{prompt:"vivid scene, no text"} generates art, image:{fileId} reuses a file (fetch_image gives file ids); add image.caption. Vary layouts (never 3 identical in a row), 3-4 bullets of at most 12 words, one idea per slide, kicker = the section label above the title, source = the source line printed at the bottom, notes = 2-4 spoken sentences. Hebrew decks are right-to-left with an embedded Hebrew font. For an edit round call read_slides first, change the JSON, and pass revise_file_id so the new version is saved next to the old one. The result lists design problems (missing pictures, text-heavy slides): fix them and call make_slides again with revise_file_id before replying. Returns a [file:<id>] reference to put in the reply.',
-    parameters: { type: 'object', properties: { deck: { type: 'object' }, file_name: { type: 'string' }, revise_file_id: { type: 'string' } }, required: ['deck'], additionalProperties: false },
+    description: 'Create or revise a PowerPoint deck (.pptx) that looks designed, not like a text dump. Pass the whole deck as JSON: {title, lang:"he"|"en"|"auto", font:"Heebo"|"Assistant", theme:"clinical"|"ocean"|"light"|"dark"|"warm", slides:[{layout, title, kicker?, subtitle?, bullets?, stats?, chart?, image?, source?, notes?}]}. Layouts: "title" (hero, put image on it), "section" (big number divider), "split" (full-height picture on one half + 3-4 bullets), "image" (full-bleed picture with caption), "cards" (3-6 short points as numbered cards), "stats" (stats:[{value:"1 in 3", label:"..."}] big-number tiles, 2-4), "chart" (chart:{type:"bar"|"line"|"pie"|"doughnut", labels, series:[{name, values}], title?} + optional bullets), "quote", "bullets" (plain, use sparingly). DESIGN RULES: at least 60% of slides carry a real picture: image:{query:"short English photo search words, e.g. osteoclast bone resorption diagram"} finds a real photo/diagram (Wikimedia Commons), image:{prompt:"vivid scene, no text"} generates art, image:{fileId} reuses a file (fetch_image gives file ids); add image.caption. Vary layouts (never 3 identical in a row), 3-4 bullets of at most 12 words, one idea per slide, kicker = the section label above the title, source = the source line printed at the bottom, notes = 2-4 spoken sentences. Hebrew decks are right-to-left with an embedded Hebrew font. For an edit round call read_slides first, change the JSON, and pass revise_file_id so the new version is saved next to the old one. The result lists design problems (missing pictures, text-heavy slides): fix them and call make_slides again with revise_file_id before replying. Returns a [file:<id>] reference to put in the reply. BIG DECKS (more than ~6 slides, or long notes): build them slide by slide with slide_draft (start, then add one slide per call) and call make_slides with draft_id instead of deck, so no single call carries a huge JSON.',
+    parameters: { type: 'object', properties: { deck: { type: 'object', description: 'The whole deck (omit when passing draft_id).' }, draft_id: { type: 'string', description: 'Build from a slide_draft instead of passing deck.' }, file_name: { type: 'string' }, revise_file_id: { type: 'string' } }, additionalProperties: false },
     mutates: () => false,
     approval: () => null,
     async execute(args, ctx) {
       const ownerId = ctx.agent.ownerId || OWNER_ID;
-      const spec = validateDeck(typeof args.deck === 'string' ? JSON.parse(args.deck) : args.deck);
+      const fromDraft = args.draft_id ? readDraft(deps.dataDir, String(args.draft_id), ownerId) : null;
+      if (!fromDraft && args.deck === undefined) throw new Error('Pass deck (the whole deck) or draft_id (from slide_draft).');
+      const spec = validateDeck(fromDraft ?? (typeof args.deck === 'string' ? JSON.parse(args.deck) : args.deck));
       const notes: string[] = [];
       const images = await loadImages(ctx.store, deps, spec, { ownerId, sessionId: ctx.sessionId, agentId: ctx.agent.id, signal: ctx.signal }, notes);
       const bytes = await buildDeck(spec, images);
@@ -469,7 +472,63 @@ export function slidesTools(deps: SlideDeps): Tool[] {
       return slides.map((slide, index) => `Slide ${index + 1}: ${slide.title}\n${slide.lines.map((line) => `- ${line}`).join('\n')}${slide.notes ? `\nNotes: ${slide.notes}` : ''}`).join('\n\n') || 'No slides found.';
     },
   };
-  return [make, read];
+  const draft: Tool = {
+    name: 'slide_draft',
+    description: 'Build a deck one slide per call, then render it with make_slides {draft_id}. Actions: start {title, lang?, font?, theme?} returns draft_id; add {draft_id, slide} appends one slide (same slide fields as make_slides); replace {draft_id, index, slide} swaps slide N (1-based); remove {draft_id, index}; show {draft_id} lists the slides. Each slide is checked when added, so a mistake costs one slide, not the deck.',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['start', 'add', 'replace', 'remove', 'show'] },
+        draft_id: { type: 'string' },
+        title: { type: 'string', description: 'Deck title (start).' },
+        lang: { type: 'string', enum: ['he', 'en', 'auto'] },
+        font: { type: 'string' },
+        theme: { type: 'string' },
+        index: { type: 'integer', description: '1-based slide number (replace, remove).' },
+        slide: { type: 'object', description: 'One slide: {layout, title, kicker?, subtitle?, bullets?, stats?, chart?, image?, source?, notes?}.' },
+      },
+      required: ['action'],
+    },
+    mutates: () => false,
+    approval: () => null,
+    async execute(args, ctx) {
+      const ownerId = ctx.agent.ownerId || OWNER_ID;
+      const action = String(args.action || '');
+      if (action === 'start') {
+        const title = String(args.title || '').trim();
+        if (!title) throw new Error('start needs a deck title.');
+        const id = `draft_${crypto.randomBytes(6).toString('hex')}`;
+        writeDraft(deps.dataDir, id, { ownerId, deck: { title, lang: args.lang, font: args.font, theme: args.theme, slides: [] } as unknown as DeckSpec });
+        return `Draft ${id} started for "${title}". Add slides one per call: slide_draft {action:"add", draft_id:"${id}", slide:{...}}. Then make_slides {draft_id:"${id}"}.`;
+      }
+      const id = String(args.draft_id || '');
+      const deck = readDraft(deps.dataDir, id, ownerId);
+      if (!deck) throw new Error(`No draft ${id || '(missing draft_id)'}. Start one with action "start".`);
+      const checkSlide = (raw: unknown) => {
+        const slide = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        return validateDeck({ title: deck.title, slides: [slide] }).slides[0]!;
+      };
+      const at = (value: unknown) => {
+        const index = Number(value);
+        if (!Number.isInteger(index) || index < 1 || index > deck.slides.length) throw new Error(`index must be 1-${deck.slides.length}.`);
+        return index - 1;
+      };
+      if (action === 'add') {
+        if (deck.slides.length >= 24) throw new Error('A deck holds at most 24 slides.');
+        deck.slides.push(checkSlide(args.slide));
+      } else if (action === 'replace') {
+        deck.slides[at(args.index)] = checkSlide(args.slide);
+      } else if (action === 'remove') {
+        deck.slides.splice(at(args.index), 1);
+      } else if (action !== 'show') {
+        throw new Error('action is start, add, replace, remove or show.');
+      }
+      if (action !== 'show') writeDraft(deps.dataDir, id, { ownerId, deck });
+      const list = deck.slides.map((slide, index) => `${index + 1}. [${slide.layout ?? 'auto'}] ${slide.title}${slide.image ? ' 🖼' : ''}`).join('\n');
+      return `${action === 'show' ? 'Draft' : `Saved (${action})`}: ${deck.slides.length} slide(s).\n${list || '(no slides yet)'}\nNext: add another slide, or make_slides {draft_id:"${id}"} to render.`;
+    },
+  };
+  return [make, read, draft];
 }
 
 // ── Slide pictures for the file viewer (LibreOffice + pdftoppm when installed; the viewer falls back to slide text) ──
@@ -504,4 +563,22 @@ export async function renderSlides(dataDir: string, fileId: string, pptx: string
   })().finally(() => rendering.delete(fileId));
   rendering.set(fileId, job);
   return job;
+}
+
+function draftFile(dataDir: string, id: string) {
+  if (!/^draft_[a-f0-9]{12}$/.test(id)) return null;
+  return path.join(dataDir, 'slide-drafts', `${id}.json`);
+}
+function writeDraft(dataDir: string, id: string, value: { ownerId: string; deck: DeckSpec }) {
+  const file = draftFile(dataDir, id)!;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(value));
+}
+/** A draft deck for its owner (the owner account can read every draft). */
+export function readDraft(dataDir: string, id: string, ownerId: string): DeckSpec | null {
+  const file = draftFile(dataDir, id);
+  if (!file || !fs.existsSync(file)) return null;
+  const value = JSON.parse(fs.readFileSync(file, 'utf8')) as { ownerId: string; deck: DeckSpec };
+  if (value.ownerId !== ownerId && ownerId !== OWNER_ID) return null;
+  return value.deck;
 }

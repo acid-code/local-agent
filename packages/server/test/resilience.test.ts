@@ -109,3 +109,26 @@ describe('malformed tool-call arguments', () => {
     await built.app.close();
   });
 });
+
+describe('structured bad-argument feedback with a cap', () => {
+  it('carries a machine-readable block with attempts left and slide_draft advice for big decks', () => {
+    const message = argumentsError('make_slides', `{"deck":{"title":"x","slides":[${'{"title":"a"},'.repeat(600)}`, 2)!;
+    const info = JSON.parse(message.split('\n').at(-1)!);
+    expect(info).toMatchObject({ error: 'invalid_tool_arguments', tool: 'make_slides', attempt: 2, attempts_left: 1 });
+    expect(info.fix).toMatch(/slide_draft/);
+  });
+
+  it('stops tool calls after three malformed calls and lets the model answer', async () => {
+    const built = await setup();
+    const bad = (id: string): ToolCall => ({ id, name: 'read_file', arguments: '{"path": ' });
+    built.provider.steps = [{ toolCalls: [bad('x1')] }, { toolCalls: [bad('x2')] }, { toolCalls: [bad('x3')] }, { text: 'I could not read the file.' }];
+    const row = await built.engine.startTurn({ sessionId: built.session.id, agentId: built.agent.id, content: 'read notes.txt' });
+    const run = await finished(built, row.id);
+    expect(run.status).toBe('completed');
+    expect(run.cursor.badArgs).toBe(3);
+    expect(run.cursor.noTools).toBe(true);
+    const tools = built.store.listMessages(built.session.id).filter((m) => m.role === 'tool').map((m) => m.content);
+    expect(tools.at(-1)).toMatch(/last try/);
+    await built.app.close();
+  });
+});
