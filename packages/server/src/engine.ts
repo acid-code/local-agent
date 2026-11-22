@@ -33,7 +33,7 @@ import { vercelTools } from './vercel.js';
 import type { Agent, ModelRow, RunRow, Store } from './db.js';
 import type { DockerCtl } from './docker.js';
 import { indexText, retrieve, type VectorIndex } from './embeddings.js';
-import { countGeminiTokens, ollamaNumCtx, providerFor, type ModelProvider } from './providers.js';
+import { countGeminiTokens, maxTokensFor, ollamaNumCtx, providerFor, samplingFor, type ModelProvider } from './providers.js';
 import type { Settings } from './settings.js';
 import { CODING_TOOLS } from './coding.js';
 import { formatCitations, searchKnowledge } from './kb.js';
@@ -902,6 +902,8 @@ export class Engine {
     });
     this.bus.publish({ type: 'step', runId: run.id, step });
     const started = Date.now();
+    // llama-server models think unless told not to; Ollama models only when the route asked for reasoning.
+    const thinkingOn = !current.cursor.noThink && (Boolean(current.cursor.reasoning) || Boolean(providerRow && (isLlamaServerProvider(providerRow) || isUncensoredProvider(providerRow))));
     let text = '';
     let reasoningText = '';
     this.liveStreams.set(run.id, { text: '', thinking: '', status: 'running' });
@@ -916,6 +918,8 @@ export class Engine {
         keepAlive: model.local ? keepAliveFor(model) : undefined,
         think: Boolean(current.cursor.reasoning) && !current.cursor.noThink,
         noThink: Boolean(current.cursor.noThink),
+        sampling: samplingFor(`${model.apiName} ${model.name}`, { thinking: thinkingOn, task: repoTask ? 'code' : 'general' }),
+        maxTokens: maxTokensFor({ thinking: thinkingOn }),
       })) {
         if (signal.aborted) throw new StopError();
         if (event.type === 'token') {
@@ -1728,7 +1732,7 @@ export class Engine {
     const result = await cleanupHebrew(text, async (prompt) => {
       const provider = this.provider(model);
       let out = '';
-      for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, signal: AbortSignal.timeout(60_000), noThink: true })) {
+      for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, signal: AbortSignal.timeout(60_000), noThink: true, sampling: samplingFor(`${model.apiName} ${model.name}`, { thinking: false, task: 'general' }), maxTokens: Math.max(1536, Math.ceil(prompt.length / 2)) })) {
         if (event.type === 'token') out += event.text;
       }
       return out;
@@ -1744,7 +1748,7 @@ export class Engine {
       const provider = this.provider(model);
       let text = '';
       const timer = AbortSignal.timeout(30_000);
-      for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, noThink: true, signal: timer })) {
+      for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, noThink: true, sampling: samplingFor(`${model.apiName} ${model.name}`, { thinking: false, task: 'general' }), maxTokens: maxTokensFor({ thinking: false, side: true }), signal: timer })) {
         if (event.type === 'token') text += event.text;
       }
       return text.trim().slice(0, 4000) || null;
@@ -1758,7 +1762,7 @@ export class Engine {
     try {
       const provider = this.provider(model);
       let text = '';
-      for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0 })) {
+      for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, noThink: true, sampling: samplingFor(`${model.apiName} ${model.name}`, { thinking: false, task: 'general' }), maxTokens: maxTokensFor({ thinking: false, side: true }) })) {
         if (event.type === 'token') text += event.text;
       }
       return text.slice(0, 4000) || 'Summary stored.';

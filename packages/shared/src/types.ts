@@ -23,6 +23,8 @@ export interface ChatMessage {
   toolCallId?: string;
   toolCalls?: ToolCall[];
   imageUrl?: string;
+  /** The model's own reasoning for this assistant turn. Sent back to llama-server so the prompt matches its cache. */
+  reasoning?: string;
 }
 
 export interface ToolCall {
