@@ -1535,4 +1535,12 @@ export const he: Record<string, string> = {
   "failed": "נכשלו",
   "tokens": "טוקנים",
   "stopped": "נעצר",
+  "Delete the skill “{0}” and its history? Personas stop loading it.": "למחוק את המיומנות „{0}” ואת ההיסטוריה שלה? הפרסונות יפסיקו לטעון אותה.",
+  "Deleted skill {0}.": "המיומנות {0} נמחקה.",
+  "Earlier versions (the last 3 are kept):": "גרסאות קודמות (נשמרות 3 האחרונות):",
+  "Restore": "שחזור",
+  "Restored v{0} as v{1}.": "גרסה {0} שוחזרה כגרסה {1}.",
+  "Saved skill {0} (v{1}).": "נשמרה מיומנות {0} (גרסה {1}).",
+  "Skill deleted.": "המיומנות נמחקה.",
+  "That skill no longer exists.": "המיומנות הזו כבר לא קיימת.",
 };

@@ -19,7 +19,7 @@ import { ContextPanel } from '../components/ContextPanel';
 import { ContextRing } from '../components/ContextRing';
 import { TypingDots, WorkGroupView } from '../components/WorkSteps';
 import { TraceList } from '../components/TraceList';
-import { groupWork } from '../lib/work-steps';
+import { groupWork, savedSkills } from '../lib/work-steps';
 import { ContextNudgeBanner, DecisionTimeline, BulkDiffCard, LocalRepoPicker, MiniAgentStrip, type MiniAgentRow } from '../components/ChatUpgrades';
 import { parseSources, toolSummary, waitStateOf, waitedFor, type ContextBreakdown } from '@local-agent/shared';
 import { toast, errorText } from '../lib/toast';
@@ -1091,7 +1091,10 @@ export function Chat() {
             if (item.kind === 'work') {
               const live = Boolean(active) && itemIndex === items.length - 1;
               const runs = new Set(item.runIds);
-              return <WorkGroupView key={item.id} group={item} live={live} liveThought={live && thoughtInGroup ? thinking : undefined} diffs={edits.filter((edit) => edit.runId && runs.has(edit.runId)).map((edit) => edit.diff)} />;
+              const skills = live ? [] : savedSkills(item);
+              const view = <WorkGroupView key={item.id} group={item} live={live} liveThought={live && thoughtInGroup ? thinking : undefined} diffs={edits.filter((edit) => edit.runId && runs.has(edit.runId)).map((edit) => edit.diff)} />;
+              if (!skills.length) return view;
+              return <div key={item.id}>{view}{skills.map((skill) => <SkillSavedNotice key={skill.slug} slug={skill.slug} version={skill.version} />)}</div>;
             }
             const message = item.message;
             const index = indexOf.get(message.id) ?? 0;
@@ -1418,6 +1421,22 @@ function FileCard({ id, onOpen }: { id: string; onOpen: () => void }) {
       </button>
       <button className="icon-btn" aria-label={t('Preview')} title={t('Preview')} onClick={onOpen}><Eye size={16} /></button>
       <button className="icon-btn" aria-label={t('Download')} title={t('Download')} onClick={() => meta && saveFile(rawUrl(id), meta.name, meta.mime)}><Download size={16} /></button>
+    </div>
+  );
+}
+
+/** "Saved skill X" under the steps that saved it, with Edit (opens Skills) and Delete. */
+function SkillSavedNotice({ slug, version }: { slug: string; version: number }) {
+  const [gone, setGone] = useState(false);
+  if (gone) return <div className="tool-call-chip" role="status"><Trash2 size={14} />{' '}{t('Deleted skill {0}.', [slug])}</div>;
+  return (
+    <div className="tool-call-chip" role="status">
+      <Brain size={14} />{' '}{t('Saved skill {0} (v{1}).', [slug, version])}{' '}
+      <Link to={`/skills?open=${encodeURIComponent(slug)}`}>{t('Edit')}</Link>{' · '}
+      <button type="button" className="link-button" onClick={async () => {
+        if (!window.confirm(t('Delete the skill “{0}” and its history? Personas stop loading it.', [slug]))) return;
+        try { await api(`/api/skills/${encodeURIComponent(slug)}`, { method: 'DELETE' }); setGone(true); } catch (error) { toast(errorText(error), 'error'); }
+      }}>{t('Delete')}</button>
     </div>
   );
 }

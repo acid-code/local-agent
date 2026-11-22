@@ -39,7 +39,7 @@ import { CODING_TOOLS } from './coding.js';
 import { formatCitations, searchKnowledge } from './kb.js';
 import { kbSearchTool, loadSkillTool, toolsFor, type Tool, type ToolContext } from './tools.js';
 import { CORE_TOOLS, LEAN_MIN_TOOLS, SEED_TOOLS, findToolsTool, leanMenuEnabled, rankTools } from './toolsearch.js';
-import { runSkillScript, skillCatalog } from './skills.js';
+import { listSkills, runSkillScript, skillCatalog } from './skills.js';
 import { getWorkshop, workshopBrief } from './workshops.js';
 import { chatWorkspaceBrief, chatWorkspacePaths, getChatWorkspaces, setChatWorkspaces } from './chat-workspaces.js';
 import { checkOrRepair, contractForAgent, mergeToolParameters, pickAutoRole, toolArgumentsSchema } from './contracts.js';
@@ -1657,7 +1657,12 @@ export class Engine {
     // Everything this persona can reach (found or not): notes about skills and teammates name what find_tools can surface.
     const offeredTools = this.tools(agent, session?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId), run, true);
     const toolNames = offeredTools.map((tool) => tool.name);
-    const nudge = run.cursor.helperId ? '' : skillNudge(run.cursor.turn, toolNames);
+    const toolSteps = run.cursor.helperId || run.cursor.turn < 4 ? [] : this.store.listSteps(run.id).filter((step) => step.kind === 'tool');
+    const nudge = run.cursor.helperId ? '' : skillNudge(run.cursor.turn, toolNames, {
+      proposed: toolSteps.some((step) => step.name === 'propose_skill'),
+      lastFailed: toolSteps.at(-1)?.status === 'failed',
+      loaded: [...new Set(toolSteps.filter((step) => step.name === 'load_skill' && step.status === 'completed').map((step) => String((step.input as { slug?: unknown })?.slug ?? '')).filter(Boolean))],
+    });
     const languageNote = languageHint(this.replyLang(agent, user?.content ?? ''));
     const recoveryNote = run.cursor.recovery?.note ?? '';
     // Persona awareness: let each persona know what teammates exist for consult_agent / spawn_agent.
@@ -2141,6 +2146,7 @@ export class Engine {
       discoverable, servers,
       offered: () => new Set([...baseNames, ...(run?.cursor.extraTools ?? [])]),
       add: (names) => { if (run) this.addRunTools(run, names); },
+      skills: () => (permitted.some((tool) => tool.name === 'load_skill') ? listSkills(this.store, agent.id).filter((skill) => skill.enabled) : []),
     });
     if (all) return [...base, finder, ...discoverable];
     return [...base, finder, ...extras];

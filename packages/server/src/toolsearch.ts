@@ -103,6 +103,25 @@ export function catalogHint(discoverable: Tool[], servers: Map<string, string>, 
   return parts.length > max ? `${parts.slice(0, max)}…` : parts;
 }
 
+export interface SkillHit { slug: string; name: string; description: string }
+
+/** Score skills the same way as tools: name words weigh more than when-to-use words. */
+export function rankSkills(skills: SkillHit[], query: string): { skill: SkillHit; score: number }[] {
+  const terms = expand(query);
+  if (!terms.size) return [];
+  const exact = query.trim().toLowerCase();
+  return skills.map((skill) => {
+    const nameWords = new Set([...words(skill.name), ...words(skill.slug.replace(/-/g, ' '))]);
+    const descWords = new Set(words(skill.description.slice(0, 400)));
+    let score = skill.slug === exact ? 10 : 0;
+    for (const term of terms) {
+      if (nameWords.has(term)) score += 3;
+      if (descWords.has(term)) score += 1;
+    }
+    return { skill, score };
+  }).filter((row) => row.score >= 2).sort((a, b) => b.score - a.score || a.skill.slug.localeCompare(b.skill.slug));
+}
+
 export function findToolsTool(input: {
   /** Allowed tools that are not on the menu yet (stable for the run, so the description never changes). */
   discoverable: Tool[];
@@ -111,11 +130,13 @@ export function findToolsTool(input: {
   offered: () => Set<string>;
   /** Adds names to the run's menu from the next step on. */
   add: (names: string[]) => void;
+  /** Saved skills this persona may load (enabled ones); hits point at load_skill. */
+  skills?: () => SkillHit[];
 }): Tool {
   const hint = catalogHint(input.discoverable, input.servers);
   return {
     name: 'find_tools',
-    description: `Find more tools when none on your list fits the job (email, calendar, GitHub, deploys, images, slides, reminders, browser, connectors…). Search by keyword or intent; matching tools are added to your list from the next step on and their arguments are shown. Call it before saying you can't do something.${hint ? ` Reachable: ${hint}.` : ''}`,
+    description: `Find more tools and saved skills when none on your list fits the job (email, calendar, GitHub, deploys, images, slides, reminders, browser, connectors…). Search by keyword or intent; matching tools are added to your list from the next step on and their arguments are shown, and matching skills are named for load_skill. Call it before saying you can't do something.${hint ? ` Reachable: ${hint}.` : ''}`,
     parameters: {
       type: 'object',
       properties: {
@@ -136,6 +157,11 @@ export function findToolsTool(input: {
       const picked: Tool[] = [];
       for (const name of names) { const tool = input.discoverable.find((item) => item.name === name); if (tool) picked.push(tool); }
       for (const row of ranked) if (picked.length < limit && !picked.includes(row.tool)) picked.push(row.tool);
+      const skillHits = input.skills ? rankSkills(input.skills(), query).slice(0, 3) : [];
+      const skillNote = skillHits.length
+        ? `Saved skills that fit (call load_skill with the slug before you start):\n${skillHits.map(({ skill }) => `- load_skill ${skill.slug}: ${skill.description.slice(0, 160)}`).join('\n')}`
+        : '';
+      if (!picked.length && skillNote) return skillNote;
       if (!picked.length) {
         return `No tool matches "${query}". Try other words (what the tool acts on, e.g. "email", "calendar", "repo").${hint ? ` Reachable: ${hint}.` : ' Nothing else is available to this persona.'}`;
       }
@@ -146,6 +172,7 @@ export function findToolsTool(input: {
         fresh.length ? `Added to your tools (callable from your next step): ${fresh.join(', ')}.` : 'These are already on your list.',
         already.length && fresh.length ? `Already on your list: ${already.join(', ')}.` : '',
         picked.map(compactSchema).join('\n'),
+        skillNote,
       ].filter(Boolean).join('\n');
     },
   };

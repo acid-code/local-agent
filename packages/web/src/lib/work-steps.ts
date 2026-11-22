@@ -191,3 +191,14 @@ export function sameGroup(a: WorkGroup, b: WorkGroup): boolean {
   return a.id === b.id && a.stepCount === b.stepCount && a.durationMs === b.durationMs && a.rows.length === b.rows.length
     && a.rows.every((row, i) => sameRow(row, b.rows[i]!));
 }
+
+/** Skills a run saved with propose_skill ("Saved shared skill <slug> v<n>."), for the "Saved skill" notice under the steps. */
+export function savedSkills(group: WorkGroup): { slug: string; version: number }[] {
+  const out: { slug: string; version: number }[] = [];
+  for (const row of group.rows) {
+    if (row.type !== 'step' || row.failed) continue;
+    const match = row.output.match(/^Saved shared skill ([a-z0-9][a-z0-9-]*) v(\d+)\./);
+    if (match && !out.some((item) => item.slug === match[1])) out.push({ slug: match[1]!, version: Number(match[2]) });
+  }
+  return out;
+}
