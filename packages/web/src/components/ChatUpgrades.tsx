@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Bot, Check, ChevronDown, ChevronRight, Copy, Cpu, FileCode2, FolderGit2, GitBranch, RotateCcw, Sparkles, Square, Terminal, Wrench, X } from 'lucide-react';
 import type { ContextBreakdown } from '@local-agent/shared';
 import { api, post } from '../lib/api';
@@ -435,6 +436,49 @@ export function LocalRepoPicker({
   const [newDesc, setNewDesc] = useState('');
   const [newGithub, setNewGithub] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
+  const [pos, setPos] = useState<{ top: number; left: number; side: 'top' | 'bottom' } | null>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const pop = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    if (!open || !trigger.current || !pop.current) { if (!open) setPos(null); return; }
+    const place = () => {
+      if (!trigger.current || !pop.current) return;
+      const rect = trigger.current.getBoundingClientRect();
+      const w = pop.current.offsetWidth;
+      const h = pop.current.offsetHeight;
+      let left = rect.right - w;
+      left = Math.max(10, Math.min(left, window.innerWidth - w - 10));
+      const canAbove = rect.top - h - 10 >= 10;
+      const top = canAbove ? rect.top - h - 10 : Math.min(window.innerHeight - h - 10, rect.bottom + 10);
+      setPos({ top, left, side: canAbove ? 'top' : 'bottom' });
+    };
+    place();
+    window.addEventListener('resize', place);
+    window.addEventListener('scroll', place, true);
+    return () => {
+      window.removeEventListener('resize', place);
+      window.removeEventListener('scroll', place, true);
+    };
+  }, [open, tab, repos, ghRepos, ghError]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (event: MouseEvent | TouchEvent) => {
+      const target = event.target as Node;
+      if (pop.current?.contains(target) || trigger.current?.contains(target)) return;
+      setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('touchstart', onDown);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('touchstart', onDown);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
 
   useEffect(() => {
     if (!open || tab !== 'local' || repos !== null) return;
@@ -457,11 +501,26 @@ export function LocalRepoPicker({
 
   return (
     <div className="repo-picker-wrap">
-      <button type="button" className="icon-btn round" title={t('Attach local or GitHub repo')} aria-label={t('Attach local or GitHub repo')} onClick={() => setOpen((v) => !v)}>
+      <button
+        ref={trigger}
+        type="button"
+        className={`icon-btn round${open ? ' on' : ''}`}
+        title={t('Attach local or GitHub repo')}
+        aria-label={t('Attach local or GitHub repo')}
+        aria-expanded={open}
+        onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
+      >
         <FolderGit2 size={17} />
       </button>
-      {open && (
-        <div className="repo-picker-pop" role="dialog" aria-label={t('Attach local or GitHub repo')}>
+      {open && createPortal(
+        <div
+          ref={pop}
+          className="repo-picker-pop"
+          role="dialog"
+          aria-label={t('Attach local or GitHub repo')}
+          data-side={pos?.side ?? 'top'}
+          style={{ top: pos?.top ?? -9999, left: pos?.left ?? -9999, visibility: pos ? 'visible' : 'hidden' }}
+        >
           <div className="ctx-pop-head">
             <div className="row" style={{ gap: 4 }}>
               <button type="button" className={tab === 'local' ? 'btn primary small' : 'btn ghost small'} onClick={() => setTab('local')}>{t('Local')}</button>
@@ -568,7 +627,8 @@ export function LocalRepoPicker({
               )}
             </div>
           )}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
