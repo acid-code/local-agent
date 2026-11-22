@@ -105,6 +105,18 @@ class OllamaProvider implements ModelProvider {
 
 /** First-token / headers timeout for llama-server (300s default so cold 16K–32K coding prefills never time out). */
 export const LLAMA_TIMEOUT_MS = Number(process.env.LLAMA_TIMEOUT_MS || 300_000);
+/** Slowest prompt-processing speed we plan for (tokens/s). Inkling measured ~41 t/s on the 780M, Qwen ~180 t/s. */
+export const LLAMA_MIN_PREFILL_TPS = Number(process.env.LLAMA_MIN_PREFILL_TPS || 25);
+
+/**
+ * First-token timeout for one llama-server request. llama-server sends nothing until the whole prompt is processed,
+ * so a fixed 300 s cut off a 16K-token uncensored prompt (386 s at 41 t/s) and the turn failed as "stuck".
+ * Scale with the prompt size instead (rough 3.2 chars per token), never below LLAMA_TIMEOUT_MS.
+ */
+export function llamaFirstTokenTimeoutMs(payloadChars: number): number {
+  const tokens = payloadChars / 3.2;
+  return Math.max(LLAMA_TIMEOUT_MS, Math.round(60_000 + (tokens / Math.max(1, LLAMA_MIN_PREFILL_TPS)) * 1000));
+}
 
 function waitAbortable(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.reject(signal.reason ?? new Error('Aborted'));
@@ -145,7 +157,8 @@ class OpenAIProvider implements ModelProvider {
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       // Explicit 300s first-token / headers timeout for llama-server so cold 16K–32K prefills succeed.
       const timeoutCtrl = this.isLlama ? new AbortController() : null;
-      const timer = timeoutCtrl ? setTimeout(() => timeoutCtrl.abort(new Error(`llama-server timed out after ${Math.round(LLAMA_TIMEOUT_MS / 1000)}s waiting for first token.`)), LLAMA_TIMEOUT_MS) : null;
+      const firstTokenMs = llamaFirstTokenTimeoutMs(payload.length);
+      const timer = timeoutCtrl ? setTimeout(() => timeoutCtrl.abort(new Error(`llama-server gave no first token after ${Math.round(firstTokenMs / 1000)}s (prompt about ${Math.round(payload.length / 3200)}K tokens). It may be overloaded or stuck; your chat is kept.`)), firstTokenMs) : null;
       const signal = timeoutCtrl
         ? (req.signal ? AbortSignal.any([req.signal, timeoutCtrl.signal]) : timeoutCtrl.signal)
         : req.signal;

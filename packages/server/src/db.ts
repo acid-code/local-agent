@@ -741,6 +741,11 @@ export class Store {
     return row ? mapRun(row) : null;
   }
 
+  /** Newest runs of one chat first. */
+  listSessionRuns(sessionId: string, limit = 20): RunRow[] {
+    return this.many<Raw>('SELECT * FROM runs WHERE session_id = ? ORDER BY started_at DESC, rowid DESC LIMIT ?', sessionId, limit).map(mapRun);
+  }
+
   listRuns(limit = 100): RunRow[] {
     return this.many<Raw>('SELECT * FROM runs ORDER BY started_at DESC LIMIT ?', limit).map(mapRun);
   }

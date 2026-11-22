@@ -63,7 +63,7 @@ import { GALLERY } from './gallery.js';
 import { disabledRules } from './rules.js';
 import { CONNECTOR_TOOLS, disabledConnectorTools } from './connectors.js';
 import { memoryBrief, memoryFileTool, projectRules, proposeSkillTool, searchChatsTool, skillNudge } from './learning.js';
-import { LlamaWatch, isLlamaServerProvider, isOllamaProvider, isUncensoredProvider } from './coexist.js';
+import { LlamaWatch, isLlamaServerProvider, isNonChatModel, isOllamaProvider, isUncensoredProvider } from './coexist.js';
 
 export class Engine {
   private readonly inflight = new Map<string, { abort: AbortController; paused: boolean; resumePause: () => void }>();
@@ -75,7 +75,8 @@ export class Engine {
   private readonly heldLarge = new Map<string, string>();
   private readonly dwell = new Map<string, { modelId: string; previousId: string | null; until: number; explicit: boolean }>();
   residentLarge: string[] = [];
-  private llamaLease: { runId: string; kind: 'qwen' | 'uncensored' } | null = null;
+  /** runId → which llama-server model that run is using. */
+  private readonly llamaLeases = new Map<string, 'qwen' | 'uncensored'>();
   extraTools: Tool[] = [];
   /** Set by the routes once OCR is wired: reads an image file for the read_image_text tool. */
   ocrReader: ((fileId: string, mode: OcrMode, ownerId: string) => Promise<OcrResult>) | null = null;
@@ -100,22 +101,37 @@ export class Engine {
     this.autonomy = new Autonomy(store, bus, vault, (input) => this.startTurn(input), (runId) => this.stop(runId), () => this.libraryDir);
     this.llama = new LlamaWatch(store, fetchImpl);
   }
+  /**
+   * One llama-server model owns the GPU at a time (Qwen on :8080 or the uncensored model on :8081).
+   * Runs on the same server share it (llama-server queues requests itself); a run that needs the other
+   * server waits in line, visibly, instead of switching the GPU out from under a running chat.
+   */
   private async acquireLlamaLease(runId: string, kind: 'qwen' | 'uncensored', signal: AbortSignal): Promise<void> {
-    if (this.llamaLease?.runId === runId) {
-      this.llamaLease.kind = kind;
-      return;
+    const mine = this.llamaLeases.get(runId);
+    if (mine === kind) return;
+    const others = () => [...this.llamaLeases.entries()].filter(([id, held]) => id !== runId && held !== kind);
+    const queued = others().length > 0;
+    if (queued) {
+      const started = Date.now();
+      const label = kind === 'uncensored' ? 'the Qwen llama-server model' : 'the uncensored llama-server model';
+      const detail = `Waiting for ${label} to finish in another chat (queued).`;
+      const live = this.liveStreams.get(runId) ?? { text: '', thinking: '', status: 'waiting' };
+      live.status = 'waiting';
+      live.detail = detail;
+      this.liveStreams.set(runId, live);
+      this.bus.publish({ type: 'status', runId, status: 'waiting', detail } as never);
+      while (others().length) {
+        if (signal.aborted) throw new StopError();
+        if (Date.now() - started > LARGE_WAIT_MS) {
+          throw new Error(`Gave up after ${Math.round(LARGE_WAIT_MS / 60_000)} min waiting for ${label} to finish in another chat. Your chat is kept; send again when the other chat is done, or press Stop there.`);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
     }
-    while (this.llamaLease && this.llamaLease.runId !== runId) {
-      const live = this.liveStreams.get(runId);
-      if (live) live.detail = 'Waiting for GPU access — another chat is using the llama-server model.';
-      this.bus.publish({ type: 'status', runId, status: 'waiting', detail: 'Waiting for GPU access — another chat is using the llama-server model.' } as never);
-      if (signal.aborted) throw new StopError();
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    this.llamaLease = { runId, kind };
+    this.llamaLeases.set(runId, kind);
     const live = this.liveStreams.get(runId);
-    if (live) live.detail = undefined;
-    this.bus.publish({ type: 'status', runId, status: 'running', detail: undefined } as never);
+    if (live) { live.status = 'running'; live.detail = undefined; }
+    if (queued) this.bus.publish({ type: 'status', runId, status: 'running', detail: undefined } as never);
   }
   /** llama-server ↔ Ollama GPU coexistence (see coexist.ts). */
   readonly llama: LlamaWatch;
@@ -136,7 +152,8 @@ export class Engine {
     const command = input.content ? readChatCommand(input.content) : null;
     let commandAck: string | undefined;
     let pinMiss: string | undefined;
-    if (command?.unpin) this.store.updateSession(session.id, { modelPin: null });
+    // /auto drops both the pin and the sticky chat model, so the next turn is routed fresh.
+    if (command?.unpin) this.store.updateSession(session.id, { modelPin: null, activeModelId: null });
     if (command?.pinName) {
       const localOnly = this.localOnly(input.agentId);
       const match = this.store.listModels().find((model) => model.enabled && (!localOnly || model.local) && (model.apiName === command.pinName || model.name === command.pinName || model.apiName.startsWith(command.pinName!) || model.name.startsWith(command.pinName!)));
@@ -212,6 +229,7 @@ export class Engine {
         if (latest && latest.status !== 'stopped') {
           this.store.updateRun(runId, { status, error: message, endedAt: now() });
         }
+        if (latest && status === 'failed' && !latest.cursor.helperId) this.recordFailure(latest, message);
         this.bus.publish({ type: 'error', runId, message });
       } catch { /* the store closed while shutting down */ }
     } finally {
@@ -219,13 +237,18 @@ export class Engine {
       if (limitTimer) clearTimeout(limitTimer);
       this.heldLarge.delete(runId);
       this.inflight.delete(runId);
-      if (this.llamaLease?.runId === runId) {
-        const kind = this.llamaLease.kind;
-        this.llamaLease = null;
-        if (kind === 'uncensored' && !process.env.VITEST) {
-          void this.llama.switchToQwen();
+      // Sticky chat model: the model the run really ended on (after a refusal fallback, a context escalation,
+      // or a stall) becomes the chat's model, so the next turn continues there instead of re-routing.
+      try {
+        const ended = this.store.getRun(runId);
+        const endedSession = ended ? this.store.getSession(ended.sessionId) : null;
+        if (ended?.modelId && endedSession && !ended.cursor.helperId && endedSession.activeModelId !== ended.modelId && this.store.getModel(ended.modelId)) {
+          this.store.updateSession(endedSession.id, { activeModelId: ended.modelId });
         }
-      }
+      } catch { /* the store closed while shutting down */ }
+      // No automatic switch back to Qwen here: the next run that needs Qwen switches lazily under its lease.
+      // Switching back eagerly reloaded ~20 GB and made the next turn of the same chat reload the other model.
+      this.llamaLeases.delete(runId);
       // The store can already be closed when the app shuts down mid-run.
       try {
         this.liveStreams.delete(runId);
@@ -450,6 +473,33 @@ export class Engine {
       lastAssistant ? `**Last status:** ${lastAssistant.content.replace(/\s+/g, ' ').trim().slice(0, 320)}` : '',
     ].filter(Boolean);
     return parts.join('\n\n') || 'Previous conversation compacted.';
+  }
+
+  /**
+   * A failed or stalled reply leaves a short note in the chat itself: the error and the steps that did finish.
+   * Before, the failure only lived on the run, so the next turn ("what was your last action?") saw no trace of it
+   * and the model answered as if the work never happened. History is never dropped on failure.
+   */
+  private recordFailure(run: RunRow, message: string) {
+    const model = run.modelId ? this.store.getModel(run.modelId) : null;
+    const done = this.store.listSteps(run.id).filter((step) => step.kind === 'tool' && step.status === 'completed').map((step) => step.name);
+    const counts = new Map<string, number>();
+    for (const name of done) counts.set(name, (counts.get(name) ?? 0) + 1);
+    const steps = [...counts.entries()].map(([name, n]) => (n > 1 ? `${name} ×${n}` : name)).join(', ');
+    const partial = (this.liveStreams.get(run.id)?.text ?? '').trim();
+    const content = [
+      `⚠️ This reply stopped before finishing${model ? ` on ${model.name}` : ''}: ${message}`,
+      steps ? `Finished before it stopped: ${steps}.` : 'No tool steps had finished yet.',
+      partial ? `Partial answer so far:\n${partial.slice(-1500)}` : '',
+      'The chat history is kept. Send again to continue on the same model, or use /model to switch.',
+    ].filter(Boolean).join('\n\n');
+    try {
+      const assistant = this.store.insertMessage({
+        sessionId: run.sessionId, role: 'assistant', content, toolCalls: null, agentId: run.agentId, runId: run.id,
+        toolCallId: null, toolName: null, imageUrl: null, routingNote: null,
+      });
+      this.bus.publish({ type: 'message', runId: run.id, message: assistant });
+    } catch { /* best effort */ }
   }
 
   /** True while a run on this chat is in flight in this process. */
@@ -753,13 +803,28 @@ export class Engine {
     }
     const provider = this.provider(model);
     const providerRow = this.store.getProvider(model.providerId);
-    if (providerRow && (isLlamaServerProvider(providerRow) || isUncensoredProvider(providerRow))) {
-      await this.acquireLlamaLease(run.id, isUncensoredProvider(providerRow) ? 'uncensored' : 'qwen', signal);
-      if (isUncensoredProvider(providerRow) && this.llamaLease?.runId === run.id) {
-        await this.llama.switchToUncensored();
-      } else if (isLlamaServerProvider(providerRow) && this.llamaLease?.runId === run.id) {
-        await this.llama.switchToQwen();
+    // Big-model queue first (before the RAM lease and before any llama-server switch), so a waiting chat holds nothing.
+    const big = this.isBig(model);
+    if (big && run.parentRunId) {
+      // A helper never loads a second big model next to its parent's: it would wait for a parent that waits for it.
+      const parent = this.store.getRun(run.parentRunId);
+      const parentModel = parent?.modelId ? this.store.getModel(parent.modelId) : null;
+      if (parentModel && parentModel.enabled && parentModel.id !== model.id && this.isBig(parentModel) && this.heldLarge.has(run.parentRunId)) {
+        const reason = `Using ${parentModel.name} like the parent chat — only one big model fits at a time.`;
+        this.store.addLog('warn', reason, run.id, 'router');
+        this.store.updateRun(run.id, { cursor: { ...current.cursor, modelId: parentModel.id, phase: 'model', switched: true, routingReason: reason }, modelId: parentModel.id, switched: true, routingNote: reason });
+        return;
       }
+    }
+    if (big) {
+      this.rememberLarge(run.id, model.id);
+      await this.waitForLarge(run.id, model.name, signal);
+    }
+    if (providerRow && (isLlamaServerProvider(providerRow) || isUncensoredProvider(providerRow))) {
+      const kind = isUncensoredProvider(providerRow) ? 'uncensored' : 'qwen';
+      await this.acquireLlamaLease(run.id, kind, signal);
+      if (kind === 'uncensored') await this.llama.switchToUncensored();
+      else await this.llama.switchToQwen();
     }
     const toolless = Boolean(current.cursor.noTools) || this.toolSupportOf(model) === false;
     const tools = toolless ? [] : this.tools(agent, this.store.getSession(run.sessionId)?.mode, current.cursor.stage, current.cursor.toolSubset, Boolean(current.cursor.helperId)).map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
@@ -778,10 +843,9 @@ export class Engine {
     }
     const lease = admitted.lease;
     numCtx = admitted.numCtx;
-    if (model.local && model.sizeClass === 'large' && viaOllama) {
-      await this.waitForLarge(run.id, model.name);
+    if (big && viaOllama) {
       await this.loadLarge(run.id, model);
-    } else if (model.local && model.sizeClass === 'large' && this.residentLarge.length) {
+    } else if (big && this.residentLarge.length) {
       // Switching to llama-server: free whatever big model Ollama still holds.
       const others = this.residentLarge.filter((name) => name !== model.name && name !== model.apiName);
       if (others.length) await this.unload(others);
@@ -831,18 +895,19 @@ export class Engine {
         && !toolCalls?.length
         && isRefusalText(text)) {
         let fallback = uncensored;
-        if (!fallback) {
+        // Only start the uncensored server here when no other chat is using Qwen; otherwise the next
+        // model step queues for it under the llama lease instead of yanking the GPU from that chat.
+        const qwenBusyElsewhere = [...this.llamaLeases.entries()].some(([id, held]) => id !== run.id && held === 'qwen');
+        if (!fallback && !qwenBusyElsewhere) {
           if (await this.llama.switchToUncensored()) {
             await this.refreshModels();
             fallback = this.llama.uncensoredModel();
           }
-        } else if (model.id !== fallback.id) {
-          await this.llama.switchToUncensored();
         }
         if (!fallback || model.id === fallback.id) {
           this.store.addLog('warn', 'The uncensored fallback could not be started.', undefined, 'router');
         } else {
-          if (this.llamaLease?.runId === run.id) this.llamaLease.kind = 'uncensored';
+          // The next model step takes the uncensored lease (and waits if another chat is on Qwen).
           const reason = `Switched to ${fallback.name} — ${model.name} returned a clear refusal.`;
           this.store.addLog('warn', reason, undefined, 'router');
           this.store.updateStep(step.id, { status: 'failed', error: 'The selected model refused the request.', endedAt: now(), latencyMs: Date.now() - started });
@@ -1289,8 +1354,45 @@ export class Engine {
     }));
   }
 
+  /**
+   * Sticky chat model: once a chat is on a model (picked by the user, or switched to automatically inside a run,
+   * e.g. the uncensored fallback after a refusal), later turns stay on it. Auto re-routes only when the user asks
+   * (/model, /auto, /smart, "think harder", a per-message pick or a pin), when the model is gone or unusable now, or
+   * when the previous turn was only on Auto's short-reply "fast" tier. Re-routing on every turn sent "what did you
+   * just do?" from the uncensored model to gemma, which then had no RAM to load.
+   */
+  private stickyModel(text: string, run: RunRow, settings: Settings): RouteCandidate | undefined {
+    const session = this.store.getSession(run.sessionId);
+    if (!session?.activeModelId || session.modelPin || run.cursor.messageModelId) return undefined;
+    if (run.cursor.stage) return undefined;
+    const command = readChatCommand(text);
+    if (command.unpin || command.smart || command.pinName || /think harder/i.test(text)) return undefined;
+    const activeId = session.activeModelId;
+    const previous = this.store.listSessionRuns(run.sessionId, 6).find((item) => item.id !== run.id && item.modelId);
+    // The fast tier is a short-reply shortcut, not the chat's model, unless a run moved off it by itself (e.g. a refusal).
+    if (previous && previous.cursor.autoRole === 'fast' && !previous.cursor.uncensoredRetry && !previous.cursor.contextEscalated && !previous.cursor.providerFallback) return undefined;
+    const candidate = this.candidates(settings, run.agentId).find((item) => item.id === activeId);
+    if (!candidate) return undefined;
+    const user = (run.cursor.userMessageId && this.store.listMessages(run.sessionId).find((message) => message.id === run.cursor.userMessageId)) || null;
+    if (user?.imageUrl && !(candidate.modalities as string[] | undefined)?.some((mode) => /image|vision/i.test(mode))) return undefined;
+    const needsTools = likelyNeedsTools(text, { kb: this.hasKnowledge(run.agentId), code: session.mode === 'code' });
+    if (needsTools && this.toolSupportOf(candidate) === false) return undefined;
+    return candidate;
+  }
+
   private autoDecision(text: string, run: RunRow, settings: Settings): RouteDecision {
     const session = this.store.getSession(run.sessionId);
+    const sticky = this.stickyModel(text, run, settings);
+    if (sticky) {
+      const previous = this.store.listSessionRuns(run.sessionId, 6).find((item) => item.id !== run.id && item.modelId === sticky.id);
+      return {
+        kind: previous?.cursor.autoRole === 'coder' ? 'code' : 'chat', confidence: 1, signals: ['sticky'], modelId: sticky.id, modelName: sticky.name,
+        switched: false, reason: `Staying on ${sticky.name} — this chat's model. Use /model or /auto to change it.`,
+        unload: (this.residentLarge ?? []).filter((name) => name !== sticky.name && name !== sticky.apiName), trace: 'sticky',
+        // Reasoning is per turn ("think harder"); it is not carried over.
+        reasoning: false, role: previous?.cursor.autoRole && previous.cursor.autoRole !== 'fast' ? previous.cursor.autoRole : 'main', escalated: false,
+      };
+    }
     const models = this.autoCandidates(settings, run.agentId);
     const unsupported = new Set(Object.entries(settings.toolSupport).filter(([, ok]) => ok === false).map(([name]) => name));
     // A model without tool calls still answers chat. Skip it only when this turn probably needs a tool.
@@ -1324,7 +1426,7 @@ export class Engine {
     const localOnly = this.localOnly(agentId);
     const minute = new Date().toISOString().slice(0, 16);
     const day = quotaDay();
-    return this.store.listModels().filter((model) => model.enabled && !model.embedding).flatMap((model) => {
+    return this.store.listModels().filter((model) => model.enabled && !isNonChatModel(model)).flatMap((model) => {
       const provider = providers.get(model.providerId);
       if (!provider?.enabled) return [];
       if (localOnly && !model.local) return [];
@@ -1518,7 +1620,8 @@ export class Engine {
   private cacheFriendly(model: ModelRow): boolean {
     if (this.providerOverride) return false;
     const provider = this.store.getProvider(model.providerId);
-    return Boolean(provider && isLlamaServerProvider(provider));
+    // The uncensored llama-server prefills at ~41 t/s: a changing system prompt re-processed the whole 16K chat each turn.
+    return Boolean(provider && (isLlamaServerProvider(provider) || isUncensoredProvider(provider)));
   }
 
   private async maybeFold(sessionId: string, agent: Agent, model: ModelRow) {
@@ -1861,19 +1964,58 @@ export class Engine {
     this.store.updateRun(runId, { leaseOwner: this.instanceId, heartbeatAt: now() });
   }
 
-  private rememberLarge(runId: string, modelId: string) {
-    const model = this.store.getModel(modelId);
-    if (model?.local && model.sizeClass === 'large') this.heldLarge.set(runId, model.name);
+  /** A model that needs most of the GPU/RAM: a large local model, or anything served by llama-server. */
+  private isBig(model: ModelRow): boolean {
+    if (!model.local) return false;
+    if (model.sizeClass === 'large') return true;
+    const provider = this.store.getProvider(model.providerId);
+    return Boolean(provider && (isLlamaServerProvider(provider) || isUncensoredProvider(provider)));
   }
 
-  private async waitForLarge(runId: string, name: string) {
+  private rememberLarge(runId: string, modelId: string) {
+    const model = this.store.getModel(modelId);
+    // Map.set on an existing key keeps its place in line, so a run that switches model mid-run keeps its turn.
+    if (model && this.isBig(model)) this.heldLarge.set(runId, model.name);
+  }
+
+  /**
+   * Big-model queue: only one big model at a time. Runs line up in the order they were routed; a run waits
+   * while any run ahead of it holds a different big model, then loads. Two big models together froze the
+   * mini PC (GTT memory cannot be swapped or OOM-killed), so this never gives up early and loads anyway.
+   */
+  private async waitForLarge(runId: string, name: string, signal?: AbortSignal) {
+    const ahead = () => {
+      const blocking: string[] = [];
+      for (const [id, held] of this.heldLarge) {
+        if (id === runId) break;
+        if (held !== name) blocking.push(held);
+      }
+      return blocking;
+    };
+    let blocking = ahead();
+    if (!blocking.length) return;
     const started = Date.now();
-    while (Date.now() - started < 20_000) {
-      const other = [...this.heldLarge.entries()].find(([id, held]) => id !== runId && held !== name);
-      if (!other) return;
-      this.bus.publish({ type: 'status', runId, status: 'waiting', detail: `Waiting for ${other[1]}` });
-      await new Promise((resolve) => setTimeout(resolve, 250));
+    let shown = '';
+    while (blocking.length) {
+      if (signal?.aborted) throw new StopError();
+      if (Date.now() - started > LARGE_WAIT_MS) {
+        throw new Error(`Gave up after ${Math.round(LARGE_WAIT_MS / 60_000)} min waiting for ${blocking[0]} to finish in another chat. Your chat is kept; send again when it is done.`);
+      }
+      const detail = `Waiting for ${blocking[0]} to finish (queued${blocking.length > 1 ? `, ${blocking.length} ahead` : ''}).`;
+      if (detail !== shown) {
+        shown = detail;
+        const live = this.liveStreams.get(runId) ?? { text: '', thinking: '', status: 'waiting' };
+        live.status = 'waiting';
+        live.detail = detail;
+        this.liveStreams.set(runId, live);
+        this.bus.publish({ type: 'status', runId, status: 'waiting', detail });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      blocking = ahead();
     }
+    const live = this.liveStreams.get(runId);
+    if (live) { live.status = 'running'; live.detail = undefined; }
+    this.bus.publish({ type: 'status', runId, status: 'running' });
   }
 
   private async loadLarge(runId: string, model: ModelRow) {
@@ -2183,6 +2325,8 @@ function turnRoots(store: Store, run: RunRow, dataDir = '') {
 /** Tools a script may not call: no nesting, no helpers or scheduling, nothing that pauses for the user. */
 const SCRIPT_DENIED = new Set(['run_tool_script', 'spawn_agent', 'helpers', 'manage_timer', 'manage_trigger', 'request_secret', 'request_folder', 'propose_skill', 'handoff_cli']);
 const SCRIPT_MAX_STEPS = 10;
+/** How long a chat waits in the big-model queue (or for the other llama-server model) before failing clearly. */
+const LARGE_WAIT_MS = Number(process.env.LA_LARGE_WAIT_MS || 15 * 60_000);
 
 /**
  * Several tool calls in one step, run in order. Plain data, not code: each step names an allowed tool and its args,

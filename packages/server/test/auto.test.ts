@@ -167,7 +167,11 @@ describe('auto runs the mapped model', () => {
     const unpinned = await route('Please explain how this workshop should be described to a new teammate.');
     expect(unpinned?.name).toBe('gemma4:26b-a4b');
 
-    const code = await route('fix the typo in the server readme');
+    // Sticky chat model: a code-ish follow-up stays on the chat's model; /auto re-routes it to the coder.
+    const sticky = await route('fix the typo in the server readme');
+    expect(sticky?.name).toBe('gemma4:26b-a4b');
+    expect(JSON.stringify(sticky?.output)).toMatch(/this chat's model/);
+    const code = await route('/auto fix the typo in the server readme');
     expect(code?.name).toBe('qwen3-coder:30b');
     const smart = await route('/smart Please explain how this workshop should be described to a new teammate.');
     expect(String(smart?.name)).toMatch(/Gemini|gemini|Flash/);

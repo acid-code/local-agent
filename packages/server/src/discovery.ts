@@ -1,3 +1,4 @@
+import { isEmbeddingName } from './coexist.js';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -136,7 +137,7 @@ function rememberOllama(store: Store, ollama: NonNullable<DiscoveryReport['ollam
       profileId: profile.id, tokenizer: profile.tokenizer, contextWindow: profile.contextWindow, practicalBudget: profile.practicalBudget,
       strategy: profile.strategy, sizeClass: profile.sizeClass, local: true, modalities: profile.modalities, strengths: profile.strengths,
       typicalQ4GiB: profile.typicalQ4GiB ?? (model.size ? model.size / 1024 ** 3 : null), priceIn: 0, priceOut: 0, notes: profile.notes,
-      parameterSize: model.parameterSize ?? null, family: model.family ?? profile.family, source: 'discovered', embedding: false, freeTier: null, enabled: true,
+      parameterSize: model.parameterSize ?? null, family: model.family ?? profile.family, source: 'discovered', embedding: isEmbeddingName(model.name), freeTier: null, enabled: true,
     });
   }
   // A model removed from Ollama stays listed otherwise, and chats fail on it.
@@ -170,10 +171,12 @@ function rememberOpenAI(store: Store, id: string, base: string, json: { data?: {
     const publicName = id === 'uncensored' ? 'Inkling 2 Mini Uncensored' : name;
     store.upsertModel({
       id: `${id}_${name.replace(/[^a-z0-9]+/gi, '_')}`, providerId: provider.id, name: publicName, apiName: name, profileId: profile.id,
-      tokenizer: profile.tokenizer, contextWindow: nCtx ? Math.min(profile.contextWindow, nCtx) : profile.contextWindow,
-      practicalBudget: nCtx ? Math.min(profile.practicalBudget, nCtx) : profile.practicalBudget, strategy: profile.strategy,
+      // llama-server's own -c is the truth. An unknown model (Inkling) got the 8K default profile, so a 32K server
+      // was used as 8K and long chats were trimmed hard ("lost context").
+      tokenizer: profile.tokenizer, contextWindow: nCtx || profile.contextWindow,
+      practicalBudget: nCtx || profile.practicalBudget, strategy: profile.strategy,
       sizeClass: profile.sizeClass, local: true, modalities: profile.modalities, strengths: profile.strengths, typicalQ4GiB: profile.typicalQ4GiB ?? null,
-      priceIn: 0, priceOut: 0, notes: profile.notes, parameterSize: null, family: profile.family, source: 'discovered', embedding: false, freeTier: null, enabled: true,
+      priceIn: 0, priceOut: 0, notes: profile.notes, parameterSize: null, family: profile.family, source: 'discovered', embedding: isEmbeddingName(name), freeTier: null, enabled: true,
     });
   }
   const installed = new Set(names);

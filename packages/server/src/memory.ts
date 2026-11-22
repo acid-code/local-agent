@@ -49,6 +49,8 @@ export interface JobRequest {
   /** Called with queue position and memory info while waiting. */
   onWait?: (ahead: number, info?: WaitInfo) => void;
   signal?: AbortSignal;
+  /** Give up (with a clear error) after waiting this long. Default LA_MEMORY_WAIT_MS or 10 minutes. */
+  maxWaitMs?: number;
 }
 
 export interface Lease { id: string; bytes: number; release: () => void; setPid: (pid: number) => void }
@@ -165,6 +167,23 @@ export class MemoryBudget {
         const index = this.queue.indexOf(waiter);
         if (index >= 0) { this.queue.splice(index, 1); reject(new BudgetError('Stopped while waiting for memory.', false)); this.notifyPositions(); }
       }, { once: true });
+      // Never wait forever: a chat stuck on "waiting for memory" with no way out looked like a hang.
+      const maxWait = req.maxWaitMs ?? Number(process.env.LA_MEMORY_WAIT_MS || 10 * 60_000);
+      if (maxWait > 0) {
+        const timer = setTimeout(() => {
+          const index = this.queue.indexOf(waiter);
+          if (index < 0) return;
+          this.queue.splice(index, 1);
+          const available = this.probe.systemAvailable();
+          reject(new BudgetError(`Gave up after ${Math.round(maxWait / 60_000)} min waiting for memory for ${req.label}: needs about ${gb(this.extraFor(req, this.lastLoaded))}, ${gb(available)} available. Another model (Ollama or llama-server) is still holding RAM. Your chat is kept; stop the other chat or pick a smaller model, then send again.`, false));
+          this.notifyPositions();
+        }, maxWait);
+        timer.unref?.();
+        const clear = () => clearTimeout(timer);
+        const { resolve: done, reject: fail } = waiter;
+        waiter.resolve = (lease) => { clear(); done(lease); };
+        waiter.reject = (error) => { clear(); fail(error); };
+      }
       void this.pump();
     });
   }

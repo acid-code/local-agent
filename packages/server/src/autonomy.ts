@@ -5,7 +5,7 @@ import type { RunCursor } from '@local-agent/shared';
 import { OWNER_ID, foreignPath } from './accounts.js';
 import type { Bus } from './bus.js';
 import { getChatWorkspaces, setChatWorkspaces } from './chat-workspaces.js';
-import { OLLAMA_SIDE_MAX_GIB, isOllamaProvider, modelGiB } from './coexist.js';
+import { OLLAMA_SIDE_MAX_GIB, isLlamaServerProvider, isNonChatModel, isOllamaProvider, isUncensoredProvider, modelGiB } from './coexist.js';
 import type { ModelRow, RunRow, Store } from './db.js';
 import type { Tool, ToolContext } from './tools.js';
 import { createTrigger, getTrigger, listTriggers, updateTrigger, type TriggerKind } from './triggers.js';
@@ -119,11 +119,20 @@ export class Autonomy {
    *   so mini-missions run in parallel without blocking llama-server's single slot or risking GTT OOM.
    * - tier "main" / "auto": leaves routing to the engine (uses llama-server / main model).
    */
-  pickHelperModel(tier: 'fast' | 'main' | 'auto' = 'fast', explicit?: string): ModelRow | undefined {
+  pickHelperModel(tier: 'fast' | 'main' | 'auto' = 'fast', explicit?: string, parentModelId?: string | null): ModelRow | undefined {
     const providers = new Map(this.store.listProviders().map((p) => [p.id, p]));
+    // A big model needs most of the GPU. A helper must not bring in a second one next to the parent's (that froze
+    // the mini PC, and the helper would wait forever for a parent that is waiting for it): it shares the parent's.
+    const isBig = (m: ModelRow) => {
+      const p = providers.get(m.providerId);
+      if (p && (isLlamaServerProvider(p) || isUncensoredProvider(p))) return true;
+      return m.local && (m.sizeClass === 'large' || modelGiB(m) > OLLAMA_SIDE_MAX_GIB);
+    };
+    const parentRow = parentModelId ? this.store.getModel(parentModelId) : null;
+    const parentModel = parentRow && parentRow.enabled && !isNonChatModel(parentRow) ? parentRow : undefined;
+    const shareParent = (m: ModelRow | undefined) => (m && parentModel && isBig(m) && isBig(parentModel) && m.id !== parentModel.id ? parentModel : m);
     const usable = this.store.listModels().filter((m) => {
-      if (!m.enabled || m.embedding) return false;
-      if (/embed(?:ding)?|nomic-embed/i.test(`${m.name} ${m.apiName}`)) return false;
+      if (!m.enabled || isNonChatModel(m)) return false;
       const p = providers.get(m.providerId);
       return Boolean(p?.enabled && p.kind !== 'rehearsal');
     });
@@ -131,9 +140,10 @@ export class Autonomy {
       const needle = explicit.trim().toLowerCase();
       const hit = usable.find((m) => m.id.toLowerCase() === needle || m.apiName.toLowerCase() === needle || m.name.toLowerCase() === needle)
         ?? usable.find((m) => m.apiName.toLowerCase().includes(needle) || m.name.toLowerCase().includes(needle));
-      if (hit) return hit;
+      if (hit) return shareParent(hit);
     }
-    if (tier !== 'fast') return undefined;
+    // main/auto: the parent chat's model when it is a big one (already loaded), otherwise the role default.
+    if (tier !== 'fast') return parentModel && isBig(parentModel) ? parentModel : undefined;
     const settings = this.store.getSettings();
     const fastWanted = (settings.autoModels?.fast || '').trim().toLowerCase();
     const isLightLocal = (m: ModelRow) => {
@@ -180,7 +190,7 @@ export class Autonomy {
     // Same workspaces as the parent chat, so a mini-agent works on the exact same repos.
     const items = getChatWorkspaces(this.store, ctx.sessionId);
     if (items.length) setChatWorkspaces(this.store, child.id, items);
-    const chosenModel = cli ? undefined : this.pickHelperModel(input.tier ?? 'fast', input.model);
+    const chosenModel = cli ? undefined : this.pickHelperModel(input.tier ?? 'fast', input.model, ctx.runId ? this.store.getRun(ctx.runId)?.modelId : null);
     const id = nid('hlp');
     this.store.db.prepare(`INSERT INTO helpers (id, parent_session_id, parent_run_id, child_session_id, child_run_id, agent_id, owner_id, task, cli, status, max_steps, timeout_ms, tools, created_at)
       VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)`).run(id, ctx.sessionId, ctx.runId ?? null, child.id, agent.id, owner, task, cli, maxSteps, timeoutMs, tools ? JSON.stringify(tools) : null, now());
