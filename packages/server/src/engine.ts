@@ -514,6 +514,17 @@ export class Engine {
     } catch { /* best effort */ }
   }
 
+  /** Runs in flight in this process (any chat). */
+  busyRuns(): number { return this.inflight.size; }
+
+  /** After a fresh-start reset: drop per-chat caches and stop chat-bound helpers/timers held in memory. */
+  forgetChats(sessionIds: string[]) {
+    for (const id of sessionIds) this.autonomy.stopForSession(id);
+    this.liveStreams.clear();
+    this.lastContext.clear();
+    this.dwell.clear();
+  }
+
   /** True while a run on this chat is in flight in this process. */
   sessionBusy(sessionId: string): boolean {
     for (const runId of this.inflight.keys()) {
