@@ -24,6 +24,7 @@ import { parseSources, toolSummary, waitStateOf, waitedFor, type ContextBreakdow
 import { toast, errorText } from '../lib/toast';
 import { copyText } from '../lib/files';
 import { speak, subscribeSpeaking } from '../lib/speak';
+import { WAKE_AFTER_MS, backoffMs, chatLiveAction, mergeSnapshot, snapshotDiffers } from '../lib/live-sync';
 import { api, post } from '../lib/api';
 import { isAbort, latestOnly } from '../lib/latest';
 import { Markdown } from '../components/Markdown';
@@ -62,6 +63,11 @@ export function Chat() {
   const streamMetricsRef = useRef<{ startedAt: number; chunks: number; chars: number }>({ startedAt: 0, chunks: 0, chars: 0 });
   const streamFlushRef = useRef<{ text: string; thinking: string; textTimer: number | null; thinkingTimer: number | null }>({ text: '', thinking: '', textTimer: null, thinkingTimer: null });
   const [runId, setRunId] = useState<string | null>(null);
+  const runIdRef = useRef<string | null>(null);
+  runIdRef.current = runId;
+  // Bumped when the page comes back after a while (sleep, minimised window) or the network returns: live streams reconnect and resync.
+  const [wake, setWake] = useState(0);
+  const [runReconnect, setRunReconnect] = useState(0);
   const runSession = useRef<string | null>(null);
   const [status, setStatus] = useState('');
   const [offers, setOffers] = useState<Offer[]>([]);
@@ -389,6 +395,78 @@ export function Chat() {
     return () => window.removeEventListener('la:live', onLive);
   }, []);
 
+  // Coming back after sleep, a minimised window or a network change: the old connections may be dead without
+  // having errored yet, so reconnect both live streams (each starts with a fresh snapshot).
+  useEffect(() => {
+    let hiddenAt = document.visibilityState === 'hidden' ? Date.now() : 0;
+    const onVisible = () => {
+      if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); return; }
+      if (hiddenAt && Date.now() - hiddenAt >= WAKE_AFTER_MS) setWake((n) => n + 1);
+      hiddenAt = 0;
+    };
+    const onOnline = () => setWake((n) => n + 1);
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('online', onOnline);
+    // The app-wide live socket reconnected (server restart, network back): resync this chat too.
+    window.addEventListener('la:resync', onOnline);
+    return () => { document.removeEventListener('visibilitychange', onVisible); window.removeEventListener('online', onOnline); window.removeEventListener('la:resync', onOnline); };
+  }, []);
+
+  // The open chat's live feed. Runs started anywhere (phone, another window, a timer), messages from other runs
+  // and runs ending while this page streams nothing all arrive here within a second. Every (re)connect starts with
+  // a snapshot, so a dropped connection resyncs instead of leaving the chat stale until you navigate away and back.
+  useEffect(() => {
+    if (!current) return;
+    const sessionId = current;
+    let source: EventSource | null = null;
+    let first = true;
+    let attempt = 0;
+    let retry: number | undefined;
+    let closed = false;
+    const adopt = (id: string, nextStatus: string) => {
+      runSession.current = sessionId;
+      setRunId((value) => value === id ? value : id);
+      setStatus(nextStatus);
+    };
+    const connect = () => {
+      if (closed) return;
+      source = new EventSource(`/api/sessions/${sessionId}/events`);
+      source.onopen = () => { attempt = 0; };
+      source.onmessage = (event) => {
+        if (currentRef.current !== sessionId) return;
+        const data = JSON.parse(event.data);
+        if (data.type === 'snapshot') {
+          const wasFirst = first;
+          first = false;
+          if (data.activeRun && data.activeRun.id !== runIdRef.current) adopt(data.activeRun.id, data.live?.status || data.activeRun.status);
+          // Same run still going after a reconnect: its own stream may have died with the connection, so reopen it.
+          else if (!wasFirst && data.activeRun) setRunReconnect((n) => n + 1);
+          if (!wasFirst && Array.isArray(data.messages)) {
+            setMessages((prev) => snapshotDiffers(prev, data.messages) ? mergeSnapshot(prev, data.messages) : prev);
+            // The run this page streamed ended while the connection was down: load its final state.
+            if (!data.activeRun && runIdRef.current) void openSession(sessionId);
+          }
+          return;
+        }
+        const action = chatLiveAction(data, { sessionId, runId: runIdRef.current });
+        if (action.kind === 'adopt-run') adopt(action.runId, action.status);
+        else if (action.kind === 'upsert-message') setMessages((value) => [...value.filter((m) => m.id !== action.message.id), action.message as Message]);
+        else if (action.kind === 'reload') { void openSession(sessionId); void refreshLists().catch(() => undefined); }
+      };
+      source.onerror = () => {
+        // EventSource retries by itself after network errors (server sends retry: 1000). It gives up only on an
+        // HTTP error (e.g. the server restarting); then reconnect with backoff.
+        if (source?.readyState !== EventSource.CLOSED || closed) return;
+        source = null;
+        retry = window.setTimeout(connect, backoffMs(attempt++));
+      };
+    };
+    connect();
+    return () => { closed = true; window.clearTimeout(retry); source?.close(); };
+    // openSession/refreshLists are stable enough: they read refs and set state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current, wake]);
+
   useEffect(() => {
     if (!runId) return;
     const source = new EventSource(`/api/runs/${runId}/events`);
@@ -521,7 +599,7 @@ export function Chat() {
       }
     };
     return () => source.close();
-  }, [runId]);
+  }, [runId, wake, runReconnect]);
 
   async function createChat(nextMode: 'chat' | 'code'): Promise<string | undefined> {
     const persona = (sessions.find((session) => session.id === current) || (openedMeta?.id === current ? openedMeta : undefined))?.agentId || agents[0]?.id;

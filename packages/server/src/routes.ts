@@ -67,6 +67,7 @@ import { usableModels } from './usable-models.js';
 import { registerWorkspaceRoutes } from './workspaces.js';
 import { budgetConfig, budgetReport, type MemoryBudget } from './memory.js';
 import { localStatus } from './images.js';
+import { activeRunOf, sessionEventFilter } from './session-events.js';
 
 type Ctx = {
   autoConnectors?: boolean;
@@ -1266,6 +1267,28 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const beat = setInterval(() => reply.raw.write(': ping\n\n'), 15000);
     req.raw.on('close', () => { clearInterval(beat); off(); });
   });
+  // One chat's live feed: a snapshot on every (re)connect, then that chat's run events, whichever device or timer
+  // started the run. Clients keep this open while the chat is on screen, so new messages, steps and status changes
+  // arrive within a second and a reconnect always resyncs. ?tokens=1 also streams token/thinking (the phone app).
+  app.get('/api/sessions/:id/events', async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    if (!store.getSession(id) || ownerOf(store, 'session', id) !== me(req)) return reply.code(404).send({ error: 'Chat not found.' });
+    const tokens = (req.query as { tokens?: string }).tokens === '1';
+    const limit = Math.min(200, Math.max(1, Number((req.query as { limit?: string }).limit) || 50));
+    reply.hijack();
+    reply.raw.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive', 'x-accel-buffering': 'no' });
+    // retry: the browser reconnects after 1s (default is ~3s) when the connection drops.
+    reply.raw.write('retry: 1000\n\n');
+    const send = (event: unknown) => { try { reply.raw.write(`data: ${JSON.stringify(event)}\n\n`); } catch { /* closed */ } };
+    const activeRun = activeRunOf(store, id);
+    const live = activeRun ? engine.getLiveStream(activeRun.id) : null;
+    const page = store.pageMessages(id, limit);
+    send({ type: 'snapshot', sessionId: id, activeRun, live, steps: activeRun ? store.listSteps(activeRun.id) : [], messages: page.messages, hasMore: page.hasMore });
+    const filter = sessionEventFilter(store, id, { tokens });
+    const off = bus.subscribeAll((event) => { const out = filter(event); if (out) send(out); });
+    const beat = setInterval(() => { try { reply.raw.write(': ping\n\n'); } catch { /* closed */ } }, 15000);
+    req.raw.on('close', () => { clearInterval(beat); off(); });
+  });
   app.post('/api/runs/:id/control', async (req) => {
     const id = (req.params as { id: string }).id;
     mustOwn(store, req, 'run', id, 'Run not found.');
@@ -1851,6 +1874,8 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       const accountId = accountOf(req).id;
       const runOwner = new Map<string, string | null>();
       const off = bus.subscribeAll((event) => {
+        // Tokens go out on the run and chat streams; repeating every token of every run here only adds lag.
+        if (event.type === 'token' || event.type === 'thinking') return;
         let owner: string | null = OWNER_ID;
         if (event.runId) {
           if (!runOwner.has(event.runId)) runOwner.set(event.runId, ownerOf(store, 'run', event.runId));
@@ -1859,7 +1884,9 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
         if (owner !== accountId) return;
         try { socket.send(JSON.stringify(event)); } catch { /* closed */ }
       });
-      socket.on('close', () => off());
+      // Keep idle connections alive through proxies and NAT (Tailscale, Cloudflare): ping every 20s.
+      const beat = setInterval(() => { try { socket.ping(); } catch { /* closed */ } }, 20_000);
+      socket.on('close', () => { clearInterval(beat); off(); });
     })();
   });
 

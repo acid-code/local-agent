@@ -349,6 +349,22 @@ class LocalAgentClient(context: Context) {
         }.getOrNull()
     }
 
+    /** The open chat's live feed: a snapshot on every connect, then events of any run in that chat. */
+    fun streamSession(sessionId: String, onEvent: (JSONObject) -> Unit, onClosed: () -> Unit): EventSource {
+        val req = Request.Builder()
+            .url(url("/api/sessions/$sessionId/events"))
+            .header("Accept", "text/event-stream")
+            .build()
+        return EventSources.createFactory(sseHttp).newEventSource(req, object : EventSourceListener() {
+            override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
+                runCatching { JSONObject(data) }.onSuccess(onEvent)
+            }
+
+            override fun onClosed(eventSource: EventSource) = onClosed()
+            override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) = onClosed()
+        })
+    }
+
     fun streamRun(runId: String, onEvent: (JSONObject) -> Unit, onClosed: () -> Unit): EventSource {
         val req = Request.Builder()
             .url(url("/api/runs/$runId/events"))

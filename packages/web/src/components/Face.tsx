@@ -66,7 +66,7 @@ function Blob({ agent, accent, size }: { agent: FaceAgent; accent: string; size:
     >
       <g className="blob-inner">
         <path className="blob-body" d={BLOB_PATHS[shape]} fill={accent} />
-        <g className="blob-eyes" style={{ transformOrigin: `${(left + right) / 2}px ${y}px` }}>
+        <g className="blob-eyes">
           <rect className="blob-eye" x={left - 2.9} y={y - 6.5} width="5.8" height="13" rx="2.9" fill={ink} />
           <rect className="blob-eye" x={right - 2.9} y={y - 6.5} width="5.8" height="13" rx="2.9" fill={ink} />
         </g>

@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { backoffMs } from '../lib/live-sync';
 import { createPortal } from 'react-dom';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { LayoutGrid, Plus, Search, Star, Activity, Bell, BellOff, Info, MessageSquarePlus, Settings2, ArrowDown, ArrowUp, EyeOff, GitBranch, BookOpen, Box, CalendarClock, Gauge, LogOut, Menu as MenuIcon, MessageSquare, MoreHorizontal, Palette, PanelLeftClose, PanelLeftOpen, Pin, PinOff, Radio, Settings, Sparkles, Users, Wrench, X, type LucideIcon } from 'lucide-react';
@@ -130,18 +131,37 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
     const tick = () => { if (owner) void api<{ approvals: unknown[]; requests?: unknown[] }>('/api/vault').then((data) => setPending((data.requests?.length || 0))).catch(() => undefined); };
     tick();
     const id = owner ? setInterval(tick, 8000) : undefined;
+    // Live channel: reconnects with backoff (1s → 15s) after the server restarts, the laptop sleeps or the network
+    // changes; pages hear 'la:resync' after a reconnect so they can catch up on what they missed.
     let socket: WebSocket | null = null;
-    try {
-      const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-      socket = new WebSocket(`${proto}://${window.location.host}/api/live`);
+    let attempt = 0;
+    let retry: number | undefined;
+    let stopped = false;
+    const connect = (reconnecting: boolean) => {
+      if (stopped) return;
+      try {
+        const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+        socket = new WebSocket(`${proto}://${window.location.host}/api/live`);
+      } catch { socket = null; retry = window.setTimeout(() => connect(true), backoffMs(attempt++)); return; }
+      socket.onopen = () => {
+        attempt = 0;
+        if (reconnecting) { tick(); window.dispatchEvent(new CustomEvent('la:resync')); }
+      };
       socket.onmessage = (event) => {
         const data = JSON.parse(event.data);
         if (data.type === 'secret' || data.type === 'approval') tick();
         // Pages listen for runs starting in the chat they show (the server only sends this account's runs).
         window.dispatchEvent(new CustomEvent('la:live', { detail: data }));
       };
-    } catch { /* live channel is optional */ }
-    return () => { if (id) clearInterval(id); socket?.close(); };
+      socket.onclose = () => {
+        socket = null;
+        if (!stopped) retry = window.setTimeout(() => connect(true), backoffMs(attempt++));
+      };
+    };
+    connect(false);
+    const onOnline = () => { if (!socket) { window.clearTimeout(retry); attempt = 0; connect(true); } };
+    window.addEventListener('online', onOnline);
+    return () => { stopped = true; window.clearTimeout(retry); window.removeEventListener('online', onOnline); if (id) clearInterval(id); socket?.close(); };
   }, [role]);
 
   async function move(index: number, delta: number) {

@@ -15,6 +15,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import okhttp3.sse.EventSource
+import org.json.JSONObject
+import com.localagent.app.live.LiveSync
 
 data class AppUiState(
     val checkingAuth: Boolean = true,
@@ -68,6 +70,8 @@ data class AppUiState(
 
 enum class AppTab { Chat, Chats, Approvals, System }
 
+private val ACTIVE_STATUSES = setOf("running", "loading", "waiting", "paused", "awaiting_approval")
+
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
     val client = LocalAgentClient(application.applicationContext)
     private val audio = AudioPlayer(application.applicationContext, client)
@@ -75,6 +79,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     val ui: StateFlow<AppUiState> = _ui.asStateFlow()
 
     private var eventSource: EventSource? = null
+    /** Generation of the run stream; a close from an older (cancelled) stream is ignored. */
+    private var runStreamGen = 0
+    private var runStreamAttempt = 0
+    private var sessionSource: EventSource? = null
+    private var sessionWatchId: String? = null
+    private var sessionGen = 0
+    private var sessionAttempt = 0
+    private var sessionFirstSnapshot = true
+    private var foreground = true
     private var memoryPollJob: Job? = null
 
     init {
@@ -306,6 +319,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     }
                     if (!detail.activeRunId.isNullOrBlank()) attachStream(detail.activeRunId)
+                    watchSession(detail.session.id)
                     refreshPendingApprovals()
                 }
                 .onFailure { e -> _ui.update { it.copy(snackbar = e.message ?: "Failed to open chat") } }
@@ -356,11 +370,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun attachStream(runId: String) {
         closeStream()
+        val gen = ++runStreamGen
         eventSource = client.streamRun(
             runId = runId,
             onEvent = { json ->
                 when (json.optString("type")) {
                     "snapshot" -> {
+                        runStreamAttempt = 0
                         val runObj = json.optJSONObject("run")
                         val status = runObj?.optString("status", "") ?: ""
                         val detail = json.optString("statusDetail", "")
@@ -442,8 +458,90 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             },
-            onClosed = { stopMemoryRecheckLoop() },
+            onClosed = {
+                stopMemoryRecheckLoop()
+                // Dropped while the run is still going (network change, server restart): reattach with backoff.
+                // The new stream starts with a snapshot, so nothing is missed.
+                if (gen == runStreamGen && foreground && _ui.value.activeRunId == runId && _ui.value.runStatus in ACTIVE_STATUSES) {
+                    viewModelScope.launch {
+                        delay(LiveSync.backoffMs(runStreamAttempt++))
+                        if (gen == runStreamGen && _ui.value.activeRunId == runId) attachStream(runId)
+                    }
+                }
+            },
         )
+    }
+
+    /** Keeps the open chat's live feed connected: runs started on another device show up, a reconnect resyncs. */
+    private fun watchSession(sessionId: String, force: Boolean = false) {
+        if (!force && sessionWatchId == sessionId && sessionSource != null) return
+        sessionSource?.cancel()
+        sessionWatchId = sessionId
+        sessionFirstSnapshot = true
+        val gen = ++sessionGen
+        sessionSource = client.streamSession(
+            sessionId = sessionId,
+            onEvent = { json -> if (gen == sessionGen) onSessionEvent(sessionId, json) },
+            onClosed = {
+                if (gen == sessionGen) {
+                    sessionSource = null
+                    if (foreground && _ui.value.currentSession?.id == sessionId) {
+                        viewModelScope.launch {
+                            delay(LiveSync.backoffMs(sessionAttempt++))
+                            if (gen == sessionGen && foreground && _ui.value.currentSession?.id == sessionId) watchSession(sessionId, force = true)
+                        }
+                    }
+                }
+            },
+        )
+    }
+
+    private fun stopWatchingSession() {
+        sessionGen++
+        sessionSource?.cancel()
+        sessionSource = null
+    }
+
+    private fun onSessionEvent(sessionId: String, json: JSONObject) {
+        if (_ui.value.currentSession?.id != sessionId) return
+        val type = json.optString("type")
+        if (type == "snapshot") {
+            sessionAttempt = 0
+            val first = sessionFirstSnapshot
+            sessionFirstSnapshot = false
+            val active = json.optJSONObject("activeRun")
+            val activeId = active?.optString("id")?.takeIf { it.isNotBlank() }
+            if (activeId != null && activeId != _ui.value.activeRunId) {
+                _ui.update { it.copy(activeRunId = activeId, runStatus = active.optString("status", "running")) }
+                attachStream(activeId)
+            } else if (!first && activeId != null) {
+                attachStream(activeId)
+            }
+            if (!first) {
+                val arr = json.optJSONArray("messages")
+                if (arr != null) {
+                    val server = List(arr.length()) { i -> client.parseMessage(arr.getJSONObject(i)) }
+                    _ui.update { s -> s.copy(messages = LiveSync.mergeSnapshot(s.messages, server, { it.id }, { it.role }, { it.content })) }
+                }
+                // The streamed run ended while disconnected: load its final state.
+                if (activeId == null && _ui.value.runStatus in ACTIVE_STATUSES) openSession(sessionId)
+            }
+            return
+        }
+        val msgObj = json.optJSONObject("message")
+        val runId = json.optString("runId").takeIf { it.isNotBlank() }
+        when (val action = LiveSync.action(type, runId, json.optString("status").takeIf { it.isNotBlank() }, msgObj != null, _ui.value.activeRunId)) {
+            is LiveSync.Action.AdoptRun -> {
+                _ui.update { it.copy(activeRunId = action.runId, runStatus = action.status, runError = null) }
+                attachStream(action.runId)
+            }
+            LiveSync.Action.UpsertMessage -> {
+                val msg = client.parseMessage(msgObj!!)
+                _ui.update { s -> s.copy(messages = s.messages.filterNot { it.id == msg.id } + msg) }
+            }
+            LiveSync.Action.Reload -> { openSession(sessionId); refreshSessions() }
+            LiveSync.Action.None -> Unit
+        }
     }
 
     private fun startMemoryRecheckLoop() {
@@ -462,6 +560,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun closeStream() {
+        runStreamGen++
         stopMemoryRecheckLoop()
         eventSource?.cancel()
         eventSource = null
@@ -508,7 +607,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun setForeground(on: Boolean) {
         approvalPollJob?.cancel()
         approvalPollJob = null
-        if (!on) return
+        val wasForeground = foreground
+        foreground = on
+        if (!on) { stopWatchingSession(); return }
+        // Back on screen: reconnect the chat feed (its snapshot resyncs messages and the active run).
+        if (!wasForeground || sessionSource == null) _ui.value.currentSession?.id?.let { watchSession(it, force = true) }
         approvalPollJob = viewModelScope.launch {
             while (true) {
                 refreshPendingApprovals()
@@ -669,6 +772,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
+        stopWatchingSession()
         closeStream()
         audio.release()
         super.onCleared()
