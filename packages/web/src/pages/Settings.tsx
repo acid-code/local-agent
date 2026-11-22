@@ -485,7 +485,7 @@ function OwnerSettings() {
               <option value="always">{tr('Ask before every edit batch')}</option>
             </select>
           </label>
-          <label className="check-row" style={{ marginTop: 10 }}>
+          <label className="row" style={{ marginTop: 12, gap: 8, alignItems: 'center', cursor: 'pointer' }}>
             <input
               type="checkbox"
               checked={settings.personaAutoStart !== false}
