@@ -346,6 +346,45 @@ export class DockerCtl {
     }
   }
 
+  /** docker exec into a running container; returns combined output and the exit code. */
+  async exec(name: string, cmd: string[], workingDir: string, timeoutMs = 10 * 60_000): Promise<{ output: string; code: number }> {
+    const container = this.api().getContainer(name);
+    const exec = await container.exec({ Cmd: cmd, WorkingDir: workingDir, AttachStdout: true, AttachStderr: true });
+    const stream = await exec.start({ hijack: true, stdin: false });
+    const chunks: Buffer[] = [];
+    let size = 0;
+    await Promise.race([
+      new Promise<void>((resolve, reject) => {
+        stream.on('data', (chunk: Buffer) => { if (size < 256_000) { chunks.push(chunk); size += chunk.length; } });
+        stream.on('end', () => resolve());
+        stream.on('error', reject);
+      }),
+      new Promise<never>((_, reject) => setTimeout(() => { stream.destroy(); reject(new Error('Command timed out.')); }, timeoutMs).unref?.()),
+    ]);
+    const info = await exec.inspect();
+    return { output: demux(Buffer.concat(chunks)).slice(0, 64_000), code: info.ExitCode ?? 1 };
+  }
+
+  /** One-shot docker stats: memory in use and limit, CPU percent. */
+  async stats(name: string): Promise<{ memoryBytes: number; memoryLimitBytes: number; cpuPercent: number } | null> {
+    try {
+      const raw = await this.api().getContainer(name).stats({ stream: false }) as unknown as {
+        memory_stats?: { usage?: number; limit?: number; stats?: { inactive_file?: number } };
+        cpu_stats?: { cpu_usage?: { total_usage?: number }; system_cpu_usage?: number; online_cpus?: number };
+        precpu_stats?: { cpu_usage?: { total_usage?: number }; system_cpu_usage?: number };
+      };
+      const memoryBytes = Math.max(0, (raw.memory_stats?.usage ?? 0) - (raw.memory_stats?.stats?.inactive_file ?? 0));
+      const cpuDelta = (raw.cpu_stats?.cpu_usage?.total_usage ?? 0) - (raw.precpu_stats?.cpu_usage?.total_usage ?? 0);
+      const sysDelta = (raw.cpu_stats?.system_cpu_usage ?? 0) - (raw.precpu_stats?.system_cpu_usage ?? 0);
+      const cpuPercent = sysDelta > 0 ? Math.round((cpuDelta / sysDelta) * (raw.cpu_stats?.online_cpus ?? 1) * 1000) / 10 : 0;
+      return { memoryBytes, memoryLimitBytes: raw.memory_stats?.limit ?? 0, cpuPercent };
+    } catch { return null; }
+  }
+
+  async stop(name: string) {
+    try { await this.api().getContainer(name).stop({ t: 5 }); } catch (error) { if (![304, 404].includes((error as { statusCode?: number }).statusCode ?? 0)) throw error; }
+  }
+
   async createSandbox(name: string, workspace: string, agentId: string) {
     const container = await this.api().createContainer({
       Image: 'alpine:3.20',
