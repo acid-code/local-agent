@@ -17,6 +17,7 @@ export interface ToolContext {
   workspace: string;
   signal: AbortSignal;
   docker: DockerCtl;
+  browser?: import('./browser.js').ManagedBrowser | null;
   fetchImpl: typeof fetch;
   searxngUrl: string;
   sandbox: Settings['sandbox'];

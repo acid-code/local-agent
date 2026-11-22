@@ -1699,6 +1699,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     }
     return { current: { ...current, loadedModels, flags } };
   });
+  app.get('/api/browser', async () => ({ browser: engine.browser ? await engine.browser.status() : null }));
   app.get('/api/resources/trends', async (req) => {
     const hours = Number((req.query as { hours?: string }).hours || 24);
     const since = new Date(Date.now() - hours * 3600_000).toISOString();

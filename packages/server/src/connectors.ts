@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { isBlockedUrl } from '@local-agent/shared';
+import { OWNER_ID } from './accounts.js';
+import { isPasswordAction, isPaymentAction, realBrowserEnabled, redactVaultValues, type BrowserAction } from './browser.js';
 import type { Store } from './db.js';
 import { saveFile } from './files.js';
 import type { Tool, ToolContext } from './tools.js';
@@ -452,19 +454,65 @@ export function browseTool(): Tool {
       return ['navigate', 'click', 'fill', 'select', 'press', 'submit'].includes(t);
     }),
     approval: (args) => {
+      const url = String(args.url || '');
       const actions = Array.isArray(args.actions) ? (args.actions as BrowseAction[]) : [];
+      if (isPaymentAction(url, actions as unknown as BrowserAction[])) {
+        return `Payment or purchase action on ${url.slice(0, 120)} requires your approval.`;
+      }
       const interactive = actions.filter((a) => ['navigate', 'click', 'fill', 'select', 'press', 'submit'].includes(a?.type));
       if (!interactive.length) return null;
-      return `Interact with web page ${String(args.url || '').slice(0, 120)} (${interactive.map((a) => `${a.type} ${a.selector || a.text || a.key || ''}`.trim()).join(', ').slice(0, 140)})`;
+      return `Interact with web page ${url.slice(0, 120)} (${interactive.map((a) => `${a.type} ${a.selector || a.text || a.key || ''}`.trim()).join(', ').slice(0, 140)})`;
     },
     async execute(args, ctx) {
+      if (ctx.agent.ownerId !== OWNER_ID) throw new Error('The browser is only available to the owner.');
       const url = String(args.url || '');
       const blocked = isBlockedUrl(url);
-      if (blocked) throw new Error(blocked);
-      const chrome = chromePath();
-      if (!chrome) return `(no browser installed; plain fetch)\n${await fetchPublicText(url, ctx.fetchImpl, ctx.signal)}`;
+      if (blocked && process.env.LA_BROWSER_ALLOW_PRIVATE !== '1') throw new Error(blocked);
       const actions = Array.isArray(args.actions) ? (args.actions as BrowseAction[]) : [];
+      for (const action of actions) {
+        if (isPasswordAction(action as unknown as BrowserAction)) {
+          throw new Error('Refused: the agent never types passwords. Ask the owner to take over to sign in, or use request_secret.');
+        }
+      }
       const wantShot = Boolean(args.screenshot) || actions.length > 0;
+      const vaultValues = Object.values(ctx.secretEnv?.() ?? {});
+
+      if (ctx.browser && realBrowserEnabled() && ctx.docker.available()) {
+        try {
+          const result = await ctx.browser.browse({
+            personaSlug: ctx.agent.slug || ctx.agent.id,
+            runId: ctx.runId,
+            url,
+            actions: actions as unknown as BrowserAction[],
+            screenshot: wantShot,
+            signal: ctx.signal,
+            vaultValues,
+          });
+          let fileRef = '';
+          if (result.png && ctx.libraryDir) {
+            const host = (() => { try { return new URL(result.href || url).hostname.replace(/[^a-z0-9.-]+/gi, '_'); } catch { return 'page'; } })();
+            const saved = saveFile(ctx.store, ctx.libraryDir, {
+              name: `page-${host}-${Date.now().toString(36)}.png`,
+              bytes: result.png,
+              sessionId: ctx.sessionId ?? null,
+              agentId: ctx.agent.id,
+              source: 'agent',
+              mime: 'image/png',
+              ownerId: ctx.agent.ownerId || 'owner',
+            });
+            fileRef = `Screenshot saved: [file:${saved.id}] (call understand_image with file_id="${saved.id}" to inspect its visual look, layout, and colors).\n`;
+          }
+          const actionSummary = result.log.length ? `Actions: ${result.log.join(' → ')}\n` : '';
+          const loginHint = result.loginDetected ? '\n[Note: a password field is on this page. Do not type passwords; ask the owner to take over to sign in.]' : '';
+          return `Title: ${result.title || '(untitled)'}\nURL: ${result.href || url}\n${fileRef}${actionSummary}\n${result.text || '(empty page)'}${loginHint}`;
+        } catch (error) {
+          if (/Refused:|blocked|private|loopback|Password/i.test((error as Error).message)) throw error;
+          ctx.store.addLog('warn', `Managed browser unavailable, falling back to headless: ${(error as Error).message}`, undefined, 'browser');
+        }
+      }
+
+      const chrome = chromePath();
+      if (!chrome) return `(no browser installed; plain fetch)\n${redactVaultValues(await fetchPublicText(url, ctx.fetchImpl, ctx.signal), vaultValues)}`;
       const result = await runCdpSession(chrome, url, actions, wantShot, ctx.signal, ctx.sessionId || ctx.agent.id);
       let fileRef = '';
       if (result.png && ctx.libraryDir) {
@@ -482,7 +530,7 @@ export function browseTool(): Tool {
       }
       const actionSummary = result.log.length ? `Actions: ${result.log.join(' → ')}\n` : '';
       const controls = result.elements.length ? `\nInteractive elements:\n${result.elements.join('\n')}` : '';
-      return `Title: ${result.title || '(untitled)'}\nURL: ${result.href || url}\n${fileRef}${actionSummary}\n${result.text || '(empty page)'}${controls}`;
+      return redactVaultValues(`Title: ${result.title || '(untitled)'}\nURL: ${result.href || url}\n${fileRef}${actionSummary}\n${result.text || '(empty page)'}${controls}`, vaultValues);
     },
   };
 }

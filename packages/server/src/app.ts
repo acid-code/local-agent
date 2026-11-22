@@ -1,6 +1,8 @@
 import { ensurePinned } from './pinned.js';
 import { isDiskFullError } from './resources.js';
 import { MemoryBudget, budgetConfig, systemProbe, type MemoryProbe } from './memory.js';
+import { ManagedBrowser } from './browser.js';
+import { toHostBindPath } from './tools.js';
 import path from 'node:path';
 import { ensureFilesTable } from './files.js';
 import Fastify from 'fastify';
@@ -40,6 +42,7 @@ export interface BuiltApp {
   vault: Vault;
   scheduler: Scheduler;
   mcp: McpRuntime;
+  browser: ManagedBrowser | null;
   config: ReturnType<typeof loadConfig>;
 }
 
@@ -51,6 +54,7 @@ export async function buildApp(options: {
   providerOverride?: (model: ModelRow) => ModelProvider;
   /** RAM probe override (tests). Without one, mocked-provider builds and unit tests skip the RAM budget. */
   memoryProbe?: MemoryProbe;
+  browser?: ManagedBrowser | null;
   startScheduler?: boolean;
   serveWeb?: boolean;
 }): Promise<BuiltApp> {
@@ -66,6 +70,10 @@ export async function buildApp(options: {
   engine.libraryDir = config.dataDir;
   const memoryProbe = options.memoryProbe ?? (options.providerOverride || process.env.VITEST ? undefined : systemProbe(options.fetchImpl ?? fetch));
   engine.memory = memoryProbe ? new MemoryBudget(memoryProbe, () => budgetConfig(store.getSettings()), path.join(config.dataDir, 'memory-calibration.json')) : null;
+  const browser = options.browser !== undefined
+    ? options.browser
+    : new ManagedBrowser(docker, config.dataDir, () => engine.memory, toHostBindPath);
+  engine.browser = browser;
   const triggers = new TriggerRuntime(store, engine, vault, bus);
   const mcp = new McpRuntime(store, docker, { secretsFor: (id) => vault.mcpEnv(id), cacheDir: path.join(config.dataDir, 'mcp-cache') });
   engine.mcpTools = () => mcp.agentTools();
@@ -191,10 +199,11 @@ export async function buildApp(options: {
     scheduler.stop();
     notifier.stop();
     triggers.stop();
+    await browser?.stop().catch(() => undefined);
     await mcp.closeAll().catch(() => undefined);
     for (const timer of background) clearInterval(timer);
     store.close();
   });
 
-  return { app, store, engine, bus, vault, scheduler, config, mcp };
+  return { app, store, engine, bus, vault, scheduler, config, mcp, browser };
 }

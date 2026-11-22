@@ -1,0 +1,163 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { riskOf } from '@local-agent/shared';
+import { MEMBER_DENIED_TOOLS } from '../src/accounts.js';
+import {
+  BROWSER_MEMORY_BYTES,
+  BROWSER_NAME,
+  ManagedBrowser,
+  isPasswordAction,
+  isPaymentAction,
+  personaProfileDir,
+  realBrowserEnabled,
+  redactVaultValues,
+  type CdpDriver,
+} from '../src/browser.js';
+import type { DockerCtl } from '../src/docker.js';
+import { GiB, MemoryBudget, type MemoryProbe } from '../src/memory.js';
+
+const dirs: string[] = [];
+afterEach(() => {
+  while (dirs.length) fs.rmSync(dirs.pop()!, { recursive: true, force: true });
+});
+
+function fakeDocker() {
+  const startedSpecs: any[] = [];
+  let exists = false;
+  let running = false;
+  const docker = {
+    available: () => true,
+    containerState: vi.fn(async () => (exists ? { id: 'br-1', state: running ? 'running' : 'exited' } : null)),
+    hasImage: vi.fn(async () => true),
+    start: vi.fn(async () => { running = true; }),
+    startDetached: vi.fn(async (spec: any) => { startedSpecs.push(spec); exists = true; running = true; return 'br-1'; }),
+    stop: vi.fn(async () => { running = false; }),
+    stats: vi.fn(async () => ({ memoryBytes: 0.8 * GiB, memoryLimitBytes: BROWSER_MEMORY_BYTES, cpuPercent: 5 })),
+  } as unknown as DockerCtl;
+  return { docker, startedSpecs };
+}
+
+function fakeBudget(availableGiB: number) {
+  const probe: MemoryProbe = {
+    serverRss: () => 0.5 * GiB,
+    systemAvailable: () => availableGiB * GiB,
+    loaded: async () => [],
+    show: async () => null,
+    unload: async () => undefined,
+  };
+  return new MemoryBudget(probe, () => ({ budgetBytes: 16 * GiB, systemReserveBytes: 2 * GiB, parallelSlots: 1 }));
+}
+
+describe('managed real browser (la-browser)', () => {
+  it('executes CDP actions, isolates per-persona profiles across container restart, holds 2 GB lease, and exposes no host ports', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'la-br-'));
+    dirs.push(dataDir);
+    const { docker, startedSpecs } = fakeDocker();
+    const budget = fakeBudget(12);
+
+    const calls: { profileDir: string; url: string; actions: any[]; screenshot: boolean }[] = [];
+    const driver: CdpDriver = {
+      async runTab(input) {
+        calls.push(input);
+        // Simulate browser writing a cookie file into the persona's profile dir.
+        fs.writeFileSync(path.join(input.profileDir, 'Cookies'), `cookie-for-${path.basename(input.profileDir)}`);
+        return {
+          title: 'Example Page',
+          href: input.url,
+          text: 'Hello world secret-token-9999',
+          elements: [],
+          log: ['navigate ' + input.url, 'click #go', 'type #q', 'scroll 400', 'extract'],
+          png: input.screenshot ? Buffer.from('PNGDATA') : null,
+        };
+      },
+    };
+
+    const browser = new ManagedBrowser(docker, dataDir, () => budget, (p) => p, driver);
+    const res = await browser.browse({
+      personaSlug: 'researcher',
+      url: 'https://example.com',
+      actions: [
+        { type: 'click', selector: '#go' },
+        { type: 'type', selector: '#q', text: 'local agent' },
+        { type: 'scroll', y: 400 },
+        { type: 'screenshot' },
+        { type: 'extract' },
+      ],
+      vaultValues: ['secret-token-9999'],
+    });
+
+    expect(res.title).toBe('Example Page');
+    expect(res.text).toContain('[REDACTED_SECRET]');
+    expect(res.text).not.toContain('secret-token-9999');
+    expect(res.png?.toString()).toBe('PNGDATA');
+    expect(browser.hasLease()).toBe(true);
+    expect(startedSpecs).toHaveLength(1);
+    expect(startedSpecs[0].name).toBe(BROWSER_NAME);
+    expect(startedSpecs[0].HostConfig.Memory).toBe(BROWSER_MEMORY_BYTES);
+    expect(startedSpecs[0].HostConfig.PortBindings).toBeUndefined();
+    expect(startedSpecs[0].HostConfig.NetworkMode).not.toBe('host');
+
+    // Stop container (simulates idle stop) and verify lease released + profile persisted on disk.
+    await browser.stop();
+    expect(browser.hasLease()).toBe(false);
+    const researcherProfile = personaProfileDir(dataDir, 'researcher');
+    expect(fs.readFileSync(path.join(researcherProfile, 'Cookies'), 'utf8')).toBe('cookie-for-researcher');
+
+    // Restart with a second persona: separate profile dir, never shared!
+    await browser.browse({ personaSlug: 'coder', url: 'https://example.org' });
+    const coderProfile = personaProfileDir(dataDir, 'coder');
+    expect(coderProfile).not.toBe(researcherProfile);
+    expect(fs.readFileSync(path.join(coderProfile, 'Cookies'), 'utf8')).toBe('cookie-for-coder');
+    expect(fs.readFileSync(path.join(researcherProfile, 'Cookies'), 'utf8')).toBe('cookie-for-researcher');
+    await browser.stop();
+  });
+
+  it('refuses to start when memory is short for the 2 GB lease', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'la-br-oom-'));
+    dirs.push(dataDir);
+    const { docker, startedSpecs } = fakeDocker();
+    const budget = fakeBudget(3); // 3 GiB - 2 GiB reserve = 1 GiB < 2 GiB
+    const browser = new ManagedBrowser(docker, dataDir, () => budget);
+    await expect(browser.browse({ personaSlug: 'researcher', url: 'https://example.com' })).rejects.toThrow(/not enough free memory/i);
+    expect(startedSpecs).toHaveLength(0);
+    expect(browser.hasLease()).toBe(false);
+  });
+
+  it('blocks private/loopback IP URLs', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'la-br-priv-'));
+    dirs.push(dataDir);
+    const { docker } = fakeDocker();
+    const browser = new ManagedBrowser(docker, dataDir, () => null);
+    await expect(browser.browse({ personaSlug: 'researcher', url: 'http://127.0.0.1:8787/api/health' })).rejects.toThrow(/private|local|loopback|blocked/i);
+    await expect(browser.browse({ personaSlug: 'researcher', url: 'http://192.168.1.10/' })).rejects.toThrow(/private|local|loopback|blocked/i);
+    await expect(browser.browse({ personaSlug: 'researcher', url: 'https://example.com', actions: [{ type: 'navigate', url: 'http://10.0.0.1/' }] })).rejects.toThrow(/private|local|loopback|blocked/i);
+  });
+
+  it('refuses password typing and gates payment/checkout submits as high risk', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'la-br-sec-'));
+    dirs.push(dataDir);
+    const { docker } = fakeDocker();
+    const browser = new ManagedBrowser(docker, dataDir, () => null);
+
+    expect(isPasswordAction({ type: 'type', selector: 'input[type="password"]', text: 'hunter2' })).toBe(true);
+    await expect(browser.browse({
+      personaSlug: 'researcher',
+      url: 'https://example.com/login',
+      actions: [{ type: 'fill', selector: '#password', value: 'hunter2' }],
+    })).rejects.toThrow(/never types passwords/i);
+
+    expect(isPaymentAction('https://shop.example.com/checkout', [{ type: 'submit', selector: '#pay' }])).toBe(true);
+    expect(isPaymentAction('https://shop.example.com/item', [{ type: 'click', text: 'Buy now' }])).toBe(true);
+    const tier = riskOf('browse', { url: 'https://shop.example.com/checkout', actions: [{ type: 'click', text: 'Place order' }] }, null);
+    expect(tier.tier).toBe('high');
+  });
+
+  it('respects LA_BROWSER=headless rollback, denies members, and redacts vault values', () => {
+    expect(realBrowserEnabled({ LA_BROWSER: 'headless' })).toBe(false);
+    expect(realBrowserEnabled({ LA_BROWSER: 'container' })).toBe(true);
+    expect(MEMBER_DENIED_TOOLS.has('browse')).toBe(true);
+    expect(redactVaultValues('token=ghp_1234567890 ok', ['ghp_1234567890'])).toBe('token=[REDACTED_SECRET] ok');
+  });
+});
