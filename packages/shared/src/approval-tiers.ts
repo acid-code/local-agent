@@ -12,7 +12,7 @@ export type ApprovalMode = 'cautious' | 'balanced' | 'autonomous';
 export const RISK_ORDER: RiskTier[] = ['safe', 'low', 'medium', 'high'];
 
 const SAFE_TOOLS = new Set(['read_file', 'list_dir', 'kb_search', 'web_search', 'web_fetch', 'recall', 'search_chats', 'docker_ps', 'docker_inspect', 'read_slides', 'load_skill', 'read_output', 'consult_agent']);
-const LOW_TOOLS = new Set(['write_file', 'make_slides', 'memory_file', 'remember', 'plan']);
+const LOW_TOOLS = new Set(['write_file', 'make_slides', 'memory_file', 'remember', 'plan', 'send_message', 'handoff']);
 const HIGH_SHELL = [/\bsudo\b/i, /\bgit\s+push\b/i, /\bnpm\s+publish\b/i, /\bdocker\b[^\n]*\b(rm|rmi|system|prune|kill)\b/i, /\b(kill|pkill|killall)\b/i, /\b(mount|umount)\b/i, /\bch(mod|own)\s+-R\b/i, /\brm\s+-[a-z]*r[a-z]*f?\s+(\/|~|\.\.|\$HOME)/i, /\b(ssh|scp|rsync)\b[^\n]*@/i, /\bcurl\b[^\n]*-X\s*(POST|PUT|DELETE|PATCH)/i];
 const MEDIUM_SHELL = [/\brm\b/i, /\bmv\b/i, /\bchmod\b/i, /\bchown\b/i, /(^|[^&])>{1,2}/, /\btee\b/i, /\bgit\s+(reset|clean|checkout\s+--|rebase)\b/i];
 const HIGH_ACTION = /(^|_)(send|post|publish|delete|remove|destroy|pay|purchase|buy|transfer|merge|deploy|share|invite|reply|comment|create_(issue|pull|pr|draft|event)|update_(issue|event)|push)(_|$)/i;

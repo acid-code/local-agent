@@ -2508,6 +2508,11 @@ button.state-card:hover, a.state-card:hover { background: var(--bg-3); }
 .earlier-runs { padding-inline-start: 12px; display: flex; flex-direction: column; gap: 4px; }
 .earlier-toggle { align-self: flex-start; font-size: calc(12px * var(--fs)); color: var(--muted); }
 .earlier-list { gap: 4px; }
+.msg.persona-msg { border-inline-start: 3px solid var(--brass); }
+.persona-msg-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: calc(12px * var(--fs)); color: var(--muted); }
+.persona-msg-head .link-button { color: var(--brass); }
+.handoff-card { border: 1px solid var(--line); border-radius: calc(12px * var(--round)); padding: 10px 12px; background: var(--bg-2); margin: 8px 0; display: flex; flex-direction: column; gap: 4px; }
+.handoff-card-head { display: flex; align-items: center; gap: 8px; font-size: calc(12px * var(--fs)); color: var(--muted); }
 
 /* Final collapsed sidebar rail rules (after all later .side-top / .pin-faces overrides). */
 @media (min-width: 981px) {

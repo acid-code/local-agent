@@ -1,5 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
+import { listPersonaMessages } from './persona-messaging.js';
 import { OWNER_ID } from './accounts.js';
 import type { Approval, RunRow, StepRow, Store } from './db.js';
 import { redactValue } from './debug.js';
@@ -252,7 +253,18 @@ export function registerMonitor(app: FastifyInstance, raw: MonitorDeps & { owner
     return runTrace(deps, run);
   });
   app.get('/api/monitor/errors', async (req) => errorsSince(deps, sinceOf((req.query as { since?: string }).since)));
-  app.get('/api/monitor/summary', async (req) => summarySince(deps, sinceOf((req.query as { since?: string }).since)));
+  app.get('/api/monitor/messages', async (req) => {
+    const q = req.query as { since?: string; limit?: string };
+    const since = sinceOf(q.since);
+    const messages = listPersonaMessages(deps.store, { since, limit: q.limit ? Number(q.limit) : 100 });
+    return { since, count: messages.length, messages };
+  });
+  app.get('/api/monitor/summary', async (req) => {
+    const since = sinceOf((req.query as { since?: string }).since);
+    const summary = summarySince(deps, since);
+    const personaMessages = listPersonaMessages(deps.store, { since, limit: 50 });
+    return { ...summary, personaMessages: { total: personaMessages.length, recent: personaMessages.slice(0, 10) } };
+  });
   app.get('/api/monitor/health', async () => {
     const [checks, memory] = await Promise.all([deps.health().catch((error: Error) => [{ id: 'health', ok: false, detail: error.message }]), deps.memory().catch(() => null)]);
     const active = store.db.prepare("SELECT COUNT(*) AS n FROM runs WHERE status IN ('running','queued','awaiting_approval')").get() as { n: number };

@@ -30,6 +30,8 @@ export interface ToolContext {
   codeApproval?: Settings['codeApproval'];
   secretEnv?: () => Record<string, string>;
   consult?: (name: string, question: string) => Promise<string>;
+  sendPersonaMessage?: (to: string, text: string, files?: string[]) => Promise<string>;
+  handoffToPersona?: (to: string, task: string, files?: string[]) => Promise<string>;
   libraryDir?: string;
   roots?: { label: string; path: string; write?: boolean }[];
   gitIdentity?: { name?: string; email?: string; sshKey?: string; token?: string | null };
@@ -403,6 +405,38 @@ export const BUILTIN_TOOLS: Tool[] = [
     async execute(args, ctx) {
       if (!ctx.consult || ctx.depth >= 1) throw new Error('Nested consultations are stopped at one level.');
       return ctx.consult(String(args.agent || ''), String(args.question || ''));
+    },
+  },
+  {
+    name: 'send_message',
+    description: 'Send a note to another persona (by name) in their own chat and optionally start their run. Pass file IDs in files (never copy file contents).',
+    parameters: obj({
+      to: { type: 'string', description: 'Target persona name or slug.' },
+      text: { type: 'string', description: 'Message text to deliver.' },
+      files: { type: 'array', items: { type: 'string' }, description: 'Optional file IDs to reference.' },
+    }, ['to', 'text']),
+    mutates: () => false,
+    approval: () => null,
+    async execute(args, ctx) {
+      if (!ctx.sendPersonaMessage) throw new Error('Persona messaging is not available in this run.');
+      const files = Array.isArray(args.files) ? args.files.map(String) : undefined;
+      return ctx.sendPersonaMessage(String(args.to || ''), String(args.text || ''), files);
+    },
+  },
+  {
+    name: 'handoff',
+    description: 'Hand off a task to another persona (by name). Starts a run on the target persona and returns their result when done (or posts it back to your chat). Pass file IDs in files.',
+    parameters: obj({
+      to: { type: 'string', description: 'Target persona name or slug.' },
+      task: { type: 'string', description: 'Clear task description for the target persona.' },
+      files: { type: 'array', items: { type: 'string' }, description: 'Optional file IDs to reference.' },
+    }, ['to', 'task']),
+    mutates: () => false,
+    approval: () => null,
+    async execute(args, ctx) {
+      if (!ctx.handoffToPersona) throw new Error('Persona handoff is not available in this run.');
+      const files = Array.isArray(args.files) ? args.files.map(String) : undefined;
+      return ctx.handoffToPersona(String(args.to || ''), String(args.task || ''), files);
     },
   },
 ];

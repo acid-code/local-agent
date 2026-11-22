@@ -220,7 +220,7 @@ export const MEMBER_ROUTES = new Set([
   'GET /api/sessions/:id/plan', 'PUT /api/sessions/:id/plan', 'POST /api/sessions/:id/plan/undo', 'PATCH /api/plan-items/:id', 'GET /api/sessions/:id/edits', 'POST /api/edits/:id/revert',
   'GET /api/runs', 'GET /api/runs/:id', 'GET /api/runs/:id/events', 'POST /api/runs/:id/control',
   'GET /api/approvals', 'POST /api/approvals/:id',
-  'GET /api/models', 'GET /api/models/usable', 'GET /api/workspaces', 'POST /api/agents/:id/open-chat', 'GET /api/sessions/:id/workspaces', 'PUT /api/sessions/:id/workspaces',
+  'GET /api/models', 'GET /api/models/usable', 'GET /api/workspaces', 'POST /api/agents/:id/open-chat', 'GET /api/sessions/:id/workspaces', 'PUT /api/sessions/:id/workspaces', 'GET /api/persona-messages',
   'GET /api/schedules', 'POST /api/schedules', 'PATCH /api/schedules/:id', 'DELETE /api/schedules/:id', 'POST /api/schedules/:id/run',
   'GET /api/voice', 'POST /api/voice/transcribe', 'POST /api/voice/speak',
   'GET /api/memory', 'POST /api/memory', 'DELETE /api/memory/:id',

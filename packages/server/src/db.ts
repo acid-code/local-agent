@@ -301,6 +301,26 @@ export class Store {
         limits TEXT NOT NULL DEFAULT '{}', disabled INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS account_prefs (account_id TEXT PRIMARY KEY, theme TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS persona_messages (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL DEFAULT 'message',
+        from_agent_id TEXT NOT NULL,
+        to_agent_id TEXT NOT NULL,
+        from_session_id TEXT,
+        to_session_id TEXT,
+        from_run_id TEXT,
+        to_run_id TEXT,
+        text TEXT NOT NULL,
+        file_ids_json TEXT NOT NULL DEFAULT '[]',
+        hop INTEGER NOT NULL DEFAULT 1,
+        status TEXT NOT NULL DEFAULT 'sent',
+        result TEXT,
+        owner_id TEXT NOT NULL DEFAULT 'owner',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_persona_messages_to ON persona_messages(to_agent_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_persona_messages_from ON persona_messages(from_agent_id, created_at);
     `);
     for (const table of ['agents', 'chat_sessions', 'rooms', 'kb_collections', 'workshops', 'shared_repos', 'schedules', 'triggers', 'auth_sessions']) {
       const cols = this.many<Raw>(`PRAGMA table_info(${table})`).map((row) => String(row.name));
@@ -559,7 +579,7 @@ export class Store {
     agent.workshopIds = workshops.map((item) => String(item.workshop_id));
     const since = agent.lastReadAt ?? '1970-01-01T00:00:00.000Z';
     const unread = this.one<Raw>(`SELECT COUNT(*) AS n FROM messages m JOIN chat_sessions s ON s.id = m.session_id
-      WHERE s.agent_id = ? AND m.role = 'assistant' AND m.created_at > ?`, agent.id, since);
+      WHERE s.agent_id = ? AND (m.role = 'assistant' OR (m.role = 'user' AND m.content LIKE '[persona-message|%')) AND m.created_at > ?`, agent.id, since);
     agent.unread = Number(unread?.n ?? 0);
     return agent;
   }

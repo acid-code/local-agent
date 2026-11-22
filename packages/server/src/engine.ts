@@ -31,6 +31,7 @@ import {
 import { Bus } from './bus.js';
 import { vercelTools } from './vercel.js';
 import type { Agent, ModelRow, ProviderRow, RunRow, Store } from './db.js';
+import { dispatchPersonaMessage } from './persona-messaging.js';
 import type { DockerCtl } from './docker.js';
 import { indexText, retrieve, type VectorIndex } from './embeddings.js';
 import { countGeminiTokens, maxTokensFor, ollamaNumCtx, providerFor, samplingFor, type ModelProvider } from './providers.js';
@@ -2273,6 +2274,42 @@ export class Engine {
       // The owner's GitHub token, SSH key and vault never reach a member's persona.
       gitIdentity: member ? { name: agent.name, email: 'agent@local-agent.invalid' } : { ...gitIdentity(this.store.getSettings()), token: this.vault.valueByName('GITHUB_TOKEN') },
       consult: (name, question) => this.consult(run, name, question),
+      sendPersonaMessage: async (to, text, files) => {
+        const res = await dispatchPersonaMessage({
+          store: this.store,
+          bus: this.bus,
+          startTurn: (input) => this.startTurn(input),
+          isRunActive: (id) => this.inflight.has(id),
+          fromAgent: agent,
+          fromSessionId: run.sessionId,
+          fromRunId: run.id,
+          currentHop: run.cursor.hop ?? 0,
+          kind: 'message',
+          to,
+          text,
+          files,
+          signal,
+        });
+        return res.note;
+      },
+      handoffToPersona: async (to, task, files) => {
+        const res = await dispatchPersonaMessage({
+          store: this.store,
+          bus: this.bus,
+          startTurn: (input) => this.startTurn(input),
+          isRunActive: (id) => this.inflight.has(id),
+          fromAgent: agent,
+          fromSessionId: run.sessionId,
+          fromRunId: run.id,
+          currentHop: run.cursor.hop ?? 0,
+          kind: 'handoff',
+          to,
+          text: task,
+          files,
+          signal,
+        });
+        return res.note;
+      },
     };
   }
 

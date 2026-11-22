@@ -1564,4 +1564,7 @@ export const he: Record<string, string> = {
   "{0} earlier runs": "{0} ריצות קודמות",
   "Hide earlier runs": "הסתרת ריצות קודמות",
   "Show all ({0})": "הצגת הכול ({0})",
+  "Personas can start each other's runs": "פרסונות יכולות להפעיל ריצות אחת של השנייה",
+  "From {0}": "מאת {0}",
+  "Handoff": "העברת משימה",
 };
