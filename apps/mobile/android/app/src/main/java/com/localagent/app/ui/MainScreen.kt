@@ -452,8 +452,11 @@ fun ChatsScreen(
                 if (persona != null) PersonaAvatar(persona, 36) else Icon(Icons.Outlined.ChatBubbleOutline, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val displayTitle = session.title.takeIf { it.isNotBlank() && it != "New chat" }
+                            ?: persona?.name
+                            ?: "Untitled chat"
                         Text(
-                            session.title.ifBlank { "Untitled chat" },
+                            displayTitle,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             fontWeight = FontWeight.Medium,

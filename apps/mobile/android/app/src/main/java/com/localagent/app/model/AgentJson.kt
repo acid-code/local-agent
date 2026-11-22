@@ -23,11 +23,11 @@ object AgentJson {
 
     fun session(obj: JSONObject) = ChatSession(
         id = obj.getString("id"),
-        agentId = obj.optString("agentId", "").takeIf { it.isNotBlank() },
-        title = obj.optString("title", "New chat"),
+        agentId = obj.optString("agentId", "").takeIf { it.isNotBlank() && it != "null" },
+        title = obj.optString("title", "").takeIf { it.isNotBlank() && it != "null" } ?: "New chat",
         modelPin = obj.optString("modelPin", "").takeIf { it.isNotBlank() && it != "null" },
         mode = obj.optString("mode", "chat"),
         updatedAt = obj.optString("updatedAt", ""),
-        summary = obj.optString("summary", ""),
+        summary = obj.optString("summary", "").takeIf { it != "null" }.orEmpty(),
     )
 }
