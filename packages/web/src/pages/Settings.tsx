@@ -435,6 +435,21 @@ function OwnerSettings() {
           <button className="btn" onClick={async () => { const result = await track(post<{ backup: { id: string }; shipped: { detail: string } }>('/api/backups')); toast(tr('Saved {0}. {1}', [result.backup.id, result.shipped.detail]), 'ok'); }}>{tr('Take a snapshot')}</button>
           <p className="faint">{tr('Schedule and target live in the setup site (Defaults → Backup cron, Backup target).')}</p>
         </div>
+        <div className="card" id="fresh-start">
+          <h3>{tr('Start fresh')}</h3>
+          <p className="muted">{tr('Delete every chat, run and its history after a backup. Personas, skills, memory, the knowledge base, settings, secrets and models stay.')}</p>
+          <button className="btn danger" type="button" onClick={async () => {
+            const preview = await track(post<{ counts: { label: string; rows: number }[]; total: number; filesUnlinked: number }>('/api/admin/reset', {}));
+            const lines = preview.counts.filter((row) => row.rows > 0).map((row) => `${row.rows} ${row.label}`).join('\n');
+            if (!preview.total) { toast(tr('There are no chats to delete.'), 'ok'); return; }
+            const typed = window.prompt(tr('This deletes:\n{0}\n\nA backup is taken first. Type {1} to confirm.', [lines, 'DELETE ALL CHATS']));
+            if (typed === null) return;
+            if (typed.trim() !== 'DELETE ALL CHATS') { toast(tr('Not confirmed. Nothing was deleted.'), 'error'); return; }
+            const done = await track(post<{ total: number; backup?: { id: string } }>('/api/admin/reset', { confirm: true, phrase: typed.trim() }));
+            toast(tr('Deleted {0} rows. Backup {1}.', [done.total, done.backup?.id ?? '']), 'ok');
+            window.setTimeout(() => window.location.assign('/'), 800);
+          }}>{tr('Start fresh…')}</button>
+        </div>
         <AccountCard />
       </Block>}
       {show('people') && <Block id="people"><People /></Block>}

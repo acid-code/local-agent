@@ -20,7 +20,8 @@
     "doctor": "tsx packages/server/src/doctor-cli.ts",
     "reset-owner": "tsx packages/server/src/doctor-cli.ts --reset-owner",
     "e2e": "playwright test -c e2e/playwright.config.ts",
-    "eval": "node scripts/eval/run.mjs"
+    "eval": "node scripts/eval/run.mjs",
+    "reset-chats": "node scripts/reset-chats.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.65.1",

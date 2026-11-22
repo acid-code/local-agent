@@ -20,6 +20,7 @@ import { cacheNpm, cacheStatus, dockerCatalog, officialCatalog, specFor, vetCata
 import { localReputationSummarizer } from './reputation.js';
 import type { Notifier } from './notify.js';
 import { createBackup, listBackups, preChangeBackup, shipBackup, stageRestore } from './ops.js';
+import { RESET_PHRASE, resetChats } from './reset.js';
 import { telegramQueue } from './notify.js';
 import { ollamaLoaded, ollamaRoot } from './ollama.js';
 import { approvalView } from './approval-view.js';
@@ -1723,6 +1724,18 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const settings = store.getSettings();
     store.saveSettings({ ...settings, killed: false }, 'Kill switch cleared', { settings: { ...settings, killed: false } });
     return { killed: false };
+  });
+  // Fresh start (owner only): counts by default; deletes chats, runs and history only with the typed phrase, after a backup.
+  app.post('/api/admin/reset', async (req) => {
+    const body = parse(z.object({ confirm: z.boolean().optional(), phrase: z.string().optional() }), req.body ?? {});
+    if (!body.confirm) return resetChats(store.db, config.dataDir);
+    if (body.phrase !== RESET_PHRASE) throw http(400, `Type "${RESET_PHRASE}" to confirm.`);
+    if (engine.busyRuns() > 0) throw http(409, 'A reply is still running. Stop it (or wait), then reset.');
+    const sessions = (store.db.prepare('SELECT id FROM chat_sessions').all() as { id: string }[]).map((row) => row.id);
+    const result = await resetChats(store.db, config.dataDir, { confirm: true });
+    engine.forgetChats(sessions);
+    store.addLog('warn', `Fresh start: deleted ${result.total} rows across chats, runs and history. Backup: ${result.backup?.id}.`, undefined, 'ops');
+    return result;
   });
   app.get('/api/backups', async () => ({ backups: listBackups(config.dataDir) }));
   app.post('/api/backups', async () => {
