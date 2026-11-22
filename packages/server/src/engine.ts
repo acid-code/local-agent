@@ -1251,16 +1251,38 @@ export class Engine {
         this.bumpTools(run.id, completed);
         continue;
       }
-      // Do not execute the exact same read-only tool call again within a run. This
-      // prevents small local models from spending turns on duplicate searches/reads.
+      // Loop breaker: the same call (name + arguments) again and again. 3rd in a row: nudge. 4th: refuse it and let the
+      // model answer once more without tools, so the run ends cleanly instead of burning every step.
+      const sig = `${call.name}:${stableJson(args)}`;
+      const latest = this.store.getRun(run.id)!;
+      const loop = latest.cursor.loop?.sig === sig ? { sig, count: latest.cursor.loop.count + 1 } : { sig, count: 1 };
+      run.cursor.loop = loop;
+      this.store.updateRun(run.id, { cursor: { ...latest.cursor, loop } });
+      if (loop.count >= LOOP_STOP) {
+        const message = `Stopped: this is the ${loop.count}th identical ${call.name} call in a row and nothing changed. No more tool calls in this run. Answer now: what you found, what did not work, and what the user can do next.`;
+        this.store.addStep({ runId: run.id, kind: 'contract', name: 'loop', status: 'failed', input: { tool: call.name, count: loop.count }, output: message, toolCallId: call.id, turn: run.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: message, startedAt: now() });
+        this.store.addLog('warn', `Run ${run.id}: ${call.name} repeated ${loop.count} times with the same arguments. Asking for a final answer without tools.`, undefined, 'engine');
+        this.persistTool(run, call, message, 'failed', false);
+        const fresh = this.store.getRun(run.id)!;
+        run.cursor.noTools = true;
+        this.store.updateRun(run.id, { cursor: { ...fresh.cursor, noTools: true } });
+        completed.add(call.id);
+        this.bumpTools(run.id, completed);
+        continue;
+      }
+      const loopNote = loop.count >= LOOP_NUDGE ? `\n[loop] This is call ${loop.count} in a row of ${call.name} with the same arguments. Repeating it will not change the result: use what you have, try a different approach, or answer.` : '';
+      // A read-only call repeated with nothing changed since: point at the earlier result instead of running (and pasting)
+      // it again. After a write, shell command or other change, it runs fresh (the file or state may differ now).
       if (!tool.mutates(args)) {
-        const stable = (value: unknown) => JSON.stringify(value, Object.keys(value as Record<string, unknown>).sort());
-        const prior = this.store.listSteps(run.id)
+        const history = this.store.listSteps(run.id);
+        const prior = history
           .filter((step) => step.kind === 'tool' && step.name === call.name && step.status === 'completed')
           .reverse()
-          .find((step) => stable(step.input) === stable(args));
-        if (prior) {
-          const repeated = `Already completed ${call.name} with these arguments. Reusing the previous result:\n${String(prior.output ?? '').slice(0, 16_000)}`;
+          .find((step) => stableJson(step.input) === stableJson(args));
+        const changedSince = prior ? history.some((step) => step.index > prior.index && step.kind === 'tool' && step.status === 'completed' && Boolean(tools.find((item) => item.name === step.name)?.mutates((step.input ?? {}) as Record<string, unknown>))) : false;
+        if (prior && !changedSince) {
+          const output = String(prior.output ?? '');
+          const repeated = `Already ran ${call.name} with these arguments in this run and nothing has changed since; the result is above.${output.length > 1500 ? ` First part again:\n${output.slice(0, 1500)}\n… (use read_output or narrower arguments for more)` : `\n${output}`}${loopNote || '\nDo not repeat it: use that result or try something different.'}`;
           this.persistTool(run, call, repeated, 'completed', false);
           completed.add(call.id);
           this.bumpTools(run.id, completed);
@@ -1325,13 +1347,13 @@ export class Engine {
       try {
         const output = this.vault.redact(clampText(await tool.execute(args, { ...this.contextFor(run, signal), toolCallId: call.id }), 200_000));
         this.store.updateStep(step.id, { status: 'completed', output, latencyMs: Date.now() - started, endedAt: now() });
-        this.persistTool(run, call, output, 'completed', false);
+        this.persistTool(run, call, `${output}${loopNote}`, 'completed', false);
         this.bus.publish({ type: 'step', runId: run.id, step: this.store.getStep(step.id) });
       } catch (error) {
         if (error instanceof CrashError || error instanceof StopError || error instanceof InterruptedToolError) throw error;
         const message = error instanceof Error ? error.message : String(error);
         this.store.updateStep(step.id, { status: 'failed', error: message, endedAt: now(), latencyMs: Date.now() - started });
-        this.persistTool(run, call, `Error: ${message}${recoveryHint(call.name, message)}`, 'failed', false);
+        this.persistTool(run, call, `Error: ${message}${recoveryHint(call.name, message)}${loopNote}`, 'failed', false);
       }
       if (call.name === 'plan' && Array.isArray(args.items) && args.items.length && run.cursor.stage === 'plan') handoff = true;
       if (call.name === 'tasks' && args.action === 'set' && Array.isArray(args.items) && args.items.length >= 2) {
@@ -2678,6 +2700,14 @@ function quotaDay(date = new Date()) {
 
 /** Resident size from the tag (Q4 weights ≈ 0.6 GB per billion parameters plus runtime); unknown sizes count as small. */
 /** Personal and platform tools every persona keeps whatever its contract lists (they still go through approval tiers and member restrictions): reminders, triggers, time, task list, memory, skills, helpers. */
+const LOOP_NUDGE = 3;
+const LOOP_STOP = 4;
+/** JSON with sorted keys at every level, so {a,b} and {b,a} compare equal. */
+export function stableJson(value: unknown): string {
+  const sort = (item: unknown): unknown => Array.isArray(item) ? item.map(sort) : item && typeof item === 'object' ? Object.fromEntries(Object.keys(item as Record<string, unknown>).sort().map((key) => [key, sort((item as Record<string, unknown>)[key])])) : item;
+  return JSON.stringify(sort(value ?? {}));
+}
+
 const CONTRACT_ALWAYS = new Set([
   'request_secret', 'kb_search', 'load_skill', 'manage_timer', 'manage_trigger',
   'time_now', 'tasks', 'think', 'memory_file', 'search_chats', 'web_search', 'web_fetch',

@@ -127,6 +127,8 @@ export interface RunCursor {
   extraTools?: string[];
   /** Retries after llama-server dropped the connection or restarted. */
   transientRetries?: number;
+  /** Consecutive identical tool calls (name + arguments) for the loop breaker. */
+  loop?: { sig: string; count: number };
 }
 
 export interface ContextBreakdown {
