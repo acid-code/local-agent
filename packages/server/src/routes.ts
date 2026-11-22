@@ -454,7 +454,10 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const owner = me(req);
     const untitled: string[] = [];
     const agents = store.listAgents(owner).map((agent) => {
-      const rows = (lastMessages.all(agent.id) as { content: string; role: string; at: string }[]).reverse();
+      const rows = (lastMessages.all(agent.id) as { content: string; role: string; at: string }[]).reverse().map((row) => {
+        const pm = row.content.match(/^\[persona-message\|[^|\]]+\|[^|\]]+\|[^|\]]+\|([^|\]]+)\|[^\]]*\]\s*/);
+        return pm ? { ...row, role: 'assistant', content: `From ${pm[1]}: ${row.content.slice(pm[0].length)}` } : row;
+      });
       const preview = previewOf(rows);
       const at = rows.at(-1)?.at;
       const chat = store.latestSessionForAgent(agent.id, owner);
