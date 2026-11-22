@@ -97,6 +97,8 @@ export class Engine {
   libraryDir = '';
   /** Shared RAM budget. Set by buildApp; absent in some unit tests. */
   memory: MemoryBudget | null = null;
+  /** Shared long-lived shell workbench container. Set by buildApp. */
+  workbench: import('./workbench.js').Workbench | null = null;
 
   constructor(
     private readonly store: Store,
@@ -2256,7 +2258,7 @@ export class Engine {
     const settings = this.store.getSettings();
     const member = agent.ownerId !== OWNER_ID;
     return {
-      agent, workspace: agent.workspacePath, signal, docker: this.docker, fetchImpl: this.fetchImpl, searxngUrl: settings.searxngUrl || process.env.SEARXNG_URL || '',
+      agent, workspace: agent.workspacePath, signal, docker: this.docker, workbench: this.workbench, fetchImpl: this.fetchImpl, searxngUrl: settings.searxngUrl || process.env.SEARXNG_URL || '',
       sandbox: settings.sandbox, store: this.store, depth: run.cursor.depth ?? 0,
       sessionId: run.sessionId, runId: run.id, codeApproval: settings.codeApproval,
       secretEnv: () => (member ? {} : this.vault.envFor(agent.id, `run:${run.id}`)),

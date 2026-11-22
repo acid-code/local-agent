@@ -68,7 +68,8 @@ import { registerMedia } from './media.js';
 import { getChatWorkspaces, prefillChatWorkspaces, resolveChatWorkspaces, setChatWorkspaces, chatWorkspacePaths } from './chat-workspaces.js';
 import { usableModels } from './usable-models.js';
 import { registerWorkspaceRoutes } from './workspaces.js';
-import { budgetConfig, budgetReport, type MemoryBudget } from './memory.js';
+import { budgetConfig, budgetReport, readGtt, type MemoryBudget } from './memory.js';
+import { isLlamaServerProvider } from './coexist.js';
 import { localStatus } from './images.js';
 import { activeRunOf, sessionEventFilter } from './session-events.js';
 
@@ -1697,8 +1698,18 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
         flags.push({ level: 'warn' as const, text: `${loaded.name} is loaded with ${loaded.contextLength} tokens of context. This app budgets ${known.practicalBudget}.` });
       }
     }
-    return { current: { ...current, loadedModels, flags } };
+    const workbench = engine.workbench ? await engine.workbench.status() : null;
+    const memUsage = engine.memory ? await engine.memory.usage().catch(() => null) : null;
+    const gtt = memUsage?.gtt ?? readGtt();
+    const llamaProviders = store.listProviders().filter((provider) => provider.enabled && isLlamaServerProvider(provider));
+    const llamaModels = llamaProviders.map((provider) => {
+      const m = store.listModels().find((model) => model.providerId === provider.id);
+      return m?.name || provider.name;
+    });
+    const residentModels = [...new Set([...loadedModels.map((m) => m.name), ...llamaModels])];
+    return { current: { ...current, loadedModels, flags, gtt, residentModels, workbench } };
   });
+  app.get('/api/workbench', async () => ({ workbench: engine.workbench ? await engine.workbench.status() : null }));
   app.get('/api/resources/trends', async (req) => {
     const hours = Number((req.query as { hours?: string }).hours || 24);
     const since = new Date(Date.now() - hours * 3600_000).toISOString();

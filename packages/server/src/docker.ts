@@ -346,23 +346,29 @@ export class DockerCtl {
     }
   }
 
-  /** docker exec into a running container; returns combined output and the exit code. */
-  async exec(name: string, cmd: string[], workingDir: string, timeoutMs = 10 * 60_000): Promise<{ output: string; code: number }> {
+  /** docker exec into a running container; returns combined output and the exit code (124 with partial output on timeout). */
+  async exec(name: string, cmd: string[], workingDir: string, timeoutMs = 5 * 60_000): Promise<{ output: string; code: number }> {
     const container = this.api().getContainer(name);
     const exec = await container.exec({ Cmd: cmd, WorkingDir: workingDir, AttachStdout: true, AttachStderr: true });
     const stream = await exec.start({ hijack: true, stdin: false });
     const chunks: Buffer[] = [];
     let size = 0;
-    await Promise.race([
-      new Promise<void>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finished = await Promise.race([
+      new Promise<boolean>((resolve, reject) => {
         stream.on('data', (chunk: Buffer) => { if (size < 256_000) { chunks.push(chunk); size += chunk.length; } });
-        stream.on('end', () => resolve());
+        stream.on('end', () => resolve(true));
         stream.on('error', reject);
       }),
-      new Promise<never>((_, reject) => setTimeout(() => { stream.destroy(); reject(new Error('Command timed out.')); }, timeoutMs).unref?.()),
-    ]);
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => { stream.destroy(); resolve(false); }, timeoutMs);
+        timer.unref?.();
+      }),
+    ]).finally(() => clearTimeout(timer));
+    const output = demux(Buffer.concat(chunks)).slice(0, 64_000);
+    if (!finished) return { output: `${output}\n[timed out after ${Math.round(timeoutMs / 1000)}s and was stopped]`, code: 124 };
     const info = await exec.inspect();
-    return { output: demux(Buffer.concat(chunks)).slice(0, 64_000), code: info.ExitCode ?? 1 };
+    return { output, code: info.ExitCode ?? 1 };
   }
 
   /** One-shot docker stats: memory in use and limit, CPU percent. */

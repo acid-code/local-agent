@@ -252,6 +252,7 @@ export const BUILTIN_TOOLS: Tool[] = [
       const command = String(args.command || '');
       const assessment = assessCommand(command);
       if (assessment === 'blocked') return null;
+      if (/\bapt(-get)?\s+install\b/i.test(command)) return `Installs system packages in the shared workbench (affects all personas): ${command.slice(0, 180)}`;
       if (assessment === 'mutating') return `Shell command looks destructive: ${command.slice(0, 180)}`;
       return null;
     },
@@ -263,7 +264,7 @@ export const BUILTIN_TOOLS: Tool[] = [
       const cwd = (ctx.roots?.length ?? 0) > 0 ? projectPath(ctx.roots!, args.cwd ? String(args.cwd) : undefined, ctx.workspace, command) : ctx.workspace;
       if (ctx.sandbox !== 'host' && ctx.docker.available() && ctx.workbench && workbenchEnabled()) {
         try {
-          const result = await ctx.workbench.run(command, cwd);
+          const result = await ctx.workbench.run(command, cwd, shellTimeoutMs());
           if (result) return `exit ${result.code}\n${clipToolOutput(result.output)}`;
         } catch (error) {
           ctx.store.addLog('warn', `Workbench unavailable, using a throwaway container: ${(error as Error).message}`, undefined, 'workbench');

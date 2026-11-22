@@ -207,8 +207,9 @@ export class MemoryBudget {
     if (gtt && extra > Math.max(0, gtt.totalBytes - Math.max(0, gtt.usedBytes - freed) - gttHeadroomBytes())) return false;
     const cfg = this.config();
     if (state.usedBytes - freed + extra > cfg.budgetBytes || extra > Math.max(0, state.systemAvailable + freed - cfg.systemReserveBytes)) return false;
+    if (!req.model) return true;
     const resident = this.residentNames(remaining);
-    return resident.has(req.model ?? '') || resident.size + (this.probe.externalResident?.() ?? 0) < maxResidentModels();
+    return resident.has(req.model) || resident.size + (this.probe.externalResident?.() ?? 0) < maxResidentModels();
   }
 
   // ----- Admission -----

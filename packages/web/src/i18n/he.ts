@@ -1535,4 +1535,13 @@ export const he: Record<string, string> = {
   "failed": "נכשלו",
   "tokens": "טוקנים",
   "stopped": "נעצר",
+  "Stopped": "עצור",
+  "Shared workbench": "סביבת עבודה משותפת",
+  "Idle": "בהמתנה",
+  "Ephemeral mode": "מצב זמני",
+  "Docker unavailable": "Docker לא זמין",
+  "RAM free: {0} / {1} GB": "RAM פנוי: {0} / {1} GB",
+  "GTT: {0} / {1} GB": "GTT: {0} / {1} GB",
+  "Resident models": "מודלים טעונים",
+  "No resident models": "אין מודלים טעונים",
 };

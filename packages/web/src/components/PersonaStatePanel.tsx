@@ -13,7 +13,26 @@ interface Run { id: string; sessionId: string; agentId: string; status: string; 
 interface Schedule { id: string; agentId: string; name: string; cron: string; enabled: boolean; nextRunAt: string | null }
 interface Trigger { id: string; agentId: string; name: string; kind: string; enabled: boolean }
 interface FileRow { id: string; sessionId: string | null; name: string; size: number; source: 'upload' | 'agent'; createdAt: string }
-interface Resources { current: { memory: { totalGiB: number; availableGiB: number }; gpu: { name?: string } | null; disk: { totalBytes: number; freeBytes: number } } }
+interface WorkbenchInfo {
+  enabled: boolean;
+  state: 'running' | 'idle' | 'stopped' | 'missing' | 'unavailable';
+  image: string;
+  memoryBytes: number | null;
+  memoryLimitBytes: number;
+  cpuPercent: number | null;
+  lastUsedAt: string | null;
+  tools?: { node: string | null; python: string | null; uv: string | null };
+}
+interface Resources {
+  current: {
+    memory: { totalGiB: number; availableGiB: number };
+    gpu: { name?: string } | null;
+    disk: { totalBytes: number; freeBytes: number };
+    gtt?: { usedBytes: number; totalBytes: number } | null;
+    residentModels?: string[];
+    workbench?: WorkbenchInfo | null;
+  };
+}
 interface Voice { whisper: boolean; kokoro: boolean }
 
 const ACTIVE = new Set(['queued', 'running', 'awaiting_approval', 'awaiting_secret', 'paused']);
@@ -50,7 +69,15 @@ export function PersonaStatePanel({ agent, sessions, tick, onClose, onOpenSessio
     return () => { live = false; window.clearInterval(timer); };
   }, [agent.id, tick]);
   useEffect(() => {
-    if (isOwner()) void api<Resources>('/api/resources').then(setResources).catch(() => setResources(null));
+    let live = true;
+    const loadResources = () => {
+      if (isOwner()) void api<Resources>('/api/resources').then((data) => live && setResources(data)).catch(() => live && setResources(null));
+    };
+    loadResources();
+    const timer = window.setInterval(loadResources, 15_000);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [tick]);
+  useEffect(() => {
     void api<Voice>('/api/voice').then(setVoice).catch(() => setVoice(null));
   }, []);
   useEffect(() => {
@@ -129,15 +156,57 @@ export function PersonaStatePanel({ agent, sessions, tick, onClose, onOpenSessio
           </section>
           <section className="state-sec">
             <h4>{t('Computer')}</h4>
-            <div className="state-card computer-card">
-              <span className="grow">
-                <span className="ellipsis" dir="auto">{agent.name}{t('\'s computer')}</span>
-                <small className="faint">{busy ? t('Working') : t('Asleep')}{memory ? t(' · {0} of {1} GB free', [memory.availableGiB.toFixed(1), memory.totalGiB.toFixed(0)]) : ''}</small>
-                {memory && <span className="state-meter" role="meter" aria-label={t('Memory in use')} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(100 - (memory.availableGiB / memory.totalGiB) * 100)}><span style={{ width: `${Math.round(100 - (memory.availableGiB / memory.totalGiB) * 100)}%` }} /></span>}
-              </span>
-              <span className={`computer-thumb${busy ? ' awake' : ''}`} aria-hidden><Face agent={agent} size={26} /></span>
-            </div>
-            {resources && <p className="faint state-detail">{t('Disk')}{' '}{(resources.current.disk.freeBytes / 1024 ** 3).toFixed(0)}{' '}{t('GB free')}{resources.current.gpu?.name ? ` · ${resources.current.gpu.name}` : t(' · no GPU')}</p>}
+            {(() => {
+              const wb = resources?.current.workbench;
+              const gtt = resources?.current.gtt;
+              const resident = resources?.current.residentModels ?? [];
+              const wbStateLabel = !wb ? (busy ? t('Running') : t('Stopped'))
+                : !wb.enabled ? t('Ephemeral mode')
+                : wb.state === 'running' ? t('Running')
+                : wb.state === 'idle' ? t('Idle')
+                : wb.state === 'unavailable' ? t('Docker unavailable')
+                : t('Stopped');
+              const wbActive = wb ? (wb.state === 'running' || wb.state === 'idle') : busy;
+              const wbStats: string[] = [];
+              if (wb?.cpuPercent != null) wbStats.push(`${wb.cpuPercent.toFixed(0)}% CPU`);
+              if (wb?.memoryBytes != null) wbStats.push(`${(wb.memoryBytes / 1024 ** 3).toFixed(1)} / ${(wb.memoryLimitBytes / 1024 ** 3).toFixed(0)} GB`);
+              const toolParts = wb?.tools ? [
+                wb.tools.node ? `node ${wb.tools.node}` : null,
+                wb.tools.python ? `python ${wb.tools.python}` : null,
+                wb.tools.uv ? `uv ${wb.tools.uv}` : null,
+              ].filter(Boolean) : [];
+              return (
+                <>
+                  <div className="state-card computer-card">
+                    <span className="grow">
+                      <span className="ellipsis">{t('Shared workbench')}</span>
+                      <small className="faint">
+                        {wbStateLabel}{wbStats.length ? ` · ${wbStats.join(' · ')}` : ''}
+                      </small>
+                      {memory && (
+                        <>
+                          <small className="faint">{t('RAM free: {0} / {1} GB', [memory.availableGiB.toFixed(1), memory.totalGiB.toFixed(0)])}</small>
+                          <span className="state-meter" role="meter" aria-label={t('Memory in use')} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(100 - (memory.availableGiB / memory.totalGiB) * 100)}><span style={{ width: `${Math.round(100 - (memory.availableGiB / memory.totalGiB) * 100)}%` }} /></span>
+                        </>
+                      )}
+                      {gtt && (
+                        <small className="faint">{t('GTT: {0} / {1} GB', [(gtt.usedBytes / 1024 ** 3).toFixed(1), (gtt.totalBytes / 1024 ** 3).toFixed(0)])}</small>
+                      )}
+                      {resources && (
+                        <small className="faint ellipsis" title={resident.join(', ')}>
+                          {resident.length ? `${t('Resident models')}: ${resident.join(', ')}` : t('No resident models')}
+                        </small>
+                      )}
+                      {toolParts.length > 0 && (
+                        <small className="faint ellipsis" dir="ltr">{toolParts.join(' · ')}</small>
+                      )}
+                    </span>
+                    <span className={`computer-thumb${wbActive ? ' awake' : ''}`} aria-hidden><Face agent={agent} size={26} /></span>
+                  </div>
+                  {resources && <p className="faint state-detail">{t('Disk')}{' '}{(resources.current.disk.freeBytes / 1024 ** 3).toFixed(0)}{' '}{t('GB free')}{resources.current.gpu?.name ? ` · ${resources.current.gpu.name}` : t(' · no GPU')}</p>}
+                </>
+              );
+            })()}
           </section>
           <section className="state-sec">
             <h4>{t('Voice chat')}</h4>
