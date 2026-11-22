@@ -284,10 +284,10 @@ button { cursor: pointer; }
 /* Live indicators never blink: the dots stay fully opaque and only drift 2px up and down (transform only, each on
    its own compositor layer), and the row stays mounted for the whole run. A dim-bright opacity pulse on tiny dots
    read as flicker on Windows (GPU raster at 125-150% scaling). */
-.typing span { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--brass); animation: typing-wave 1.2s infinite ease-in-out; will-change: transform; transform: translate3d(0, 0, 0); backface-visibility: hidden; }
-.typing span:nth-child(2) { animation-delay: .15s; } .typing span:nth-child(3) { animation-delay: .3s; }
+.typing span { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--brass); animation: typing-wave 1.8s infinite cubic-bezier(0.45, 0.05, 0.55, 0.95); will-change: transform; transform: translate3d(0, 0, 0); backface-visibility: hidden; }
+.typing span:nth-child(2) { animation-delay: .22s; } .typing span:nth-child(3) { animation-delay: .44s; }
 .typing em { font-style: normal; font-size: calc(13px * var(--fs)); margin-inline-start: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; animation: typing-note-in .25s ease-out both; }
-@keyframes typing-wave { 0%, 60%, 100% { transform: translate3d(0, 0, 0); } 30% { transform: translate3d(0, -2px, 0); } }
+@keyframes typing-wave { 0%, 100% { transform: translate3d(0, 1.5px, 0); } 50% { transform: translate3d(0, -2.5px, 0); } }
 @keyframes typing-note-in { from { opacity: 0; } to { opacity: 1; } }
 .error-card { border-color: rgba(var(--coral-rgb), 0.45); background: rgba(var(--coral-rgb), 0.08); }
 .error-card p { margin: 6px 0 10px; overflow-wrap: anywhere; }

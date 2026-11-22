@@ -19,15 +19,20 @@ const ICONS: Record<StepIcon, typeof Brain> = {
  * reconnect) they carry on the shared beat instead of restarting at 0%.
  */
 export function useClockPhase(periodMs: number, offsetMs = 0): CSSProperties {
-  const [delay] = useState(() => clockDelay(periodMs, Date.now(), offsetMs));
-  return { animationDelay: delay };
+  const [style] = useState<CSSProperties>(() => {
+    const raw = Number.parseInt(clockDelay(periodMs, Date.now(), offsetMs), 10);
+    // Always use a negative delay so the dot starts immediately in-phase without freezing first.
+    const negative = raw > 0 ? raw - periodMs : raw;
+    return { animationDelay: `${negative}ms` };
+  });
+  return style;
 }
 
 /** The "Working…" dots: mounted once for the whole run; only the note changes, fading in under its own key. */
 export function TypingDots({ label, note }: { label: string; note: string }) {
-  const a = useClockPhase(1200);
-  const b = useClockPhase(1200, 150);
-  const c = useClockPhase(1200, 300);
+  const a = useClockPhase(1800, 0);
+  const b = useClockPhase(1800, 220);
+  const c = useClockPhase(1800, 440);
   return <div className="typing" role="status" aria-label={label}><span style={a} aria-hidden /><span style={b} aria-hidden /><span style={c} aria-hidden /> <em key={note}>{note}</em></div>;
 }
 
