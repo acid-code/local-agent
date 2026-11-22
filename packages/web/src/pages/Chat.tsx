@@ -17,7 +17,7 @@ import { PersonaPanel, useWorkspaces, type PanelAgent } from '../components/Pers
 import { PersonaChip, greetingFor, startersFor } from '../components/ChatChips';
 import { ContextPanel } from '../components/ContextPanel';
 import { ContextRing } from '../components/ContextRing';
-import { TypingDots, WorkGroupView, useSettled } from '../components/WorkSteps';
+import { TypingDots, WorkGroupView } from '../components/WorkSteps';
 import { groupWork } from '../lib/work-steps';
 import { ContextNudgeBanner, DecisionTimeline, BulkDiffCard, LocalRepoPicker, MiniAgentStrip, type MiniAgentRow } from '../components/ChatUpgrades';
 import { parseSources, toolSummary, waitStateOf, waitedFor, type ContextBreakdown } from '@local-agent/shared';
@@ -48,8 +48,6 @@ const PAGE = 150;
 
 type OcrMode = 'auto' | 'printed' | 'handwriting' | 'off';
 const IMAGE_NAME = /\.(jpe?g|png|webp|heic|heif|tiff?|bmp|gif)$/i;
-
-const TYPING_GRACE_MS = 700;
 
 export function Chat() {
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -153,14 +151,15 @@ export function Chat() {
   const ws = useWorkspaces();
   const navigate = useNavigate();
   const active = ['running', 'loading', 'waiting', 'paused', 'awaiting_approval'].includes(status);
-  // Between steps (tool result in, next thought not yet) the dots used to blink on and off many times a second.
-  // They now appear only once the agent has been quiet for a moment, and hide at once when it speaks.
   // Work groups are rebuilt only when the transcript changes, not on every streamed token.
   const items = useMemo(() => groupWork(messages), [messages]);
   // Live reasoning between steps shows as the last row of the live work group, so it no longer pops a separate
   // block in and out below the steps on every tool call.
   const thoughtInGroup = Boolean(active && thinking && !streaming && items[items.length - 1]?.kind === 'work');
-  const showTyping = useSettled(active && status !== 'waiting' && !streaming && !thinking, TYPING_GRACE_MS);
+  // The "Working…" dots stay mounted for the whole run. They used to unmount whenever a thought or text streamed
+  // and come back between steps, which read as flicker; now only their note changes.
+  const showTyping = active && status !== 'paused' && status !== 'awaiting_approval';
+  const typingNote = loadingNote || (thinking && !streaming ? t('Thinking…') : t('Working…'));
 
   async function refreshLists() {
     const [sessionRes, agentRes] = await Promise.all([
@@ -1190,7 +1189,7 @@ export function Chat() {
               </div>
             );
           })()}
-          {showTyping && <TypingDots label={t('Working')} note={loadingNote || t('Working…')} />}
+          {showTyping && <TypingDots label={t('Working')} note={typingNote} />}
           {runError && !active && (
             <div className="banner error-card" role="alert">
               <strong>{t('The reply failed.')}</strong>
