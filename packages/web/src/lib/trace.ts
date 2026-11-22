@@ -1,5 +1,25 @@
 /** Plain-language trace rows for a run's steps (web Runs page; Android mirrors it). Pure, unit-tested. */
-export interface TraceStep { id: string; index?: number; kind: string; name: string; status: string; input?: unknown; output?: unknown; latencyMs?: number | null; tokensIn?: number; tokensOut?: number; error?: string | null }
+export interface StepPerf { tokPerSec?: number; cacheHitPct?: number }
+export interface TraceStep { id: string; index?: number; kind: string; name: string; status: string; input?: unknown; output?: unknown; perf?: StepPerf; latencyMs?: number | null; tokensIn?: number; tokensOut?: number; error?: string | null }
+
+/** Extracts cache-hit % and tok/s from step.perf or step.output.telemetry (from #16). */
+export function stepPerf(step: TraceStep): StepPerf {
+  const out = step.output && typeof step.output === 'object' ? (step.output as Record<string, unknown>) : null;
+  const raw = step.perf ?? (out?.telemetry as Record<string, unknown> | undefined) ?? (out?.perf as Record<string, unknown> | undefined);
+  if (!raw || typeof raw !== 'object') return {};
+  const tokPerSec = typeof raw.tokPerSec === 'number' && Number.isFinite(raw.tokPerSec) ? Math.round(raw.tokPerSec * 10) / 10 : undefined;
+  const cacheHitPct = typeof raw.cacheHitPct === 'number' && Number.isFinite(raw.cacheHitPct) ? Math.round(raw.cacheHitPct) : undefined;
+  return { ...(tokPerSec != null ? { tokPerSec } : {}), ...(cacheHitPct != null ? { cacheHitPct } : {}) };
+}
+
+/** True when a failed step was retried by a later step of the same kind (and same tool name for tools). */
+export function isRetriedStep(steps: TraceStep[], step: TraceStep): boolean {
+  const failed = step.status === 'failed' || Boolean(step.error);
+  if (!failed) return false;
+  const idx = steps.indexOf(step);
+  if (idx < 0) return false;
+  return steps.slice(idx + 1).some((later) => later.kind === step.kind && (step.kind !== 'tool' || later.name === step.name));
+}
 
 /** 402 ms, 8.5 s, 6m 24s, 1h 3m. */
 export function humanDuration(ms: number | null | undefined): string {

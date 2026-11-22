@@ -55,6 +55,8 @@ export function PersonaStatePanel({ agent, sessions, tick, onClose, onOpenSessio
   const [resources, setResources] = useState<Resources | null>(null);
   const [voice, setVoice] = useState<Voice | null>(null);
   const [files, setFiles] = useState<FileRow[]>([]);
+  const [expandedChats, setExpandedChats] = useState<Record<string, boolean>>({});
+  const [showAllCoding, setShowAllCoding] = useState(false);
   const mine = new Map(sessions.filter((session) => session.agentId === agent.id).map((session) => [session.id, session]));
 
   useEffect(() => {
@@ -85,8 +87,22 @@ export function PersonaStatePanel({ agent, sessions, tick, onClose, onOpenSessio
     void api<{ files: FileRow[] }>('/api/files?limit=200').then((data) => setFiles(data.files.filter((file) => file.sessionId && mine.has(file.sessionId)))).catch(() => undefined);
   }, [tab, agent.id, tick, sessions.length]);
 
-  const coding = runs.filter((run) => { const session = mine.get(run.sessionId); return session && (session.mode === 'code' || session.workshopId); }).slice(0, 5);
-  const working = runs.filter((run) => ACTIVE.has(run.status) && !coding.includes(run)).slice(0, 3);
+  const allCodingRuns = runs.filter((run) => { const session = mine.get(run.sessionId); return session && (session.mode === 'code' || session.workshopId); });
+  const codingGroups = (() => {
+    const byChat = new Map<string, Run[]>();
+    for (const run of allCodingRuns) {
+      const list = byChat.get(run.sessionId);
+      if (list) list.push(run);
+      else byChat.set(run.sessionId, [run]);
+    }
+    return [...byChat.entries()].map(([sessionId, list]) => {
+      const sorted = [...list].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+      return { sessionId, latest: sorted[0]!, earlier: sorted.slice(1) };
+    });
+  })();
+  const visibleCoding = showAllCoding ? codingGroups : codingGroups.slice(0, 5);
+  const codingIds = new Set(allCodingRuns.map((run) => run.id));
+  const working = runs.filter((run) => ACTIVE.has(run.status) && !codingIds.has(run.id)).slice(0, 3);
   const upcoming = [...schedules.filter((row) => row.enabled).sort((a, b) => String(a.nextRunAt).localeCompare(String(b.nextRunAt))), ...triggers.filter((row) => row.enabled)].slice(0, 6);
   const memory = resources?.current.memory;
 
@@ -141,7 +157,57 @@ export function PersonaStatePanel({ agent, sessions, tick, onClose, onOpenSessio
         <div className="panel-body state-body">
           <section className="state-sec">
             <h4>{t('Coding')}</h4>
-            {coding.length ? <ul className="state-list">{coding.map(runRow)}</ul> : <p className="faint state-empty center">{t('Ask')}{' '}{agent.name}{' '}{t('to change code in a repo, and its runs show up here')}</p>}
+            {visibleCoding.length ? (
+              <>
+                <ul className="state-list">
+                  {visibleCoding.map(({ sessionId, latest, earlier }) => {
+                    const session = mine.get(sessionId);
+                    const failed = latest.status === 'failed';
+                    const done = latest.status === 'completed';
+                    const stopped = latest.status === 'stopped';
+                    const waitingSecret = latest.status === 'awaiting_secret';
+                    const waitingApproval = latest.status === 'awaiting_approval';
+                    const label = failed ? t('Run failed') : done ? t('Run finished') : stopped ? t('Run stopped') : waitingSecret ? t('Waiting for secret') : waitingApproval ? t('Waiting for approval') : ACTIVE.has(latest.status) ? t('Running') : latest.status.replace('_', ' ');
+                    const Icon = failed ? AlertCircle : done ? CheckCircle2 : stopped ? CircleStop : waitingSecret ? KeyRound : waitingApproval ? AlertCircle : CircleDashed;
+                    const expanded = Boolean(expandedChats[sessionId]);
+                    return (
+                      <li key={sessionId} className="coding-chat-group">
+                        <button className={`state-card state-row${failed ? ' failed' : ''}`} onClick={() => onOpenSession(sessionId)} title={`${label} · ${ago(latest.startedAt)}`}>
+                          <Icon size={18} className={`state-ico${failed ? ' bad' : done ? ' ok' : ACTIVE.has(latest.status) ? ' live' : ''}`} aria-hidden />
+                          <span className="grow">
+                            <span className="ellipsis" dir="auto">{session?.title || t('Chat')}</span>
+                            <small className="faint">{label} · {ago(latest.startedAt)}</small>
+                          </span>
+                          <ChevronRight size={16} className="faint" aria-hidden />
+                        </button>
+                        {earlier.length > 0 && (
+                          <div className="earlier-runs">
+                            <button
+                              type="button"
+                              className="link-btn earlier-toggle"
+                              aria-expanded={expanded}
+                              onClick={() => setExpandedChats((prev) => ({ ...prev, [sessionId]: !prev[sessionId] }))}
+                            >
+                              {expanded
+                                ? t('Hide earlier runs')
+                                : earlier.length === 1
+                                  ? t('1 earlier run')
+                                  : t('{0} earlier runs', [earlier.length])}
+                            </button>
+                            {expanded && <ul className="state-list earlier-list">{earlier.map(runRow)}</ul>}
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+                {codingGroups.length > 5 && (
+                  <button type="button" className="link-btn state-more" onClick={() => setShowAllCoding((v) => !v)}>
+                    {showAllCoding ? t('Show fewer') : t('Show all ({0})', [codingGroups.length])}
+                  </button>
+                )}
+              </>
+            ) : <p className="faint state-empty center">{t('Ask')}{' '}{agent.name}{' '}{t('to change code in a repo, and its runs show up here')}</p>}
             {working.length > 0 && <><h5 className="faint">{t('Working now')}</h5><ul className="state-list">{working.map(runRow)}</ul></>}
           </section>
           <section className="state-sec">

@@ -73,15 +73,31 @@ button { cursor: pointer; }
 .collapse-btn { display: inline-grid; }
 @media (min-width: 981px) {
   .app.collapsed { grid-template-columns: 64px minmax(0, 1fr); }
-  .app.collapsed .sidebar { padding: 18px 8px 14px; overflow-x: hidden; }
-  .app.collapsed .label, .app.collapsed .word, .app.collapsed .persona-head, .app.collapsed .persona-ops, .app.collapsed .side-foot > .ellipsis, .app.collapsed .persona-open .badge { display: none; }
+  .app.collapsed .sidebar { padding: 14px 6px; overflow-x: hidden; align-items: center; gap: 12px; }
+  .app.collapsed .label,
+  .app.collapsed .word,
+  .app.collapsed .persona-head,
+  .app.collapsed .persona-ops,
+  .app.collapsed .side-foot > .ellipsis,
+  .app.collapsed .persona-open .badge,
+  .app.collapsed .persona-row .menu-trigger,
+  .app.collapsed .pin-face-name,
+  .app.collapsed .side-top .grow,
+  .app.collapsed .side-alert-x,
+  .app.collapsed .user-chip .who { display: none; }
+  .app.collapsed .side-top { flex-direction: column; align-items: center; gap: 6px; width: 100%; padding: 0; }
+  .app.collapsed .pin-faces { flex-direction: column; align-items: center; gap: 6px; padding: 4px 0; width: 100%; }
+  .app.collapsed .pin-face { padding: 4px; width: 44px; height: 44px; justify-content: center; }
+  .app.collapsed .pin-face-art { transform: scale(0.66); transform-origin: center; }
   .app.collapsed .brand { justify-content: center; padding: 0; }
   .app.collapsed .nav a { justify-content: center; padding: 10px 0; }
   .app.collapsed .nav svg { width: 18px; height: 18px; }
-  .app.collapsed .persona-list { padding: 8px 0; align-items: center; }
-  .app.collapsed .persona-row { border: 0; background: transparent; }
-  .app.collapsed .persona-open { padding: 4px; justify-content: center; }
-  .app.collapsed .side-foot { justify-content: center; padding: 0; }
+  .app.collapsed .persona-list { padding: 4px 0; align-items: center; width: 100%; gap: 6px; }
+  .app.collapsed .persona-row { border: 0; background: transparent; width: auto; justify-content: center; }
+  .app.collapsed .persona-open { padding: 4px; justify-content: center; width: 44px; height: 44px; border-radius: 50%; }
+  .app.collapsed .side-alert { padding: 4px; justify-content: center; width: 44px; }
+  .app.collapsed .side-alert-main { justify-content: center; padding: 4px; gap: 2px; }
+  .app.collapsed .side-foot { flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 6px 0 0; width: 100%; }
   .app.collapsed .side-foot .btn { padding: 0; width: 36px; }
 }
 .sidebar {
@@ -2482,7 +2498,37 @@ button.state-card:hover, a.state-card:hover { background: var(--bg-3); }
 .trace-pane { padding: 0 12px 16px; min-width: 0; }
 .trace .faint { padding-inline: 12px; }
 .trace-step.stopped .trace-ico { color: var(--muted); }
-
 /* Text-styled button for inline actions in chips ("Saved skill X · Edit · Delete"). */
 .link-button { background: none; border: 0; padding: 0; font: inherit; color: var(--accent, inherit); text-decoration: underline; cursor: pointer; }
 .link-button:hover { opacity: 0.8; }
+.trace-step.retried .trace-ico, .trace-step.retried .trace-label { color: var(--amber, #d99b26); }
+.trace-chip.retried { color: var(--amber, #d99b26); border-color: color-mix(in srgb, var(--amber, #d99b26) 45%, var(--line)); }
+.trace-chip.perf { color: var(--muted); }
+.coding-chat-group { display: flex; flex-direction: column; gap: 4px; }
+.earlier-runs { padding-inline-start: 12px; display: flex; flex-direction: column; gap: 4px; }
+.earlier-toggle { align-self: flex-start; font-size: calc(12px * var(--fs)); color: var(--muted); }
+.earlier-list { gap: 4px; }
+
+/* Final collapsed sidebar rail rules (after all later .side-top / .pin-faces overrides). */
+@media (min-width: 981px) {
+  .app.collapsed { grid-template-columns: 64px minmax(0, 1fr); }
+  .app.collapsed .sidebar { padding: 12px 6px; overflow-x: hidden; align-items: center; gap: 10px; }
+  .app.collapsed .side-top { flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 0; min-height: auto; width: 100%; }
+  .app.collapsed .side-top .grow,
+  .app.collapsed .side-top .menu-trigger,
+  .app.collapsed .side-top .icon-btn:not(.sidebar-toggle),
+  .app.collapsed .pin-face-name,
+  .app.collapsed .persona-text,
+  .app.collapsed .persona-row .menu-trigger,
+  .app.collapsed .side-alert-x,
+  .app.collapsed .side-foot .user-chip { display: none; }
+  .app.collapsed .pin-faces { display: grid; grid-template-columns: 1fr; justify-items: center; gap: 6px; padding: 4px 0; border: 0; width: 100%; }
+  .app.collapsed .pin-face { width: 44px; height: 44px; padding: 0; justify-content: center; border-radius: 50%; }
+  .app.collapsed .pin-face-art { width: 34px; height: 34px; transform: none; display: inline-grid; place-items: center; }
+  .app.collapsed .pin-face-art .face { width: 34px !important; height: 34px !important; }
+  .app.collapsed .persona-list { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 4px 0; width: 100%; }
+  .app.collapsed .persona-list .persona-row { display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; padding: 0; border: 0; background: transparent; }
+  .app.collapsed .persona-open { position: relative; width: 44px; height: 44px; padding: 0; justify-content: center; border-radius: 50%; }
+  .app.collapsed .persona-open .unread-dot { position: absolute; top: 3px; inset-inline-end: 3px; margin: 0; }
+  .app.collapsed .side-foot { justify-content: center; align-items: center; padding: 6px 0 0; width: 100%; }
+}

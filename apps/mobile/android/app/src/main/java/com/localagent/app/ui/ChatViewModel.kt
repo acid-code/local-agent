@@ -761,7 +761,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val sessions = runCatching { client.listSessions() }.getOrDefault(_ui.value.sessions)
             val personas = runCatching { client.listAgents().filterNot { it.hidden } }.getOrDefault(_ui.value.personas)
-            _ui.update { it.copy(sessions = sessions, personas = personas) }
+            _ui.update { state ->
+                val updatedCurrent = state.currentSession?.let { cur -> sessions.firstOrNull { it.id == cur.id } ?: cur }
+                state.copy(sessions = sessions, personas = personas, currentSession = updatedCurrent)
+            }
         }
     }
 
