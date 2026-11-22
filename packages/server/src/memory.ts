@@ -24,6 +24,31 @@ export interface MemoryProbe {
   serverRss(): number;
   pidRss(pid: number): number;
   systemAvailable(): number;
+  /** GPU GTT pool (iGPU memory carved from system RAM). Null when there is no amdgpu GTT to read. */
+  gtt?(): { usedBytes: number; totalBytes: number } | null;
+  /** Models resident outside Ollama (llama-server), which count toward the resident-model cap. */
+  externalResident?(): number;
+}
+
+/** Headroom kept free in the GTT pool; overcommitting it froze the mini PC before. */
+export const gttHeadroomBytes = () => Math.max(0, Number(process.env.LA_GTT_HEADROOM_GIB ?? 2)) * GiB;
+/** Never more resident models than this (Ollama plus llama-server). A third model queues or falls back instead. */
+export const maxResidentModels = () => Math.max(1, Number(process.env.LA_MAX_RESIDENT_MODELS || 2));
+
+/** Sums mem_info_gtt_used/total over /sys/class/drm/card*: the amdgpu GTT pool. */
+export function readGtt(root = '/sys/class/drm'): { usedBytes: number; totalBytes: number } | null {
+  let usedBytes = 0;
+  let totalBytes = 0;
+  let names: string[] = [];
+  try { names = fs.readdirSync(root).filter((name) => /^card\d+$/.test(name)); } catch { return null; }
+  for (const name of names) {
+    try {
+      const total = Number(fs.readFileSync(path.join(root, name, 'device', 'mem_info_gtt_total'), 'utf8').trim());
+      const used = Number(fs.readFileSync(path.join(root, name, 'device', 'mem_info_gtt_used'), 'utf8').trim());
+      if (total > 0) { totalBytes += total; usedBytes += Math.max(0, used); }
+    } catch { /* not an amdgpu card */ }
+  }
+  return totalBytes > 0 ? { usedBytes, totalBytes } : null;
 }
 
 export interface BudgetConfig { budgetBytes: number; systemReserveBytes: number }
@@ -134,7 +159,8 @@ export class MemoryBudget {
     }
     const models = [...perModel.values()].reduce((sum, value) => sum + value, 0);
     const cfg = this.config();
-    return { usedBytes: server + models + images, server, models, images, loaded, budgetBytes: cfg.budgetBytes, systemAvailable: this.probe.systemAvailable(), active: this.active.size, waiting: this.queue.length };
+    const gtt = this.probe.gtt?.() ?? null;
+    return { usedBytes: server + models + images, server, models, images, loaded, budgetBytes: cfg.budgetBytes, systemAvailable: this.probe.systemAvailable(), active: this.active.size, waiting: this.queue.length, gtt, residentModels: this.residentNames(loaded).size + (this.probe.externalResident?.() ?? 0) };
   }
 
   /** What a request adds on top of current usage. A chat on a model already loaded with enough context adds nothing. */
@@ -146,9 +172,43 @@ export class MemoryBudget {
     return Math.max(0, req.bytes - have);
   }
 
-  private fits(extra: number, used: number, systemAvailable: number) {
+  private residentNames(loaded: LoadedInfo[]) {
+    const names = new Set(loaded.map((model) => model.name));
+    for (const job of this.active.values()) if (job.model) names.add(job.model);
+    return names;
+  }
+
+  /**
+   * Fits when the extra bytes fit the RAM budget and free RAM (minus the reserve); a model job must also fit the GTT
+   * pool minus headroom, and may not become a third resident model.
+   */
+  private fits(extra: number, used: number, systemAvailable: number, req?: JobRequest, loaded: LoadedInfo[] = this.lastLoaded) {
     const cfg = this.config();
-    return used + extra <= cfg.budgetBytes && extra <= Math.max(0, systemAvailable - cfg.systemReserveBytes);
+    if (used + extra > cfg.budgetBytes || extra > Math.max(0, systemAvailable - cfg.systemReserveBytes)) return false;
+    if (!req?.model) return true;
+    const resident = this.residentNames(loaded);
+    if (!resident.has(req.model) && resident.size + (this.probe.externalResident?.() ?? 0) >= maxResidentModels()) return false;
+    const gtt = this.probe.gtt?.();
+    if (gtt && extra > Math.max(0, gtt.totalBytes - gtt.usedBytes - gttHeadroomBytes())) return false;
+    return true;
+  }
+
+  /** Would this job start now (counting idle models that could be unloaded)? Used to prefer a loaded model over waiting. */
+  async fitsNow(req: JobRequest): Promise<boolean> {
+    const state = await this.usage();
+    if (this.queue.length) return false;
+    const extra = this.extraFor(req, state.loaded);
+    if (this.fits(extra, state.usedBytes, state.systemAvailable, req, state.loaded)) return true;
+    const busy = new Set([...this.active.values()].map((job) => job.model).filter(Boolean));
+    const idle = state.loaded.filter((model) => !busy.has(model.name) && model.name !== req.model);
+    const freed = idle.reduce((sum, model) => sum + model.sizeBytes, 0);
+    const remaining = state.loaded.filter((model) => !idle.includes(model));
+    const gtt = this.probe.gtt?.();
+    if (gtt && extra > Math.max(0, gtt.totalBytes - Math.max(0, gtt.usedBytes - freed) - gttHeadroomBytes())) return false;
+    const cfg = this.config();
+    if (state.usedBytes - freed + extra > cfg.budgetBytes || extra > Math.max(0, state.systemAvailable + freed - cfg.systemReserveBytes)) return false;
+    const resident = this.residentNames(remaining);
+    return resident.has(req.model ?? '') || resident.size + (this.probe.externalResident?.() ?? 0) < maxResidentModels();
   }
 
   // ----- Admission -----
@@ -201,7 +261,7 @@ export class MemoryBudget {
           let state = await this.usage();
           lastState = state;
           let extra = this.extraFor(head.req, state.loaded);
-          if (!this.fits(extra, state.usedBytes, state.systemAvailable)) {
+          if (!this.fits(extra, state.usedBytes, state.systemAvailable, head.req, state.loaded)) {
             // Free idle models first (loaded in Ollama, no running job uses them), largest first.
             const busy = new Set([...this.active.values()].map((job) => job.model).filter(Boolean));
             const idle = state.loaded.filter((model) => !busy.has(model.name) && model.name !== head.req.model).sort((a, b) => b.sizeBytes - a.sizeBytes);
@@ -210,10 +270,18 @@ export class MemoryBudget {
               state = await this.usage();
               lastState = state;
               extra = this.extraFor(head.req, state.loaded);
-              if (this.fits(extra, state.usedBytes, state.systemAvailable)) break;
+              if (this.fits(extra, state.usedBytes, state.systemAvailable, head.req, state.loaded)) break;
             }
           }
-          if (!this.fits(extra, state.usedBytes, state.systemAvailable)) break;
+          if (!this.fits(extra, state.usedBytes, state.systemAvailable, head.req, state.loaded)) {
+            // A job on a model that is already resident adds nothing, so it never waits behind a load that can't start.
+            for (const waiter of [...this.queue.slice(1)]) {
+              if (this.extraFor(waiter.req, state.loaded) > 0 || !waiter.req.model || !this.residentNames(state.loaded).has(waiter.req.model)) continue;
+              this.queue.splice(this.queue.indexOf(waiter), 1);
+              waiter.resolve(this.start(waiter));
+            }
+            break;
+          }
           this.queue.shift();
           head.resolve(this.start(head));
         }
@@ -355,6 +423,8 @@ export function systemProbe(fetchImpl: typeof fetch): MemoryProbe {
     serverRss: () => process.memoryUsage().rss,
     pidRss: (pid) => readKb(`/proc/${pid}/status`, 'VmRSS'),
     systemAvailable: readAvailableBytes,
+    gtt: () => readGtt(),
+    externalResident: () => Number(process.env.LA_EXTERNAL_RESIDENT_MODELS ?? 0) || 0,
   };
 }
 
@@ -368,6 +438,7 @@ export function budgetConfig(settings: { ramBudgetGiB?: number; ramSystemReserve
 export async function budgetReport(budget: MemoryBudget, cfg: BudgetConfig): Promise<{ ok: boolean; detail: string }> {
   const usage = await budget.usage();
   const queued = budget.snapshotQueue().length;
-  const detail = `Using ${gb(usage.usedBytes)} of ${gb(cfg.budgetBytes)} (models ${gb(usage.models)}, images ${gb(usage.images)}, server ${gb(usage.server)}); ${usage.active} running, ${queued} waiting; system free ${gb(usage.systemAvailable)}`;
+  const gttNote = usage.gtt ? `; GTT ${gb(usage.gtt.usedBytes)} of ${gb(usage.gtt.totalBytes)}` : '';
+  const detail = `Using ${gb(usage.usedBytes)} of ${gb(cfg.budgetBytes)} (models ${gb(usage.models)}, images ${gb(usage.images)}, server ${gb(usage.server)}); ${usage.active} running, ${queued} waiting; system free ${gb(usage.systemAvailable)}${gttNote}; ${usage.residentModels} resident model(s)`;
   return { ok: usage.usedBytes <= cfg.budgetBytes, detail };
 }

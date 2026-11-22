@@ -2444,6 +2444,24 @@ export class Engine {
       this.liveStreams.set(run.id, live);
       this.bus.publish({ type: 'status', runId: run.id, status: 'waiting', detail, waitInfo: info });
     };
+    // GTT/RAM admission: when this model would have to load and does not fit now, prefer a model that is already
+    // resident (a loaded Ollama model or llama-server) over queueing. Never a third resident model.
+    const firstBytes = await memory.estimateModel(model.apiName, numCtx);
+    if (firstBytes && !run.cursor.switched && !(await memory.fitsNow({ kind, label: model.name, model: model.apiName, bytes: firstBytes }))) {
+      const loaded = new Set((await memory.usage()).loaded.map((item) => item.name));
+      const resident = this.candidates(this.store.getSettings(), run.agentId).find((candidate) => {
+        if (!candidate.local || candidate.id === model.id) return false;
+        const row = this.store.getModel(candidate.id);
+        const provider = row ? this.store.getProvider(row.providerId) : null;
+        if (!row || !provider || isUncensoredProvider(provider)) return false;
+        return loaded.has(row.apiName) || isLlamaServerProvider(provider);
+      });
+      const row = resident ? this.store.getModel(resident.id) : null;
+      if (row) {
+        this.store.addLog('info', `${model.name} does not fit GTT/RAM now; using already-loaded ${row.name}.`, undefined, 'memory');
+        return { switchTo: row, reason: `Switched to ${row.name}: it is already loaded, and ${model.name} does not fit in memory right now.` };
+      }
+    }
     let last: unknown = null;
     for (const ctx of [...new Set([numCtx, Math.min(numCtx, 8192)])]) {
       const bytes = await memory.estimateModel(model.apiName, ctx);

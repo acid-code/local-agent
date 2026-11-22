@@ -1,5 +1,6 @@
 import { ensurePinned } from './pinned.js';
 import { isDiskFullError } from './resources.js';
+import { isLlamaServerProvider } from './coexist.js';
 import { MemoryBudget, budgetConfig, systemProbe, type MemoryProbe } from './memory.js';
 import path from 'node:path';
 import { ensureFilesTable } from './files.js';
@@ -65,6 +66,12 @@ export async function buildApp(options: {
   const engine = new Engine(store, bus, docker, vectors, vault, config.instanceId, options.fetchImpl ?? fetch, options.providerOverride);
   engine.libraryDir = config.dataDir;
   const memoryProbe = options.memoryProbe ?? (options.providerOverride || process.env.VITEST ? undefined : systemProbe(options.fetchImpl ?? fetch));
+  // llama-server keeps its model resident outside Ollama: one per distinct enabled llama-server address counts toward the cap.
+  if (memoryProbe && !options.memoryProbe) {
+    memoryProbe.externalResident = () => process.env.LA_EXTERNAL_RESIDENT_MODELS != null
+      ? Number(process.env.LA_EXTERNAL_RESIDENT_MODELS) || 0
+      : new Set(store.listProviders().filter((provider) => provider.enabled && isLlamaServerProvider(provider)).map((provider) => provider.baseUrl || provider.id)).size;
+  }
   engine.memory = memoryProbe ? new MemoryBudget(memoryProbe, () => budgetConfig(store.getSettings()), path.join(config.dataDir, 'memory-calibration.json')) : null;
   const triggers = new TriggerRuntime(store, engine, vault, bus);
   const mcp = new McpRuntime(store, docker, { secretsFor: (id) => vault.mcpEnv(id), cacheDir: path.join(config.dataDir, 'mcp-cache') });
