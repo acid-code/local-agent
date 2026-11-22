@@ -393,29 +393,20 @@ class LocalAgentClient(context: Context) {
         }.getOrNull()
     }
 
-    private fun parsePersona(obj: JSONObject) = Persona(
-        id = obj.getString("id"),
-        name = obj.optString("name", "Assistant"),
-        title = obj.optString("title", ""),
-        description = obj.optString("description", ""),
-        emoji = obj.optString("emoji", ""),
-        accent = obj.optString("accent", "#E4B56A"),
-        pinned = obj.optBoolean("pinned", false),
-        hidden = obj.optBoolean("hidden", false),
-        unread = obj.optInt("unread", 0),
-        voiceReply = obj.optBoolean("voiceReply", false),
-        voiceName = obj.optString("voiceName", ""),
-        language = obj.optString("language", "auto"),
-    )
+    private fun parsePersona(obj: JSONObject) = AgentJson.persona(obj)
 
-    private fun parseSession(obj: JSONObject) = ChatSession(
-        id = obj.getString("id"),
-        agentId = obj.optString("agentId", "").takeIf { it.isNotBlank() },
-        title = obj.optString("title", "New chat"),
-        modelPin = obj.optString("modelPin", "").takeIf { it.isNotBlank() && it != "null" },
-        mode = obj.optString("mode", "chat"),
-        updatedAt = obj.optString("updatedAt", ""),
-    )
+    private fun parseSession(obj: JSONObject) = AgentJson.session(obj)
+
+    /** Uploaded persona face (`/api/agents/{id}/avatar`), or null when none is stored. */
+    suspend fun loadAvatarBytes(agentId: String): ByteArray? = withContext(Dispatchers.IO) {
+        runCatching {
+            val req = Request.Builder().url(url("/api/agents/$agentId/avatar")).build()
+            http.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@use null
+                resp.body?.bytes()?.takeIf { it.isNotEmpty() }
+            }
+        }.getOrNull()
+    }
 
     fun parseMessage(obj: JSONObject) = ChatMessage(
         id = obj.optString("id", "msg"),

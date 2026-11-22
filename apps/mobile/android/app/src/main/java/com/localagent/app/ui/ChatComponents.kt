@@ -13,6 +13,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -26,30 +27,16 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.localagent.app.model.*
-
-@Composable
-fun PersonaAvatar(persona: Persona, sizeDp: Int) {
-    val tint = hexToColor(persona.accent)
-    Box(
-        modifier = Modifier
-            .size(sizeDp.dp)
-            .clip(CircleShape)
-            .background(tint.copy(alpha = 0.22f))
-            .border(1.5.dp, tint, CircleShape),
-        contentAlignment = Alignment.Center,
-    ) {
-        val glyph = persona.emoji.ifBlank { persona.name.take(1).uppercase() }
-        Text(glyph, fontSize = (sizeDp * 0.44f).sp, fontWeight = FontWeight.Bold, color = tint)
-    }
-}
 
 @Composable
 fun ContextRingChip(breakdown: ContextBreakdown, onClick: () -> Unit) {
@@ -279,47 +266,49 @@ fun ComposerBar(
     onStop: () -> Unit,
     onVoice: () -> Unit,
 ) {
-    Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxWidth().navigationBarsPadding()) {
+    val scheme = MaterialTheme.colorScheme
+    Surface(color = scheme.background, modifier = Modifier.fillMaxWidth().navigationBarsPadding()) {
         Surface(
-            color = MaterialTheme.colorScheme.surface,
-            shape = RoundedCornerShape(26.dp),
-            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-            modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 10.dp),
+            color = scheme.surface,
+            shape = RoundedCornerShape(22.dp),
+            border = androidx.compose.foundation.BorderStroke(1.dp, scheme.outline),
+            modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 8.dp),
         ) {
             Row(
-                Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+                Modifier.padding(start = 2.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
                 verticalAlignment = Alignment.Bottom,
             ) {
-                IconButton(onClick = onVoice, modifier = Modifier.size(48.dp)) {
-                    Icon(Icons.Default.Mic, contentDescription = "Voice input", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                IconButton(onClick = onVoice, modifier = Modifier.size(44.dp)) {
+                    Icon(Icons.Default.Mic, contentDescription = "Voice input", tint = scheme.onSurfaceVariant)
                 }
-                TextField(
+                BasicTextField(
                     value = draft,
                     onValueChange = onDraftChange,
-                    placeholder = { Text("Message") },
                     maxLines = 6,
-                    textStyle = MaterialTheme.typography.bodyLarge,
-                    colors = TextFieldDefaults.colors(
-                        focusedContainerColor = Color.Transparent,
-                        unfocusedContainerColor = Color.Transparent,
-                        disabledContainerColor = Color.Transparent,
-                        focusedIndicatorColor = Color.Transparent,
-                        unfocusedIndicatorColor = Color.Transparent,
-                    ),
-                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                    textStyle = MaterialTheme.typography.bodyLarge.merge(TextStyle(color = scheme.onSurface)),
+                    cursorBrush = SolidColor(scheme.tertiary),
+                    modifier = Modifier.weight(1f).heightIn(min = 44.dp).padding(vertical = 10.dp, horizontal = 4.dp),
+                    decorationBox = { inner ->
+                        Box(contentAlignment = Alignment.CenterStart) {
+                            if (draft.isEmpty()) {
+                                Text("Message", style = MaterialTheme.typography.bodyLarge, color = scheme.onSurfaceVariant)
+                            }
+                            inner()
+                        }
+                    },
                 )
                 if (isStreaming) {
                     FilledIconButton(
                         onClick = onStop,
-                        modifier = Modifier.size(48.dp),
-                        colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.error),
-                    ) { Icon(Icons.Default.Stop, contentDescription = "Stop") }
+                        modifier = Modifier.size(40.dp),
+                        colors = IconButtonDefaults.filledIconButtonColors(containerColor = scheme.error),
+                    ) { Icon(Icons.Default.Stop, contentDescription = "Stop", modifier = Modifier.size(18.dp)) }
                 } else {
                     FilledIconButton(
-                        onClick = onSend, enabled = draft.isNotBlank(), modifier = Modifier.size(48.dp),
-                        colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.tertiary, contentColor = MaterialTheme.colorScheme.onTertiary),
+                        onClick = onSend, enabled = draft.isNotBlank(), modifier = Modifier.size(40.dp),
+                        colors = IconButtonDefaults.filledIconButtonColors(containerColor = scheme.tertiary, contentColor = scheme.onTertiary),
                     ) {
-                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", modifier = Modifier.size(18.dp))
                     }
                 }
             }
