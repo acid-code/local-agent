@@ -24,6 +24,24 @@ describe('risk tiers', () => {
     expect(riskOf('github__list_issues', {}, null).tier).toBe('safe');
     expect(riskOf('propose_skill', {}, 'Save skill').tier).toBe('high');
   });
+  it('does not treat /dev/null or 2>&1 redirects as file writes', () => {
+    const readOnly = [
+      'ls node_modules 2>/dev/null | wc -l; ls node_modules/.bin 2>/dev/null | head',
+      'ls -la; echo ---; ls node_modules 2>/dev/null | head -5; echo ---; git log --oneline -5 2>/dev/null',
+      'git diff --stat 2>&1 | tail -3',
+      'git log -3 &>/dev/null',
+      'cat package.json >/dev/null && echo ok',
+      'ls 2>&1 >/dev/null',
+    ];
+    for (const command of readOnly) {
+      const result = riskOf('shell', { command }, null);
+      expect(result.tier, command).toBe('low');
+    }
+    expect(riskOf('shell', { command: 'echo hi > notes.txt' }, null).tier).toBe('medium');
+    expect(riskOf('shell', { command: 'ls 2>/dev/null > out.txt' }, null).tier).toBe('medium');
+    expect(riskOf('shell', { command: 'rm -rf build 2>/dev/null' }, null).tier).toBe('medium');
+    expect(riskOf('shell', { command: 'ls > /dev/sda' }, null).tier).toBe('medium');
+  });
   it('asks per mode, and high always asks', () => {
     expect(needsApproval('low', 'Write a', 'cautious')).toBe(true);
     expect(needsApproval('low', 'Write a', 'balanced')).toBe(false);

@@ -416,8 +416,29 @@ class LocalAgentClient(context: Context) {
         thinking = obj.optString("thinking", "").takeIf { it.isNotBlank() && it != "null" },
         routingNote = obj.optString("routingNote", "").takeIf { it.isNotBlank() && it != "null" },
         toolName = obj.optString("toolName", "").takeIf { it.isNotBlank() && it != "null" },
+        toolCallId = obj.optString("toolCallId", "").takeIf { it.isNotBlank() && it != "null" },
+        runId = obj.optString("runId", "").takeIf { it.isNotBlank() && it != "null" },
+        toolCalls = parseToolCalls(obj.opt("toolCalls")),
         createdAt = obj.optString("createdAt", ""),
     )
+
+    private fun parseToolCalls(raw: Any?): List<ToolCall> {
+        val arr = raw as? JSONArray ?: return emptyList()
+        return List(arr.length()) { i ->
+            val o = arr.optJSONObject(i) ?: return@List ToolCall(name = "tool")
+            val args = o.opt("arguments")
+            val argStr = when (args) {
+                null, JSONObject.NULL -> null
+                is JSONObject -> args.toString()
+                else -> args.toString()
+            }
+            ToolCall(
+                id = o.optString("id", "").takeIf { it.isNotBlank() && it != "null" },
+                name = o.optString("name", "tool"),
+                arguments = argStr,
+            )
+        }
+    }
 
     fun parseBreakdown(obj: JSONObject?) = obj?.let {
         ContextBreakdown(

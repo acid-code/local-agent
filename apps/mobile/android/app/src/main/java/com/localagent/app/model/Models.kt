@@ -27,6 +27,12 @@ data class ChatSession(
     val summary: String = "",
 )
 
+data class ToolCall(
+    val id: String? = null,
+    val name: String,
+    val arguments: String? = null,
+)
+
 data class ChatMessage(
     val id: String,
     val role: String,
@@ -35,6 +41,9 @@ data class ChatMessage(
     val thinking: String? = null,
     val routingNote: String? = null,
     val toolName: String? = null,
+    val toolCallId: String? = null,
+    val runId: String? = null,
+    val toolCalls: List<ToolCall> = emptyList(),
     val createdAt: String = "",
 )
 
@@ -73,6 +82,7 @@ data class ApprovalItem(
     val sessionTitle: String? = null,
     val agentName: String? = null,
     val createdAt: String = "",
+    val toolCallId: String = "",
 )
 
 data class LiveStreamSnapshot(

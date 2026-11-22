@@ -35,9 +35,14 @@ const HARMLESS_REDIRECTS = /(?:\d|&)?>{1,2}\s*\/dev\/null\b|\b\d>&\d\b/g;
 
 export type CommandAssessment = 'ok' | 'mutating' | 'blocked';
 
+/** Drop 2>/dev/null, >/dev/null, &>/dev/null and 2>&1 so they are not treated as file writes. */
+export function withoutHarmlessRedirects(command: string): string {
+  return command.replace(HARMLESS_REDIRECTS, ' ');
+}
+
 export function assessCommand(command: string): CommandAssessment {
   if (BLOCKED.some((pattern) => pattern.test(command))) return 'blocked';
-  const cleaned = command.replace(HARMLESS_REDIRECTS, ' ');
+  const cleaned = withoutHarmlessRedirects(command);
   if (MUTATING.some((pattern) => pattern.test(cleaned))) return 'mutating';
   return 'ok';
 }
