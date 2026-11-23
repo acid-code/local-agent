@@ -127,18 +127,19 @@ function checkAllowedUrl(url: string, allowPrivate = process.env.LA_BROWSER_ALLO
 }
 
 /** Default CDP driver executing inside `la-browser` against 127.0.0.1:9222 (no host ports exposed). */
-function dockerCdpDriver(docker: DockerCtl): CdpDriver {
+function dockerCdpDriver(docker: DockerCtl, dataDir: string): CdpDriver {
   return {
     async runTab({ profileDir, url, actions, screenshot }) {
       const personaFolder = path.basename(profileDir);
-      const payload = Buffer.from(JSON.stringify({ url, actions, screenshot, profile: `/profiles/${personaFolder}` })).toString('base64');
+      const shotFile = screenshot ? `.shot-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.png` : null;
+      const payload = Buffer.from(JSON.stringify({ url, actions, shotPath: shotFile ? `/profiles/${shotFile}` : null, profile: `/profiles/${personaFolder}` })).toString('base64');
       const script = `
 const { chromium } = require('playwright');
 (async () => {
   const cfg = JSON.parse(Buffer.from(process.env.LA_BROWSE_REQ, 'base64').toString('utf8'));
   const ctx = await chromium.launchPersistentContext(cfg.profile, {
     headless: false,
-    args: ['--no-sandbox', '--disable-dev-shm-usage'],
+    args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--disable-extensions', '--disable-background-networking', '--no-first-run'],
     viewport: { width: 1280, height: 800 },
   });
   const page = await ctx.newPage();
@@ -163,10 +164,10 @@ const { chromium } = require('playwright');
     }
     const title = await page.title().catch(() => '');
     const href = page.url();
-    const text = (await page.evaluate(() => document.body?.innerText || '').catch(() => '')).slice(0, 12000);
+    const text = (await page.evaluate(() => document.body?.innerText || '').catch(() => '')).slice(0, 10000);
     const loginDetected = await page.locator('input[type="password"]').count().then((n) => n > 0).catch(() => false);
-    const png = cfg.screenshot ? (await page.screenshot({ type: 'png' })).toString('base64') : null;
-    process.stdout.write(JSON.stringify({ title, href, text, elements: [], log, png, loginDetected }));
+    if (cfg.shotPath) await page.screenshot({ path: cfg.shotPath, type: 'png' }).catch(() => {});
+    process.stdout.write(JSON.stringify({ title, href, text, elements: [], log, loginDetected }));
   } finally {
     await page.close().catch(() => {});
     await ctx.close().catch(() => {});
@@ -179,15 +180,21 @@ const { chromium } = require('playwright');
         '/profiles',
         45_000,
       );
+      let png: Buffer | null = null;
+      if (shotFile) {
+        const hostShot = path.resolve(dataDir, 'browser', shotFile);
+        try { png = fs.readFileSync(hostShot); } catch { png = null; }
+        try { fs.unlinkSync(hostShot); } catch { /* ignore */ }
+      }
       if (res.code !== 0) throw new Error(res.output.trim() || `Browser action failed (exit ${res.code}).`);
-      const parsed = JSON.parse(res.output) as { title: string; href: string; text: string; elements: string[]; log: string[]; png: string | null; loginDetected?: boolean };
+      const parsed = JSON.parse(res.output) as { title: string; href: string; text: string; elements: string[]; log: string[]; loginDetected?: boolean };
       return {
         title: parsed.title || '',
         href: parsed.href || url,
         text: parsed.text || '',
         elements: parsed.elements || [],
         log: parsed.log || [],
-        png: parsed.png ? Buffer.from(parsed.png, 'base64') : null,
+        png,
         loginDetected: Boolean(parsed.loginDetected),
       };
     },
@@ -211,7 +218,7 @@ export class ManagedBrowser {
     private readonly hostPath: (p: string) => string = (p) => p,
     driver?: CdpDriver,
   ) {
-    this.driver = driver ?? dockerCdpDriver(docker);
+    this.driver = driver ?? dockerCdpDriver(docker, dataDir);
   }
 
   hasLease(): boolean {
@@ -248,8 +255,8 @@ export class ManagedBrowser {
         network: process.env.LA_COMPOSE_PROJECT ? `${process.env.LA_COMPOSE_PROJECT}_default` : null,
         HostConfig: {
           Memory: BROWSER_MEMORY_BYTES,
-          NanoCpus: 2_000_000_000,
-          PidsLimit: 256,
+          NanoCpus: 1_500_000_000,
+          PidsLimit: 200,
           CapDrop: ['ALL'],
           SecurityOpt: ['no-new-privileges:true'],
           Binds: [`${this.hostPath(profilesRoot)}:/profiles`],
