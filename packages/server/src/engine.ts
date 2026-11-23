@@ -1782,8 +1782,10 @@ export class Engine {
     const notesTokens = pinnedNotes.reduce((sum, note) => sum + estimateTokens(note.text, tok) + 8, 0);
     const turnContextTokens = turnContext ? estimateTokens(turnContext, tok) + 16 : 0;
     const runMessageIds = messages.filter((message) => message.runId === run.id || message.id === user?.id).map((message) => message.id);
+    const fullBudget = run.cursor.budgetOverride || budget;
+    const toolDeduction = toolSchemaTokens <= fullBudget * 0.35 ? toolSchemaTokens : 0;
     const plan = planContext({
-      strategy, contextWindow: model.contextWindow, practicalBudget: (run.cursor.budgetOverride || budget) - turnContextTokens - notesTokens - (toolSchemaTokens <= (run.cursor.budgetOverride || budget) * 0.35 ? toolSchemaTokens : 0), outputReserve: settings.outputReserveTokens,
+      strategy, contextWindow: model.contextWindow, practicalBudget: fullBudget - turnContextTokens - notesTokens - toolDeduction, outputReserve: settings.outputReserveTokens,
       system, optional: cacheFriendly ? [] : optionalParts,
       pinned: notes.filter((note) => note.pinned).map((note) => note.content),
       summaries, retrieved, tokenizer: tok,
@@ -1834,8 +1836,17 @@ export class Engine {
         output: cutNote, toolCallId: null, turn: run.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now(),
       });
     }
-    this.lastContext.set(run.sessionId, plan.breakdown);
-    this.bus.publish({ type: 'context', runId: run.id, used: plan.breakdown.used, budget: plan.breakdown.budget, breakdown: plan.breakdown });
+    // planContext receives practicalBudget minus tool schemas/notes so it reserves room for them when packing messages,
+    // while breakdown.used ALREADY includes toolSchemaTokens in personaAndTools. Restore the full usable budget for the
+    // UI breakdown so tool schemas are never double-counted (dropping the denominator from 31k -> 23k mid-run).
+    const fullUsableBudget = Math.max(plan.breakdown.budget, Math.min(model.contextWindow, fullBudget) - settings.outputReserveTokens);
+    const uiBreakdown = {
+      ...plan.breakdown,
+      budget: fullUsableBudget,
+      free: Math.max(0, fullUsableBudget - plan.breakdown.used),
+    };
+    this.lastContext.set(run.sessionId, uiBreakdown);
+    this.bus.publish({ type: 'context', runId: run.id, used: uiBreakdown.used, budget: uiBreakdown.budget, breakdown: uiBreakdown });
     const recent = new Map(messages.map((message) => [message.id, message]));
     const runIds = new Set(runMessageIds);
     const chat: ChatMessage[] = [{ role: 'system', content: plan.preamble }];
