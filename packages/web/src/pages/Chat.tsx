@@ -111,6 +111,7 @@ export function Chat() {
   const [rail, setRail] = useState(false);
   const [trace, setTrace] = useState(false);
   const box = useRef<HTMLDivElement>(null);
+  const composerFormRef = useRef<HTMLFormElement>(null);
   const [thinking, setThinking] = useState('');
   const [runError, setRunError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
@@ -1334,8 +1335,8 @@ export function Chat() {
               } catch (error) { toast(errorText(error), 'error'); }
             }}
           />
-          {picker && <MentionPicker query={picker.query} setQuery={(query) => setPicker({ query })} defaultRoot={agentRoot} sessionId={current} onPick={addMention} onClose={() => { setPicker(null); input.current?.focus(); }} />}
-          <form onSubmit={send}>
+          {picker && <MentionPicker query={picker.query} setQuery={(query) => setPicker({ query })} defaultRoot={agentRoot} sessionId={current} anchorRef={composerFormRef} onPick={addMention} onClose={() => { setPicker(null); input.current?.focus(); }} />}
+          <form ref={composerFormRef} onSubmit={send}>
             {(quotes.length > 0 || mentions.length > 0) && (
               <div className="chips" aria-label={t('Attached references')}>
                 {quotes.map((q) => (

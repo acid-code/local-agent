@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react';
+import { createPortal } from 'react-dom';
 import { AtSign, ChevronLeft, File, FileUp, Folder, Paperclip, X } from 'lucide-react';
 import { api } from '../lib/api';
 import { humanSize, uploadFile, type FileMeta } from '../lib/files';
@@ -28,8 +29,9 @@ export function mapPastedPath(value: string, roots: { id: string; path: string }
   return { root: fallbackRoot, path: clean.replace(/^\.?\/+/, '') };
 }
 
-export function MentionPicker({ query, setQuery, defaultRoot, sessionId, onPick, onClose }: {
+export function MentionPicker({ query, setQuery, defaultRoot, sessionId, anchorRef, onPick, onClose }: {
   query: string; setQuery: (value: string) => void; defaultRoot: string | null; sessionId: string | null;
+  anchorRef?: RefObject<HTMLElement | null>;
   onPick: (pick: MentionPick) => void; onClose: () => void;
 }) {
   const [roots, setRoots] = useState<GitRootInfo[]>([]);
@@ -39,10 +41,41 @@ export function MentionPicker({ query, setQuery, defaultRoot, sessionId, onPick,
   const [files, setFiles] = useState<FileMeta[]>([]);
   const [busy, setBusy] = useState(false);
   const [active, setActive] = useState(0);
+  const [pos, setPos] = useState<CSSProperties | undefined>(undefined);
   const upload = useRef<HTMLInputElement>(null);
   const input = useRef<HTMLInputElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => { input.current?.focus(); }, []);
+  useLayoutEffect(() => {
+    const place = () => {
+      const el = anchorRef?.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const width = Math.min(640, Math.max(280, r.width), window.innerWidth - 16);
+      const left = Math.max(8, Math.min(r.left + (r.width - width) / 2, window.innerWidth - width - 8));
+      const bottom = Math.max(8, window.innerHeight - r.top + 8);
+      setPos({ left, bottom, width });
+    };
+    place();
+    window.addEventListener('resize', place);
+    window.addEventListener('scroll', place, true);
+    return () => {
+      window.removeEventListener('resize', place);
+      window.removeEventListener('scroll', place, true);
+    };
+  }, [anchorRef]);
+  useEffect(() => {
+    const onDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (panelRef.current?.contains(target)) return;
+      if ((target as Element).closest?.('.composer-plus')) return;
+      onClose();
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [onClose]);
   useEffect(() => {
     api<{ roots: GitRootInfo[] }>('/api/git/roots').then((data) => {
       setRoots(data.roots);
@@ -94,8 +127,8 @@ export function MentionPicker({ query, setQuery, defaultRoot, sessionId, onPick,
     } catch (error) { toast(errorText(error), 'error'); } finally { setBusy(false); }
   }
 
-  return (
-    <div className="mention-picker" role="dialog" aria-label={t('Reference a file or folder')} onKeyDown={onKey}>
+  const panel = (
+    <div ref={panelRef} className={anchorRef ? 'mention-picker portaled' : 'mention-picker'} style={pos} role="dialog" aria-label={t('Reference a file or folder')} onKeyDown={onKey}>
       <div className="pick-head">
         <AtSign size={16} />
         <input ref={input} value={query} onChange={(event) => { setQuery(event.target.value); setActive(0); }} placeholder={t('file, folder/, path#L10-20, or paste a full path')} aria-label={t('Search files')} />
@@ -132,4 +165,5 @@ export function MentionPicker({ query, setQuery, defaultRoot, sessionId, onPick,
       </div>
     </div>
   );
+  return anchorRef ? createPortal(panel, document.body) : panel;
 }

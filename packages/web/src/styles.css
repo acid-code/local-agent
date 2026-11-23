@@ -506,6 +506,7 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 .chip-open { display: inline-flex; align-items: center; gap: 6px; min-width: 0; background: transparent; border: 0; color: var(--sky); padding-block: 0 0; padding-inline: 6px 0; font-family: var(--mono); font-size: calc(12px * var(--fs)); }
 .composer { position: relative; }
 .mention-picker { position: absolute; inset-inline-start: max(16px, 6%); inset-inline-end: max(16px, 6%); bottom: calc(100% - 4px); z-index: 20; max-width: 640px; margin: 0 auto; background: var(--bg-2); border: 1px solid var(--line-strong); border-radius: calc(16px * var(--round)); box-shadow: var(--shadow); display: flex; flex-direction: column; max-height: min(420px, 55dvh); overflow: hidden; }
+.mention-picker.portaled { position: fixed; inset-inline-start: auto; inset-inline-end: auto; bottom: auto; margin: 0; z-index: 125; }
 .pick-head { display: flex; align-items: center; gap: 8px; padding-block: 6px 6px; padding-inline: 12px 6px; border-bottom: 1px solid var(--line); color: var(--sky); }
 .pick-head input { flex: 1; min-width: 0; background: transparent; border: 0; outline: none; padding: 8px 0; font-size: calc(15px * var(--fs)); color: var(--text); }
 .pick-body { overflow: auto; padding: 6px; display: flex; flex-direction: column; gap: 1px; }
@@ -731,7 +732,7 @@ input[type="range"], input[type="checkbox"], input[type="radio"], progress { acc
 
 /* Menus */
 .menu-panel {
-  position: fixed; z-index: 80; min-width: 200px; max-width: min(320px, calc(100vw - 16px)); padding: 6px;
+  position: fixed; z-index: 125; min-width: 200px; max-width: min(320px, calc(100vw - 16px)); padding: 6px;
   background: var(--bg-2); border: 1px solid var(--line-strong); border-radius: calc(12px * var(--round)); box-shadow: var(--shadow);
   animation: menu-in .12s ease-out;
 }
