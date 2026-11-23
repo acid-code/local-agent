@@ -866,7 +866,7 @@ export class Engine {
             finalSynthesis: true,
             recovery: {
               rounds: current.cursor.recovery?.rounds ?? 0,
-              note: 'You have reached the tool-call limit. Do not call any more tools. Synthesize everything you gathered so far into a clear, definitive answer for the user now.',
+              note: 'You have reached the step limit for this run. Do NOT call any more tools. Write a clear final response for the user now covering: (1) everything you found or completed so far, (2) anything still unfinished, and (3) a concrete plan / next steps for the next run.',
             },
           },
         })!;
@@ -1185,11 +1185,12 @@ export class Engine {
     text = split.answer;
     reasoningText = [reasoningText, split.reasoning].filter(Boolean).join('\n');
     // Fallback parser for raw Qwen3/XML <tool_call> blocks when llama-server's peg-native parser misses whitespace variants.
+    // On tool-free / finalSynthesis turns, strip leaked <tool_call> markup instead of executing more tools.
     if (!toolCalls?.length && /<tool_call>\s*(?:<function=|\{)/i.test(text)) {
       const recovered = extractInlineToolCalls(text);
       if (recovered.calls.length) {
-        toolCalls = recovered.calls;
         text = recovered.text;
+        if (!current.cursor.noTools) toolCalls = recovered.calls;
       }
     }
     let emptyAnswerFailed = false;
@@ -1519,7 +1520,10 @@ export class Engine {
     }
     const latest = this.store.getRun(run.id)!;
     const turn = latest.cursor.turn + 1;
-    let next: RunCursor = { ...latest.cursor, phase: turn >= this.stepCap(latest.cursor, this.store.getSession(run.sessionId)?.mode) ? 'summarize' : 'model', turn, toolCalls: undefined, completedToolIds: [], approvalId: undefined };
+    const cap = this.stepCap(latest.cursor, this.store.getSession(run.sessionId)?.mode);
+    // When the step cap is reached, route back to stepModel once so finalSynthesis produces a tool-free answer + plan forward.
+    const nextPhase: RunCursor['phase'] = turn >= cap && latest.cursor.finalSynthesis ? 'summarize' : 'model';
+    let next: RunCursor = { ...latest.cursor, phase: nextPhase, turn, toolCalls: undefined, completedToolIds: [], approvalId: undefined };
     if (handoff) {
       const approval = this.store.createApproval({ runId: run.id, toolCallId: 'plan', toolName: 'plan', args: { stage: 'plan' }, reason: 'Start coding from this plan. Edit the plan first if you want to change it.' });
       const waiting = { ...latest.cursor, phase: 'tools' as const, stage: 'plan' as const, approvalId: approval.id };
@@ -1542,6 +1546,30 @@ export class Engine {
     if (agent && run.cursor.stage === 'implement') {
       const labels = turnRoots(this.store, run, this.libraryDir).map((root) => root.label);
       for (const label of labels) addProjectNote(this.store, { label, agentId: agent.id, kind: 'change', body: `${agent.name} finished a change on ${label}.` });
+    }
+    // Safety net: never finish a tool-heavy run silently without a visible assistant reply or next steps.
+    const runMessages = this.store.listMessages(run.sessionId).filter((m) => m.runId === run.id);
+    const lastRunMsg = runMessages[runMessages.length - 1];
+    const hasFinalAnswer = Boolean(lastRunMsg && lastRunMsg.role === 'assistant' && !(Array.isArray(lastRunMsg.toolCalls) && lastRunMsg.toolCalls.length) && lastRunMsg.content.trim());
+    if (!hasFinalAnswer && !run.cursor.commandAck && !run.cursor.imagePrompt && agent) {
+      const toolSteps = this.store.listSteps(run.id).filter((s) => s.kind === 'tool');
+      if (toolSteps.length) {
+        const names = [...new Set(toolSteps.map((s) => s.name))].slice(0, 6).join(', ');
+        const fallback = this.store.insertMessage({
+          sessionId: run.sessionId,
+          role: 'assistant',
+          content: `Reached the step limit after ${toolSteps.length} tool steps (${names}) without a final summary.\n\n**Next step:** Reply **"continue"** to pick up right where I left off and synthesize the results.`,
+          toolCalls: null,
+          agentId: agent.id,
+          runId: run.id,
+          toolCallId: null,
+          toolName: null,
+          imageUrl: null,
+          routingNote: null,
+          thinking: null,
+        });
+        this.bus.publish({ type: 'message', runId: run.id, message: fallback });
+      }
     }
     const cursor = { ...this.store.getRun(run.id)!.cursor, phase: 'done' as const };
     this.store.updateRun(run.id, { cursor, status: 'completed', endedAt: now() });
