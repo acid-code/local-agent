@@ -1565,8 +1565,15 @@ export class Engine {
     const needsTools = likelyNeedsTools(text, { kb: this.hasKnowledge(run.agentId), code: session?.mode === 'code' || Boolean(run.cursor.stage) });
     const capable = needsTools ? models.filter((model) => !unsupported.has(model.apiName) && !unsupported.has(model.name)) : models;
     const pool = capable.length ? capable : models;
+    const agent = this.store.getAgent(run.agentId);
+    const activeTools = agent ? this.tools(agent, session?.mode || 'chat', undefined, undefined, false) : [];
+    const toolTokens = activeTools.length ? estimateTokens(JSON.stringify(activeTools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }))), 'approx') : 0;
+    const sysTokens = agent ? estimateTokens(agent.systemPrompt || '', 'approx') : 0;
+    const histTokens = this.store.listMessages(run.sessionId).slice(-20).reduce((sum, m) => sum + estimateTokens(m.content || '', 'approx'), 0);
+    const estimatedTokens = estimateTokens(text, 'approx') + sysTokens + toolTokens + histTokens;
     const auto = decideAuto({
       text, stage: run.cursor.stage, failures: this.localFailureCount(run.agentId), map: settings.autoModels, models: pool,
+      estimatedTokens,
       pinId: session?.modelPin || run.cursor.messageModelId || null,
       residentLarge: [...new Set([...this.residentLarge, ...this.heldLarge.values()])],
       hebrew: this.replyLang(run.agentId, text) === 'he',
