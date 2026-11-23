@@ -12,7 +12,7 @@ export interface SharedRepo {
   remote: string | null;
 }
 
-const LABEL = /^[a-z][a-z0-9-]{0,31}$/;
+const LABEL = /^[a-z0-9][a-z0-9._-]{0,47}$/;
 const CHANGE = /\b(change|edit|fix|implement|add|remove|refactor|commit|push|pull|patch|update|bug|feature|wire|rename|delete|rewrite)\b/i;
 const LOCK_MS = 3 * 60 * 1000;
 

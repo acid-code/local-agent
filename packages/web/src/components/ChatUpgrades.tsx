@@ -308,6 +308,8 @@ interface LiveLlmTelemetry {
     server: string;
     isProcessing: boolean;
     isPrefilling: boolean;
+    isGenerating?: boolean;
+    nDecoded?: number;
     nCtx: number;
     promptTotal: number;
     promptProcessed: number;
@@ -372,15 +374,15 @@ function ModelLiveViz({ modelName, telemetry, live, tps }: { modelName: string; 
       {slot && total > 0 && (
         <div className="llm-viz-sec">
           <div className="llm-viz-head">
-            <span>{slot.isPrefilling ? `Prefill ${procPct}%` : 'Prompt ready'}</span>
+            <span>{slot.isPrefilling && !slot.isGenerating ? `Prefill ${procPct}%` : slot.isGenerating ? `Generating${slot.nDecoded ? ` · ${slot.nDecoded} tok` : ''}` : 'Prompt ready'}</span>
             <span className="mono faint">
-              {slot.promptProcessed.toLocaleString()} / {total.toLocaleString()} tok
+              {(slot.isPrefilling && !slot.isGenerating ? slot.promptProcessed : total).toLocaleString()} / {total.toLocaleString()} tok
               {slot.cacheHitPct != null ? ` · ${slot.cacheHitPct}% cached` : ''}
             </span>
           </div>
           <div className="llm-bar">
-            <span className="llm-bar-cached" style={{ width: `${Math.min(procPct, cachedPct)}%` }} />
-            <span className="llm-bar-new" style={{ width: `${Math.max(0, procPct - cachedPct)}%` }} />
+            <span className="llm-bar-cached" style={{ width: `${Math.min(slot.isPrefilling && !slot.isGenerating ? procPct : 100, cachedPct)}%` }} />
+            <span className="llm-bar-new" style={{ width: `${Math.max(0, (slot.isPrefilling && !slot.isGenerating ? procPct : 100) - cachedPct)}%` }} />
           </div>
         </div>
       )}
@@ -476,13 +478,15 @@ export function DecisionTimeline({
   if (!visible.length) return null;
 
   const toolCount = visible.filter((s) => s.kind === 'tool').length;
-  const activeStep = visible.find((s) => s.status === 'running');
+  const activeStep = [...visible].reverse().find((s) => s.status === 'running');
+  const activeModelStepId = [...visible].reverse().find((s) => s.kind === 'model' && s.status === 'running')?.id ?? null;
   const completedModelSteps = visible.filter((s) => s.kind === 'model' && s.tokensOut && s.latencyMs && s.latencyMs > 0);
   const totalOut = completedModelSteps.reduce((acc, s) => acc + (s.tokensOut || 0), 0);
   const totalSec = completedModelSteps.reduce((acc, s) => acc + ((s.latencyMs || 0) / 1000), 0);
   const avgTps = totalOut > 0 && totalSec > 0 ? Math.round((totalOut / totalSec) * 10) / 10 : null;
   const shownTps = live ? (liveTokPerSec ?? avgTps) : avgTps;
-  const prefillPct = live && telemetry?.slot?.isPrefilling ? telemetry.slot.prefillPct : null;
+  const isActivelyStreaming = Boolean(liveTokPerSec && liveTokPerSec > 0) || Boolean(telemetry?.slot?.isGenerating);
+  const prefillPct = live && activeModelStepId && !isActivelyStreaming && telemetry?.slot?.isPrefilling ? telemetry.slot.prefillPct : null;
 
   return (
     <div className={`decision-trace${docked ? ' docked' : ''}${live ? ' live' : ''}`}>
@@ -516,7 +520,7 @@ export function DecisionTimeline({
           {visible.map((step) => {
             const isStepOpen = expandedStep === step.id;
             const icon = step.kind === 'tool' ? (step.name === 'shell' ? <Terminal size={13} /> : <Wrench size={13} />) : <Sparkles size={13} />;
-            const isLiveModel = step.kind === 'model' && step.status === 'running';
+            const isLiveModel = live && step.id === activeModelStepId;
             const summary = step.kind === 'routing'
               ? String((step.output as { reason?: string } | null)?.reason || step.name)
               : step.kind === 'model'

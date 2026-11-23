@@ -1757,6 +1757,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
         const slots = await res.json() as Array<{
           id?: number; n_ctx?: number; is_processing?: boolean; speculative?: boolean;
           n_prompt_tokens?: number; n_prompt_tokens_processed?: number; n_prompt_tokens_cache?: number;
+          next_token?: Array<{ has_next_token?: boolean; n_decoded?: number; n_remain?: number }>;
           params?: { 'speculative.types'?: string };
         }>;
         const slot = slots.find((s) => s.is_processing) ?? slots[0];
@@ -1764,13 +1765,17 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
         const total = Number(slot.n_prompt_tokens ?? 0);
         const processed = Number(slot.n_prompt_tokens_processed ?? 0);
         const cached = Number(slot.n_prompt_tokens_cache ?? 0);
-        const isPrefilling = Boolean(slot.is_processing && total > 0 && processed < total);
+        const nDecoded = Number(slot.next_token?.[0]?.n_decoded ?? 0);
+        const isPrefilling = Boolean(slot.is_processing && nDecoded === 0 && total > 0 && processed < total);
+        const isGenerating = Boolean(slot.is_processing && !isPrefilling);
         const prefillPct = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : null;
         const cacheHitPct = total > 0 ? Math.min(100, Math.round((cached / total) * 100)) : null;
         return {
           server: label,
           isProcessing: Boolean(slot.is_processing),
           isPrefilling,
+          isGenerating,
+          nDecoded,
           nCtx: Number(slot.n_ctx ?? 0),
           promptTotal: total,
           promptProcessed: processed,

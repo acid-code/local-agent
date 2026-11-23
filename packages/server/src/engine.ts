@@ -1178,6 +1178,7 @@ export class Engine {
       const alreadySearched = this.store.listSteps(run.id).some((s) => s.kind === 'tool' && (s.name === 'web_search' || s.name === 'web_fetch' || s.name === 'browse' || s.name === 'kb_search'));
       if (!trivial && !alreadySearched && maxSteps - current.cursor.turn > 1) {
         this.store.updateStep(step.id, { status: 'completed', output: { text, discarded: 'researcher must search first' }, tokensIn: usage.inputTokens, tokensOut: usage.outputTokens, costUsd: cost, latencyMs: Date.now() - started, endedAt: now() });
+        this.bus.publish({ type: 'step', runId: run.id, step: this.store.getStep(step.id) });
         this.store.addStep({ runId: run.id, kind: 'contract', name: 'auto-search', status: 'completed', input: { turn: current.cursor.turn }, output: 'Prompted Researcher to call web_search before answering.', toolCallId: null, turn: current.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now() });
         const fresh = this.store.getRun(run.id)!;
         this.store.updateRun(run.id, {
@@ -1203,6 +1204,7 @@ export class Engine {
       const check = checkFinalReply(this.store.listSteps(run.id), text, rounds, maxSteps - current.cursor.turn, this.replyLang(agent, this.userText(run)) === 'he', tools.map((t) => t.name), this.store.getRun(run.id)?.cursor.acceptance ?? []);
       if (check.action === 'retry') {
         this.store.updateStep(step.id, { status: 'completed', output: { text, discarded: check.reason }, tokensIn: usage.inputTokens, tokensOut: usage.outputTokens, costUsd: cost, latencyMs: Date.now() - started, endedAt: now() });
+        this.bus.publish({ type: 'step', runId: run.id, step: this.store.getStep(step.id) });
         this.store.addStep({ runId: run.id, kind: 'contract', name: 'verify', status: 'completed', input: { round: rounds + 1 }, output: `Sent back: ${check.reason}`, toolCallId: null, turn: current.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now() });
         this.store.addLog('warn', `Run ${run.id}: ${check.reason} Asking ${model.name} to recover (round ${rounds + 1}).`, undefined, 'engine');
         const fresh = this.store.getRun(run.id)!;
@@ -1218,6 +1220,7 @@ export class Engine {
           text += `\n\n⚠️ ${open.length} task(s) still open: ${open.join('; ')}`;
         } else {
         this.store.updateStep(step.id, { status: 'completed', output: { text, discarded: 'open tasks' }, tokensIn: usage.inputTokens, tokensOut: usage.outputTokens, costUsd: cost, latencyMs: Date.now() - started, endedAt: now() });
+        this.bus.publish({ type: 'step', runId: run.id, step: this.store.getStep(step.id) });
         this.store.addStep({ runId: run.id, kind: 'contract', name: 'verify', status: 'completed', input: { tasks: open.length }, output: `Sent back: ${open.length} task(s) still open`, toolCallId: null, turn: current.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now() });
         const fresh = this.store.getRun(run.id)!;
         this.store.updateRun(run.id, { cursor: { ...current.cursor, phase: 'model', turn: current.cursor.turn + 1, taskRounds: taskRounds + 1, taskSnapshot, recovery: { rounds: current.cursor.recovery?.rounds ?? 0, note: tasksNote(open) } }, inputTokens: fresh.inputTokens + usage.inputTokens, outputTokens: fresh.outputTokens + usage.outputTokens, costUsd: fresh.costUsd + cost });
@@ -1251,6 +1254,7 @@ export class Engine {
       ? { ...current.cursor, phase: 'tools', toolCalls, completedToolIds: [], approvalId: undefined }
       : { ...current.cursor, phase: 'summarize', toolCalls: undefined };
     this.store.updateStep(step.id, { status: 'completed', output: { text, toolCalls, ...(telemetry ? { telemetry } : {}), ...(reasoningText ? { reasoning: reasoningText.slice(0, 4000) } : {}) }, tokensIn: usage.inputTokens, tokensOut: usage.outputTokens, costUsd: cost, latencyMs: Date.now() - started, endedAt: now() });
+    this.bus.publish({ type: 'step', runId: run.id, step: this.store.getStep(step.id) });
     const fresh = this.store.getRun(run.id)!;
     this.store.updateRun(run.id, {
       cursor,
