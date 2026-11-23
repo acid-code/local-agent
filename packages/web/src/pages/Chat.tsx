@@ -1,10 +1,11 @@
 import { CuteArt } from '../components/CuteArt';
 import { isOwner } from '../lib/role';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Menu as DropMenu } from '../components/ui';
 import { ModelPicker, useUsableModels } from '../lib/models';
 import { browserDictationSupported, startDictation } from '../lib/dictation';
-import { ArrowLeft, ScanText, AtSign, Info, Layers, Brain, Check, ChevronDown, Code2, Copy, Download, Eye, FileText, Folder, FolderGit2, GitBranch, Headphones, ListTree, Menu, MessageSquare, MessageSquarePlus, Pin, PinOff, Plus, Search, Mic, PanelRight, Paperclip, Pencil, Quote, RotateCcw, Send, Share, Square, Trash2, Volume2, Wrench, X } from 'lucide-react';
+import { Archive, ArrowLeft, ScanText, AtSign, Info, Layers, Brain, Check, ChevronDown, Code2, Copy, Download, Eye, FileText, Folder, FolderGit2, GitBranch, Headphones, ListTree, Menu, MessageSquare, MessageSquarePlus, Pin, PinOff, Plus, Search, Mic, PanelRight, Paperclip, Pencil, Quote, RotateCcw, Send, Share, Square, Trash2, Volume2, Wrench, X } from 'lucide-react';
 import { CiteContext, type CiteHandlers } from '../components/Markdown';
 import { FileViewer, type QuotePick, type ViewerSource } from '../components/FileViewer';
 import { MentionPicker, type MentionPick } from '../components/MentionPicker';
@@ -189,6 +190,8 @@ export function Chat() {
   // The open chat's own record, so the header is right even when it is not on the loaded page of the list.
   const [openedMeta, setOpenedMeta] = useState<Session | null>(null);
   const [browserNotice, setBrowserNotice] = useState<{ persona: string; url: string; needsLogin?: boolean } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string } | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const currentRef = useRef<string | null>(null);
   async function openSession(id: string, gate = openGate.current.begin()) {
     // Restore this chat's unsent draft in the same render as the switch, so the save effect never wipes it.
@@ -763,18 +766,25 @@ export function Chat() {
     }
   }
 
-  async function removeChat(id: string) {
-    const row = sessions.find((session) => session.id === id);
-    if (!window.confirm(t('Delete “{0}”? It disappears from the list.', [row?.title || 'this chat']))) return;
+  function removeChat(id: string) {
+    const row = sessions.find((session) => session.id === id) || (openedMeta?.id === id ? openedMeta : undefined);
+    setDeleteTarget({ id, title: row?.title || t('this chat') });
+  }
+
+  async function confirmRemoveChat(permanent: boolean) {
+    if (!deleteTarget || deleting) return;
+    const { id } = deleteTarget;
+    setDeleting(true);
     try {
-      await api(`/api/sessions/${id}`, { method: 'DELETE' });
+      await api(`/api/sessions/${id}${permanent ? '?permanent=1' : ''}`, { method: 'DELETE' });
+      setDeleteTarget(null);
       const rows = await refreshLists();
-      toast(t('Chat deleted.'), 'ok');
+      toast(permanent ? t('Chat deleted permanently.') : t('Chat archived.'), 'ok');
       if (id === current) {
         if (rows[0]) await openSession(rows[0].id);
         else { setCurrent(null); setMessages([]); }
       }
-    } catch (error) { toast(errorText(error), 'error'); }
+    } catch (error) { toast(errorText(error), 'error'); } finally { setDeleting(false); }
   }
 
   async function saveTitle(id: string) {
@@ -1418,6 +1428,48 @@ export function Chat() {
         <p className="faint">{t('Every model call and tool call lands here, with the arguments the model actually sent.')}</p>
         <div className="trace-pane"><TraceList steps={steps} /></div>
       </aside>
+      {deleteTarget && createPortal(
+        <div
+          className="modal-backdrop delete-modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t('Delete chat')}
+          onClick={() => { if (!deleting) setDeleteTarget(null); }}
+          onKeyDown={(e) => { if (e.key === 'Escape' && !deleting) setDeleteTarget(null); }}
+        >
+          <div className="modal-card delete-modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="delete-modal-head">
+              <div className="delete-modal-title">
+                <strong>{t('Delete chat')}</strong>
+                <span className="faint ellipsis" dir="auto">“{deleteTarget.title}”</span>
+              </div>
+              <button type="button" className="icon-btn" aria-label={t('Close')} disabled={deleting} onClick={() => setDeleteTarget(null)}>
+                <X size={16} />
+              </button>
+            </div>
+            <div className="delete-choice-list">
+              <button type="button" className="delete-choice" disabled={deleting} onClick={() => void confirmRemoveChat(false)}>
+                <span className="delete-choice-icon"><Archive size={18} aria-hidden /></span>
+                <span className="delete-choice-text">
+                  <strong>{t('Archive')}</strong>
+                  <small className="faint">{t('Hide from the sidebar. History stays in the database.')}</small>
+                </span>
+              </button>
+              <button type="button" className="delete-choice danger" disabled={deleting} onClick={() => void confirmRemoveChat(true)}>
+                <span className="delete-choice-icon"><Trash2 size={18} aria-hidden /></span>
+                <span className="delete-choice-text">
+                  <strong>{t('Delete permanently')}</strong>
+                  <small className="faint">{t('Remove this chat, its messages, and run history forever.')}</small>
+                </span>
+              </button>
+            </div>
+            <div className="delete-modal-foot">
+              <button type="button" className="btn ghost small" disabled={deleting} onClick={() => setDeleteTarget(null)}>{t('Cancel')}</button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
     </div>
     </CiteContext.Provider>
   );

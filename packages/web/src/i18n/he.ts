@@ -1582,4 +1582,10 @@ export const he: Record<string, string> = {
   "Browser is not running yet. Start a browse task to see the live view.": "הדפדפן עדיין לא פועל. התחל משימת גלישה כדי לראות את התצוגה החיה.",
   "Browser": "דפדפן",
   "started browsing": "התחיל לגלוש",
+  "Chat archived.": "השיחה הועברה לארכיון.",
+  "Chat deleted permanently.": "השיחה נמחקה לצמיתות.",
+  "Delete permanently": "מחיקה לצמיתות",
+  "Hide from the sidebar. History stays in the database.": "מסתיר מהתפריט הצידי. ההיסטוריה נשמרת במסד הנתונים.",
+  "Remove this chat, its messages, and run history forever.": "מוחק את השיחה, ההודעות והיסטוריית ההרצות לצמיתות.",
+  "this chat": "השיחה הזו",
 };

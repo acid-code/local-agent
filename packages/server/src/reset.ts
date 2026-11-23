@@ -72,3 +72,49 @@ export async function resetChats(db: DatabaseSync, dataDir: string, opts: { conf
   }
   return { dryRun: false, ...before, total, backup, kept: KEPT };
 }
+
+function hasColumn(db: DatabaseSync, table: string, col: string) {
+  if (!exists(db, table)) return false;
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  return cols.some((c) => c.name === col);
+}
+
+/** Permanently delete a single chat session and everything hanging off it (messages, runs, steps, plans, summaries). */
+export function deleteSessionPermanently(db: DatabaseSync, sessionId: string): void {
+  const runIds = hasColumn(db, 'runs', 'session_id')
+    ? (db.prepare('SELECT id FROM runs WHERE session_id = ?').all(sessionId) as { id: string }[]).map((r) => r.id)
+    : [];
+  const msgIds = hasColumn(db, 'messages', 'session_id')
+    ? (db.prepare('SELECT id FROM messages WHERE session_id = ?').all(sessionId) as { id: string }[]).map((r) => r.id)
+    : [];
+  const planIds = hasColumn(db, 'plans', 'session_id')
+    ? (db.prepare('SELECT id FROM plans WHERE session_id = ?').all(sessionId) as { id: string }[]).map((r) => r.id)
+    : [];
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    if (hasColumn(db, 'files', 'session_id')) db.prepare('UPDATE files SET session_id = NULL, message_id = NULL WHERE session_id = ?').run(sessionId);
+    for (const runId of runIds) {
+      if (hasColumn(db, 'run_steps', 'run_id')) db.prepare('DELETE FROM run_steps WHERE run_id = ?').run(runId);
+      if (hasColumn(db, 'checkpoints', 'run_id')) db.prepare('DELETE FROM checkpoints WHERE run_id = ?').run(runId);
+      if (hasColumn(db, 'approvals', 'run_id')) db.prepare('DELETE FROM approvals WHERE run_id = ?').run(runId);
+      if (hasColumn(db, 'secret_requests', 'run_id')) db.prepare('DELETE FROM secret_requests WHERE run_id = ?').run(runId);
+      if (hasColumn(db, 'effect_keys', 'run_id')) db.prepare('DELETE FROM effect_keys WHERE run_id = ?').run(runId);
+      if (hasColumn(db, 'helpers', 'parent_run_id')) db.prepare('DELETE FROM helpers WHERE parent_run_id = ? OR child_run_id = ?').run(runId, runId);
+    }
+    for (const planId of planIds) {
+      if (hasColumn(db, 'plan_items', 'plan_id')) db.prepare('DELETE FROM plan_items WHERE plan_id = ?').run(planId);
+    }
+    for (const msgId of msgIds) {
+      if (hasColumn(db, 'secret_captures', 'message_id')) db.prepare('DELETE FROM secret_captures WHERE message_id = ?').run(msgId);
+    }
+    for (const table of ['plans', 'plan_history', 'edit_batches', 'summaries', 'chunks', 'session_workspaces', 'session_rules_off', 'schedules', 'archived_messages', 'messages', 'runs']) {
+      if (hasColumn(db, table, 'session_id')) db.prepare(`DELETE FROM ${table} WHERE session_id = ?`).run(sessionId);
+    }
+    if (exists(db, 'chat_sessions')) db.prepare('DELETE FROM chat_sessions WHERE id = ?').run(sessionId);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}

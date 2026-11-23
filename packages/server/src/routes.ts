@@ -20,7 +20,7 @@ import { cacheNpm, cacheStatus, dockerCatalog, officialCatalog, specFor, vetCata
 import { localReputationSummarizer } from './reputation.js';
 import type { Notifier } from './notify.js';
 import { createBackup, listBackups, preChangeBackup, shipBackup, stageRestore } from './ops.js';
-import { RESET_PHRASE, resetChats } from './reset.js';
+import { deleteSessionPermanently, RESET_PHRASE, resetChats } from './reset.js';
 import { telegramQueue } from './notify.js';
 import { ollamaLoaded, ollamaRoot } from './ollama.js';
 import { approvalView } from './approval-view.js';
@@ -1190,12 +1190,17 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   }));
   app.delete('/api/sessions/:id', async (req) => {
     const id = (req.params as { id: string }).id;
+    const permanent = String((req.query as { permanent?: string }).permanent || '') === '1';
     mustOwn(store, req, 'session', id, 'Chat not found.');
     if (engine.sessionBusy(id)) throw http(409, 'A reply is still running in this chat. Press Stop first, then delete it.');
     engine.autonomy.stopForSession(id);
-    store.updateSession(id, { archived: true });
+    if (permanent) {
+      deleteSessionPermanently(store.db, id);
+    } else {
+      store.updateSession(id, { archived: true });
+    }
     engine.sweepStaleWaits();
-    return { ok: true };
+    return { ok: true, permanent };
   });
   app.post('/api/sessions/:id/messages', async (req) => {
     const id = (req.params as { id: string }).id;
