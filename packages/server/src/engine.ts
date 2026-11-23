@@ -1839,7 +1839,7 @@ export class Engine {
     // planContext receives practicalBudget minus tool schemas/notes so it reserves room for them when packing messages,
     // while breakdown.used ALREADY includes toolSchemaTokens in personaAndTools. Restore the full usable budget for the
     // UI breakdown so tool schemas are never double-counted (dropping the denominator from 31k -> 23k mid-run).
-    const fullUsableBudget = Math.max(plan.breakdown.budget, Math.min(model.contextWindow, fullBudget) - settings.outputReserveTokens);
+    const fullUsableBudget = Math.max(plan.breakdown.budget, Math.min(model.contextWindow, budget) - settings.outputReserveTokens);
     const uiBreakdown = {
       ...plan.breakdown,
       budget: fullUsableBudget,
