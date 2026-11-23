@@ -231,6 +231,11 @@ export const BUILTIN_TOOLS: Tool[] = [
       const hit = locatePath({ workspace: ctx.workspace, roots: ctx.roots, target: String(args.path || '') });
       if (!hit) throw new Error('That file is not in this workshop.');
       const stat = await fs.stat(hit.full);
+      if (stat.isDirectory()) {
+        const entries = await fs.readdir(hit.full, { withFileTypes: true });
+        const list = entries.slice(0, 200).map((entry) => `${entry.isDirectory() ? 'dir ' : 'file'} ${entry.name}`).join('\n') || '(empty)';
+        return `Directory ${args.path} (tip: use list_dir for folders):\n${list}`;
+      }
       if (stat.size > 1_000_000) throw new Error('File is larger than 1 MB.');
       const raw = await fs.readFile(hit.full, 'utf8');
       const lines = raw.split('\n');

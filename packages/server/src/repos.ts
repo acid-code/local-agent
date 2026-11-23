@@ -89,7 +89,7 @@ export function sharedRepoBrief(store: Store): string {
     const notes = notesFor(store, repo.label, 3).map((note) => note.body).join(' | ');
     return `- ${repo.label}: ${repo.path}${repo.remote ? ` (${repo.remote})` : ''}${notes ? `\n  recent: ${notes}` : ''}`;
   });
-  return `\n\nShared repos, one copy for every persona:\n${lines.join('\n')}`;
+  return `\n\nShared repos already cloned locally (do NOT call repo_sync with a guessed URL; use read_file "<label>/<path>", or git with project="<label>" and action="fetch" / "branches" / "show"):\n${lines.join('\n')}`;
 }
 
 export function tryLockRepo(store: Store, label: string, runId: string, agentId: string): { ok: true } | { ok: false; holder: string } {
@@ -156,17 +156,42 @@ export async function ensureTaskBranch(repoPath: string, branch: string, identit
   return git(repoPath, ['checkout', '-b', branch], identity);
 }
 
+export function findExistingSharedRepo(store: Store, label?: string, url?: string): SharedRepo | undefined {
+  const repos = listSharedRepos(store);
+  const byLabel = label?.trim().toLowerCase();
+  if (byLabel) {
+    const hit = repos.find((item) => item.label.toLowerCase() === byLabel || path.basename(item.path).toLowerCase() === byLabel);
+    if (hit) return hit;
+  }
+  if (url?.trim()) {
+    const cleanUrl = url.trim().replace(/\.git$/, '').toLowerCase();
+    const derived = labelFromRemote(url.trim());
+    return repos.find((item) =>
+      (item.remote && item.remote.replace(/\.git$/, '').toLowerCase() === cleanUrl)
+      || item.label.toLowerCase() === derived
+      || path.basename(item.path).toLowerCase() === derived,
+    );
+  }
+  return undefined;
+}
+
 export function repoSyncTool(): Tool {
   return {
     name: 'repo_sync',
-    description: 'Clone a remote into the shared repo store, or pull an existing shared repo. Returns status and the latest commits so personas can talk about what changed. Needs approval.',
+    description: 'Clone a new remote into the shared repo store, or fetch and pull an already-registered shared repo (pass label without overriding remote). Returns status, recent branches, and commits. Needs approval.',
     parameters: {
       type: 'object',
       properties: { label: { type: 'string' }, url: { type: 'string' } },
       additionalProperties: false,
     },
     mutates: () => true,
-    approval: (args) => args.url ? `Clone ${args.url} into the shared repos` : `Pull ${args.label || 'the shared repo'}`,
+    approval: (args, ctx) => {
+      const existing = ctx?.store ? findExistingSharedRepo(ctx.store, args.label ? String(args.label) : undefined, args.url ? String(args.url) : undefined) : undefined;
+      if (existing && fs.existsSync(path.join(existing.path, '.git'))) {
+        return `Fetch and pull ${existing.label}`;
+      }
+      return args.url ? `Clone ${args.url} into the shared repos` : `Pull ${args.label || 'the shared repo'}`;
+    },
     async execute(args, ctx) {
       const dataDir = ctx.libraryDir || '';
       if (!dataDir) throw new Error('Shared repo storage is not configured.');
@@ -175,8 +200,21 @@ export function repoSyncTool(): Tool {
   };
 }
 
+async function pullAndSummarize(repoPath: string, label: string): Promise<string> {
+  const fetched = await git(repoPath, ['fetch', '--all', '--prune']);
+  const pulled = await git(repoPath, ['pull', '--ff-only']);
+  const status = await git(repoPath, ['status', '--short', '--branch']);
+  const branches = await git(repoPath, ['branch', '-a', '-v', '--sort=-committerdate']);
+  const log = await git(repoPath, ['log', '-5', '--oneline']);
+  return [`# ${label}`, fetched, pulled, status, 'Recent branches:', branches.split('\n').slice(0, 12).join('\n'), log].join('\n');
+}
+
 export async function syncSharedRepo(store: Store, dataDir: string, input: { label?: string; url?: string }) {
   const root = reposDir(dataDir);
+  const existing = findExistingSharedRepo(store, input.label, input.url);
+  if (existing && fs.existsSync(path.join(existing.path, '.git'))) {
+    return pullAndSummarize(existing.path, existing.label);
+  }
   if (input.url) {
     if (!safeRemote(input.url)) throw new Error('Use an https or git SSH remote.');
     const label = (input.label || labelFromRemote(input.url)).toLowerCase();
@@ -187,18 +225,9 @@ export async function syncSharedRepo(store: Store, dataDir: string, input: { lab
       if (!fs.existsSync(path.join(dest, '.git'))) return cloned;
     }
     registerSharedRepo(store, { label, path: dest, remote: input.url });
-    const pulled = await git(dest, ['pull', '--ff-only']);
-    const log = await git(dest, ['log', '-5', '--oneline']);
-    const status = await git(dest, ['status', '--short', '--branch']);
-    return [`# ${label}`, pulled, status, log].join('\n');
+    return pullAndSummarize(dest, label);
   }
-  const label = input.label?.toLowerCase();
-  const repo = listSharedRepos(store).find((item) => item.label === label);
-  if (!repo) throw new Error('Name a shared repo, or pass a remote url to clone.');
-  const pulled = await git(repo.path, ['pull', '--ff-only']);
-  const log = await git(repo.path, ['log', '-5', '--oneline']);
-  const status = await git(repo.path, ['status', '--short', '--branch']);
-  return [`# ${repo.label}`, pulled, status, log].join('\n');
+  throw new Error('Name a shared repo, or pass a remote url to clone.');
 }
 
 function safeRemote(url: string) {

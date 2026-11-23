@@ -1825,14 +1825,16 @@ export class Engine {
       ? '\n\nWeb lookup rule: always call web_search (SearXNG) first before calling web_fetch or browse; never invent URLs. If web_fetch returns navigation chrome or no prices (JS-rendered store), do not keep calling web_fetch on similar store pages — use browse or a targeted web_search instead, then synthesize a clear answer.'
       : '';
     const sharedRepoNote = sharedRepoBrief(this.store);
+    const todayIso = (run.startedAt || new Date().toISOString()).slice(0, 10);
+    const dateNote = `\n\nCurrent date: ${todayIso} (current year is ${todayIso.slice(0, 4)}; use ${todayIso.slice(0, 4)} when searching for current news, models, prices, or releases).`;
     // llama-server reuses the longest cached prompt prefix, and the hybrid Qwen3.6 cannot roll back into the middle of
     // it. So for these models the prompt only ever grows within a run: the preamble and the per-run context are frozen
     // at the first step, and notes (recovery, steering, nudges) are pinned once after the message that was last when
     // they appeared, instead of being rewritten into an earlier message each step.
     const cacheFriendly = this.cacheFriendly(model);
     const system = cacheFriendly
-      ? `${agent.systemPrompt}${sharedRepoNote}${rulesNote}${memoryNote}${teamNote}${searchFirstNote}${kbHint}${CITE_HINT}${HONESTY_RULE}${run.cursor.helperId ? '' : TASKS_HINT}${languageNote}`
-      : `${agent.systemPrompt}${sharedRepoNote}${chatWorkspaces}${rulesNote}${memoryNote}${teamNote}${searchFirstNote}${stageNote}${roleNote}${kbHint}${CITE_HINT}${HONESTY_RULE}${run.cursor.helperId ? '' : TASKS_HINT}${nudge}${languageNote}${recoveryNote}`;
+      ? `${agent.systemPrompt}${dateNote}${sharedRepoNote}${rulesNote}${memoryNote}${teamNote}${searchFirstNote}${kbHint}${CITE_HINT}${HONESTY_RULE}${run.cursor.helperId ? '' : TASKS_HINT}${languageNote}`
+      : `${agent.systemPrompt}${dateNote}${sharedRepoNote}${chatWorkspaces}${rulesNote}${memoryNote}${teamNote}${searchFirstNote}${stageNote}${roleNote}${kbHint}${CITE_HINT}${HONESTY_RULE}${run.cursor.helperId ? '' : TASKS_HINT}${nudge}${languageNote}${recoveryNote}`;
     const preambleGuess = `${system}\n${notes.map((note) => note.content).join('\n')}`;
     if (model.providerId === 'prov_gemini' && estimateTokens(preambleGuess, 'gemini') > budget * 0.75) {
       const key = process.env.GEMINI_API_KEY;
@@ -3033,14 +3035,19 @@ function readOutputTool(): Tool {
       const chars = [...message.content];
       const total = chars.length;
       const offset = Math.max(0, Number(args.offset || 0));
-      const limit = Math.min(8000, Math.max(200, Number(args.limit || 4000)));
-      const end = Math.min(total, offset + limit);
+      const priorReads = ctx.runId
+        ? ctx.store.listSteps(ctx.runId).filter((s) => s.kind === 'tool' && s.name === 'read_output' && s.status === 'completed' && String((s.input as { message?: unknown })?.message || '') === message.id).length
+        : 0;
+      const limit = Math.min(16_000, Math.max(200, Number(args.limit || 8000)));
+      const end = Math.min(total, offset + (priorReads >= 2 ? 16_000 : limit));
       if (offset >= total) {
         return `[offset ${offset} is past the end of stored output (${total} characters total). Do not call read_output on this message again — use what you already read.]`;
       }
-      const tail = end < total
-        ? `\n…more from offset ${end} (${total - end} characters remaining)`
-        : `\n[end of stored output — ${total} characters total. Do not call read_output on this message again.]`;
+      const tail = priorReads >= 2
+        ? `\n[You have already called read_output ${priorReads + 1} times on ${message.id}. Do NOT call read_output on ${message.id} again — synthesize your answer from what you have.]`
+        : end < total
+          ? `\n…more from offset ${end} (${total - end} characters remaining)`
+          : `\n[end of stored output — ${total} characters total. Do not call read_output on this message again.]`;
       return `[characters ${offset}..${end} of ${total}]\n${chars.slice(offset, end).join('')}${tail}`;
     },
   };

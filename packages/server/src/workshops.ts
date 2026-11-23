@@ -113,13 +113,18 @@ export function locatePath(input: {
     if (roots.length > 1) return null;
     return { root: path.resolve(input.workspace), full: path.resolve(input.workspace), write: true, label: null };
   }
-  const slash = target.indexOf('/');
-  const head = slash === -1 ? target : target.slice(0, slash);
-  const tail = slash === -1 ? '.' : target.slice(slash + 1);
-  const labeled = roots.find((root) => root.label === head);
-  if (labeled) {
-    const full = inside(labeled.path, tail);
-    return full ? { root: labeled.path, full, write: labeled.write !== false, label: labeled.label } : null;
+  const stripped = target.replace(/^\/?(?:data\/)?(?:workspaces\/projects|repos|projects)\//i, '');
+  const candidates = stripped && stripped !== target ? [target, stripped] : [target];
+  for (const candidate of candidates) {
+    const slash = candidate.indexOf('/');
+    const head = slash === -1 ? candidate : candidate.slice(0, slash);
+    const tail = slash === -1 ? '.' : candidate.slice(slash + 1);
+    const low = head.toLowerCase();
+    const labeled = roots.find((root) => root.label.toLowerCase() === low || (candidate !== target && path.basename(root.path).toLowerCase() === low));
+    if (labeled) {
+      const full = inside(labeled.path, tail);
+      return full ? { root: labeled.path, full, write: labeled.write !== false, label: labeled.label } : null;
+    }
   }
   if (path.isAbsolute(target)) {
     const resolved = path.resolve(target);
@@ -139,9 +144,11 @@ export function locatePath(input: {
 export function projectPath(roots: { label: string; path: string }[], project: string | undefined, workspace: string, hint = ''): string {
   if (project === 'workspace') return workspace;
   if (project) {
-    const hit = roots.find((root) => root.label === project || path.resolve(root.path) === path.resolve(project))
+    const low = project.trim().toLowerCase();
+    const stripped = project.trim().replace(/^\/?(?:data\/)?(?:workspaces\/projects|repos|projects)\//i, '').toLowerCase();
+    const hit = roots.find((root) => root.label.toLowerCase() === low || root.label.toLowerCase() === stripped || path.resolve(root.path).toLowerCase() === path.resolve(project).toLowerCase())
       // A path inside a project (or "label/sub/dir") means that project.
-      ?? roots.find((root) => (path.isAbsolute(project) && safeInside(root.path, path.resolve(project))) || project.startsWith(`${root.label}/`));
+      ?? roots.find((root) => (path.isAbsolute(project) && safeInside(root.path, path.resolve(project))) || low.startsWith(`${root.label.toLowerCase()}/`) || stripped.startsWith(`${root.label.toLowerCase()}/`));
     if (!hit) throw new Error(`Unknown project "${project}". Use ${[...roots.map((root) => root.label), 'workspace'].join(', ')}.`);
     return hit.path;
   }

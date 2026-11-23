@@ -157,11 +157,30 @@ const { chromium } = require('playwright');
       }
     }
   } catch {}
-  const ctx = await chromium.launchPersistentContext(cfg.profile, {
-    headless: false,
-    args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--disable-extensions', '--disable-background-networking', '--no-first-run'],
-    viewport: { width: 1280, height: 800 },
-  });
+  const browserArgs = ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--disable-extensions', '--disable-background-networking', '--no-first-run'];
+  let browser = null;
+  let ctx = null;
+  try {
+    ctx = await chromium.launchPersistentContext(cfg.profile, {
+      headless: false,
+      args: browserArgs,
+      viewport: { width: 1280, height: 800 },
+    });
+  } catch {
+    for (const name of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+      try { fs.unlinkSync(path.join(cfg.profile, name)); } catch {}
+    }
+    try {
+      ctx = await chromium.launchPersistentContext(cfg.profile, {
+        headless: false,
+        args: browserArgs,
+        viewport: { width: 1280, height: 800 },
+      });
+    } catch {
+      browser = await chromium.launch({ headless: false, args: browserArgs });
+      ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    }
+  }
   const page = await ctx.newPage();
   const log = [];
   try {
@@ -191,6 +210,7 @@ const { chromium } = require('playwright');
   } finally {
     await page.close().catch(() => {});
     await ctx.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
   }
 })().catch((e) => { process.stderr.write(String(e && e.message || e)); process.exit(1); });
 `.trim();
