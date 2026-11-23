@@ -121,14 +121,32 @@ export const MODEL_REGISTRY: ModelProfile[] = [
     tokenizer: 'qwen3',
     contextWindow: 262_144,
     extendedContext: 1_010_000,
-    practicalBudget: 32_768,
+    practicalBudget: 65_536,
     strategy: 'hierarchical',
     modalities: ['text', 'image'],
     sizeClass: 'large',
     local: true,
     typicalQ4GiB: 23,
     strengths: ['code', 'hard-reasoning', 'vision', 'long-context', 'chat'],
-    notes: '262,144 native context, extensible toward 1,010,000 with YaRN. Ollama Q4 builds are about 23 GB. Qwen recommends 128K for full thinking quality; 32K is the RAM-safe default here.',
+    notes: '262,144 native context, extensible toward 1,010,000 with YaRN. Ollama Q4 builds are about 23 GB. Uses 64K default with native f16 KV across 10 KV layers.',
+    providerKind: 'openai_compat',
+  },
+  {
+    id: 'inkling-2-mini',
+    match: /inkling[-_\s]?2[-_\s]?mini/i,
+    displayName: 'Inkling 2 Mini',
+    apiName: 'inkling-2-mini-uncensored',
+    family: 'inkling',
+    tokenizer: 'approx',
+    contextWindow: 1_048_576,
+    practicalBudget: 65_536,
+    strategy: 'hierarchical',
+    modalities: ['text', 'image'],
+    sizeClass: 'large',
+    local: true,
+    typicalQ4GiB: 20,
+    strengths: ['code', 'hard-reasoning', 'vision', 'long-context', 'chat'],
+    notes: '26.4B MoE (3.4B active, looped middle layers, ~20 GB Q4) with 1M native context and vision. Treated as a large local model; 64K default with q8_0 KV.',
     providerKind: 'openai_compat',
   },
   {
@@ -421,5 +439,5 @@ export function roleContextBudget(
   if (r === 'fast' || r === 'voice' || model.sizeClass === 'small') {
     return Math.min(model.contextWindow, Math.min(model.practicalBudget, 16_384));
   }
-  return Math.min(model.contextWindow, Math.max(16_384, Math.min(model.practicalBudget, 32_768)));
+  return Math.min(model.contextWindow, Math.max(16_384, Math.min(model.practicalBudget, 65_536)));
 }
