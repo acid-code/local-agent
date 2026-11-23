@@ -12,7 +12,7 @@ import { cleanupHebrew } from './hebrew-cleanup.js';
 import { getLanguage } from './language.js';
 import { ollamaRoot } from './ollama.js';
 import { isUncensoredProvider, OLLAMA_SIDE_MAX_GIB } from './coexist.js';
-import { buildService, IMAGE_EXT, liveRunners, recognize, serviceStatus, startService, UNCENSORED_VISION_MODEL, understandImage, type OcrMode, type OcrResult, type ServiceId } from './ocr.js';
+import { buildService, extractVideoStoryboard, IMAGE_EXT, liveRunners, recognize, serviceStatus, startService, UNCENSORED_VISION_MODEL, understandImage, VIDEO_EXT, type OcrMode, type OcrResult, type ServiceId } from './ocr.js';
 import { preChangeBackup } from './ops.js';
 
 /**
@@ -76,12 +76,18 @@ export function registerOcr(app: FastifyInstance, deps: { store: Store; engine: 
     }
   }
 
+  const isImageFile = (file: { name: string; mime: string }) => IMAGE_EXT.test(file.name) || String(file.mime).startsWith('image/');
+  const isVideoFile = (file: { name: string; mime: string }) => VIDEO_EXT.test(file.name) || String(file.mime).startsWith('video/');
+
   async function readFile(fileId: string, mode: OcrMode, ownerId: string, cleanup?: boolean) {
     const file = getFile(store, fileId);
     const full = file ? filePath(store, dataDir, fileId) : null;
     if (!file || !full || (file.ownerId && file.ownerId !== ownerId)) throw fail(404, 'File not found.');
-    if (!IMAGE_EXT.test(file.name) && !String(file.mime).startsWith('image/')) throw fail(400, 'That file is not an image.');
-    const result = await polish(await recognize(fs.readFileSync(full), { mode }, await runnersFor(ownerId)), ownerId, cleanup);
+    const isImg = isImageFile(file);
+    const isVid = !isImg && isVideoFile(file);
+    if (!isImg && !isVid) throw fail(400, 'That file is not an image or video.');
+    const bytes = isVid ? (await extractVideoStoryboard(full)).jpeg : fs.readFileSync(full);
+    const result = await polish(await recognize(bytes, { mode }, await runnersFor(ownerId)), ownerId, cleanup);
     // Library search finds photos by their text from now on.
     if (result.text) store.db.prepare('UPDATE files SET text_index = ? WHERE id = ?').run(result.text.slice(0, 200_000), fileId);
     return result;
@@ -92,7 +98,18 @@ export function registerOcr(app: FastifyInstance, deps: { store: Store; engine: 
     const file = getFile(store, fileId);
     const full = file ? filePath(store, dataDir, fileId) : null;
     if (!file || !full || (file.ownerId && file.ownerId !== ownerId)) throw fail(404, 'File not found.');
-    if (!IMAGE_EXT.test(file.name) && !String(file.mime).startsWith('image/')) throw fail(400, 'That file is not an image.');
+    const isImg = isImageFile(file);
+    const isVid = !isImg && isVideoFile(file);
+    if (!isImg && !isVid) throw fail(400, 'That file is not an image or video.');
+    if (isVid) {
+      const board = await extractVideoStoryboard(full);
+      const dur = board.durationSec ? ` (${board.durationSec.toFixed(1)}s)` : '';
+      const frameNote = board.frames > 1
+        ? `This image is a 2x2 chronological keyframe contact sheet (top-left -> top-right -> bottom-left -> bottom-right) extracted from the video "${file.name}"${dur}. Describe what happens across the video, the scene/subjects, any visible text, and motion/changes.`
+        : `This image is a representative keyframe extracted from the short video "${file.name}"${dur}. Describe the scene, subjects, and any visible text.`;
+      const prompt = question?.trim() ? `${frameNote}\n\nUser question: ${question.trim()}` : frameNote;
+      return understandImage(board.jpeg, await runnersFor(ownerId), prompt);
+    }
     return understandImage(fs.readFileSync(full), await runnersFor(ownerId), question);
   }
   engine.imageAnalyzer = (fileId, question, ownerId) => analyzeFile(fileId, question, ownerId);

@@ -1,4 +1,11 @@
+import { execFile } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { promisify } from 'node:util';
 import { inDockerContainer, type DockerCtl } from './docker.js';
+
+const execFileAsync = promisify(execFile);
 import { GiB, readGtt, type MemoryBudget } from './memory.js';
 import { isHebrewText, scriptStats } from '@local-agent/shared';
 import { OCR_CONTAINER, OCR_DOCKERFILE, OCR_IMAGE, OCR_PORT, OCR_SERVER, PIPER_CONTAINER, PIPER_DOCKERFILE, PIPER_IMAGE, PIPER_PORT, PIPER_SERVER } from './service-images.js';
@@ -256,6 +263,55 @@ export async function startService(docker: DockerCtl, id: ServiceId, log: (line:
 }
 
 export const IMAGE_EXT = /\.(jpe?g|png|webp|heic|heif|tiff?|bmp|gif)$/i;
+export const VIDEO_EXT = /\.(mp4|mov|m4v|webm|mkv|avi|3gp)$/i;
+
+/**
+ * Extracts a 2×2 chronological keyframe contact sheet (JPEG) from a video using ffmpeg,
+ * falling back to a single representative frame for very short clips.
+ */
+export async function extractVideoStoryboard(videoPath: string): Promise<{ jpeg: Buffer; frames: number; durationSec: number | null }> {
+  let durationSec: number | null = null;
+  try {
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', videoPath,
+    ], { timeout: 10_000 });
+    const parsed = Number(stdout.trim());
+    if (Number.isFinite(parsed) && parsed > 0) durationSec = parsed;
+  } catch { /* ffprobe optional */ }
+
+  const tmpOut = path.join(os.tmpdir(), `la-vid-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`);
+  try {
+    // 4 evenly-spaced frames tiled into 2x2 (1280px wide max) when duration >= 1s; else single frame.
+    if (durationSec && durationSec >= 1) {
+      const fps = Math.max(0.05, Math.min(4, 4 / durationSec));
+      try {
+        await execFileAsync('ffmpeg', [
+          '-y', '-v', 'error', '-i', videoPath,
+          '-vf', `fps=${fps.toFixed(4)},scale=640:-2:force_original_aspect_ratio=decrease,tile=2x2:padding=4:color=black`,
+          '-frames:v', '1', '-q:v', '4', tmpOut,
+        ], { timeout: 25_000 });
+        if (fs.existsSync(tmpOut) && fs.statSync(tmpOut).size > 0) {
+          return { jpeg: fs.readFileSync(tmpOut), frames: 4, durationSec };
+        }
+      } catch { /* fall back to single frame */ }
+    }
+    await execFileAsync('ffmpeg', [
+      '-y', '-v', 'error', '-i', videoPath,
+      '-vf', 'scale=1024:-2:force_original_aspect_ratio=decrease',
+      '-frames:v', '1', '-q:v', '4', tmpOut,
+    ], { timeout: 20_000 });
+    if (!fs.existsSync(tmpOut) || fs.statSync(tmpOut).size === 0) {
+      throw new Error('Could not extract a frame from that video.');
+    }
+    return { jpeg: fs.readFileSync(tmpOut), frames: 1, durationSec };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (/ENOENT/.test(msg)) throw new Error('ffmpeg is not installed to read video frames.');
+    throw new Error(`Could not read video frames: ${msg.slice(0, 200)}`);
+  } finally {
+    try { fs.unlinkSync(tmpOut); } catch { /* ignore */ }
+  }
+}
 
 export const UNCENSORED_VISION_MODEL = 'huihui_ai/qwen3-vl-abliterated:8b-instruct';
 
@@ -402,11 +458,11 @@ export async function understandImage(image: Buffer, runners: OcrRunners, questi
 export function understandImageTool(analyze: (fileId: string, question: string | undefined, ownerId: string) => Promise<ImageAnalysisResult>): import('./tools.js').Tool {
   return {
     name: 'understand_image',
-    description: 'Inspect and deeply understand an image file (photo, screenshot, chart, diagram, design, slide). Returns a full structured description of the scene, objects, layout, colors/shades with approximate hex codes and percentages, numbers/charts/UI details, and visible text. Pass file_id from a [file:<id>] reference and an optional specific question.',
+    description: 'Inspect and deeply understand an image or video file (photo, screenshot, chart, diagram, design, slide, or video .mp4/.mov/.webm). For videos, automatically extracts a chronological 2x2 keyframe contact sheet. Returns a full structured description of the scene, motion/progression, objects, layout, colors/shades with approximate hex codes, numbers/charts/UI details, and visible text. Pass file_id from a [file:<id>] reference and an optional specific question.',
     parameters: {
       type: 'object',
       properties: {
-        file_id: { type: 'string', description: 'Image file id from [file:<id>].' },
+        file_id: { type: 'string', description: 'Image or video file id from [file:<id>].' },
         question: { type: 'string', description: 'Optional specific visual question to focus on (e.g., color palette, chart values, UI bug, layout details).' },
       },
       required: ['file_id'],

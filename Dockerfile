@@ -6,7 +6,7 @@ COPY personas ./personas
 RUN npm ci && npm run build
 
 FROM node:22-bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends tini ca-certificates git unzip libgomp1 chromium fonts-liberation fonts-dejavu-core && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends tini ca-certificates git unzip libgomp1 chromium fonts-liberation fonts-dejavu-core ffmpeg && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV NODE_ENV=production
 ENV DATA_DIR=/data
