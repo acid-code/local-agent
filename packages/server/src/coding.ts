@@ -520,6 +520,8 @@ function editsOf(args: Record<string, unknown>): { path: string; search: string;
   return [{ path: String(args.path || ''), search: String(args.search || ''), replace: String(args.replace ?? '') }];
 }
 
+const GREP_SKIP_EXT = /\.(?:db|sqlite3?|db-wal|db-shm|png|jpe?g|webp|gif|ico|bmp|pdf|zip|gz|tar|tgz|7z|wasm|gguf|bin|exe|dll|so|dylib|mp4|mp3|wav|ogg|woff2?|ttf|eot|pptx?|xlsx?|docx?)$/i;
+
 async function walkGrep(root: string, pattern: string, limit: number) {
   const regex = new RegExp(pattern, 'i');
   const hits: string[] = [];
@@ -528,11 +530,13 @@ async function walkGrep(root: string, pattern: string, limit: number) {
     const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
       if (hits.length >= limit) return;
-      if (entry.name === 'node_modules' || entry.name === '.git') continue;
+      if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === 'dist') continue;
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) await walk(full);
       else {
+        if (GREP_SKIP_EXT.test(entry.name)) continue;
         const text = await fs.readFile(full, 'utf8').catch(() => '');
+        if (!text || text.includes('\u0000')) continue;
         text.split('\n').forEach((line, index) => {
           if (hits.length < limit && regex.test(line)) hits.push(`${path.relative(root, full)}:${index + 1}: ${line.slice(0, 180)}`);
         });

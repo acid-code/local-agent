@@ -281,7 +281,7 @@ export class Engine {
         this.sweepStaleWaits();
         // Helper results are delivered from the run's own record, so they survive a restart (no in-memory callback needed).
         if (ended?.cursor.helperId && ['completed', 'failed', 'stopped', 'interrupted', 'cancelled'].includes(ended.status)) this.autonomy.deliver(ended);
-        if (ended && ended.status === 'completed' && !ended.cursor.helperId && !process.env.VITEST) {
+        if (ended && ['completed', 'stopped'].includes(ended.status) && !ended.cursor.helperId && !process.env.VITEST) {
           void this.maybeAutoCompact(ended.sessionId);
         }
         // After the first exchange the side model names the chat (3-6 words, the chat's language).
@@ -378,11 +378,11 @@ export class Engine {
       || this.store.listModels().find((m) => m.enabled);
   }
 
-  /** Automatically compact a chat in the background on the fast model once context crosses 80%. */
+  /** Automatically compact a chat in the background on the fast model once context crosses 75%. */
   private async maybeAutoCompact(sessionId: string): Promise<void> {
     if (this.compacting.has(sessionId) || this.sessionBusy(sessionId)) return;
     const breakdown = this.getSessionContextBreakdown(sessionId);
-    if (!breakdown || breakdown.budget <= 0 || breakdown.used / breakdown.budget < 0.8) return;
+    if (!breakdown || breakdown.budget <= 0 || breakdown.used / breakdown.budget < 0.75) return;
     const messages = this.store.listMessages(sessionId);
     const summaries = this.store.listSummaries(sessionId).map((s) => ({ id: s.id, level: s.level, content: s.content, covers: s.covers, foldedInto: s.foldedInto }));
     if (this.uncoveredMessages(messages, summaries).length < 6) return;
@@ -1175,7 +1175,10 @@ export class Engine {
     if (!toolCalls?.length && text.trim() && isResearcher && !current.cursor.researchRetried && tools.some((t) => t.name === 'web_search')) {
       const userPrompt = this.userText(run).trim();
       const trivial = userPrompt.length < 12 || /^(hi|hello|hey|thanks|thank you|ok|okay|שלום|היי|תודה)[!.\s?]*$/i.test(userPrompt);
-      const alreadySearched = this.store.listSteps(run.id).some((s) => s.kind === 'tool' && (s.name === 'web_search' || s.name === 'web_fetch' || s.name === 'browse' || s.name === 'kb_search'));
+      const alreadySearched = this.store.listSteps(run.id).some((s) => s.kind === 'tool' && (
+        s.name === 'web_search' || s.name === 'web_fetch' || s.name === 'browse' || s.name === 'kb_search'
+        || s.name === 'read_file' || s.name === 'grep' || s.name === 'glob' || s.name === 'list_dir' || s.name === 'shell'
+      ));
       if (!trivial && !alreadySearched && maxSteps - current.cursor.turn > 1) {
         this.store.updateStep(step.id, { status: 'completed', output: { text, discarded: 'researcher must search first' }, tokensIn: usage.inputTokens, tokensOut: usage.outputTokens, costUsd: cost, latencyMs: Date.now() - started, endedAt: now() });
         this.bus.publish({ type: 'step', runId: run.id, step: this.store.getStep(step.id) });
