@@ -1580,4 +1580,6 @@ export const he: Record<string, string> = {
   "No recent shell commands yet.": "עדיין אין פקודות אחרונות.",
   "Open live view": "פתיחת תצוגה חיה",
   "Browser is not running yet. Start a browse task to see the live view.": "הדפדפן עדיין לא פועל. התחל משימת גלישה כדי לראות את התצוגה החיה.",
+  "Browser": "דפדפן",
+  "started browsing": "התחיל לגלוש",
 };

@@ -118,7 +118,7 @@ describe('managed real browser (la-browser)', () => {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'la-br-oom-'));
     dirs.push(dataDir);
     const { docker, startedSpecs } = fakeDocker();
-    const budget = fakeBudget(3); // 3 GiB - 2 GiB reserve = 1 GiB < 2 GiB
+    const budget = fakeBudget(2.5); // 2.5 GiB - 2 GiB reserve = 0.5 GiB < 1 GiB lease
     const browser = new ManagedBrowser(docker, dataDir, () => budget);
     await expect(browser.browse({ personaSlug: 'researcher', url: 'https://example.com' })).rejects.toThrow(/not enough free memory/i);
     expect(startedSpecs).toHaveLength(0);
