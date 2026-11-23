@@ -1893,7 +1893,15 @@ export class Engine {
     const messages = this.store.listMessages(sessionId);
     const summaries = this.store.listSummaries(sessionId);
     const covered = new Set(summaries.flatMap((summary) => summary.covers));
-    const ids = foldCandidates(messages.map((message) => ({ id: message.id, role: message.role as 'user', content: message.content })), covered, model.tokenizer as 'approx', summaryTriggerFor(model, settings.summaryTriggerTokens), Math.min(model.contextWindow, model.practicalBudget) - settings.outputReserveTokens);
+    const usableBudget = Math.min(model.contextWindow, model.practicalBudget) - settings.outputReserveTokens;
+    const session = this.store.getSession(sessionId);
+    const activeTools = this.tools(agent, session?.mode || 'chat', undefined, undefined, false);
+    const tok = model.tokenizer as 'approx';
+    const toolTokens = activeTools.length ? estimateTokens(JSON.stringify(activeTools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }))), tok) : 0;
+    const sysTokens = estimateTokens(agent.systemPrompt || '', tok);
+    // Subtract system + tool schema overhead so auto-compact triggers when TOTAL context (including tools) nears 75-80%.
+    const messageBudget = Math.max(1024, Math.floor((usableBudget - toolTokens - sysTokens) * 0.94));
+    const ids = foldCandidates(messages.map((message) => ({ id: message.id, role: message.role as 'user', content: message.content })), covered, tok, summaryTriggerFor(model, settings.summaryTriggerTokens), messageBudget);
     if (!ids) return;
     const slice = messages.filter((message) => ids.includes(message.id));
     const transcript = slice.map((message) => `${message.role}: ${message.content}`).join('\n').slice(0, 12_000);
@@ -1920,6 +1928,7 @@ export class Engine {
       }
     }
     indexText(this.store, this.vectors, { sessionId, agentId: agent.id, text: slice.map((message) => message.content).join('\n').slice(0, 4000) });
+    this.lastContext.delete(sessionId);
     void created;
   }
 

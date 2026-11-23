@@ -303,6 +303,146 @@ export function BulkDiffCard({ edits, onChanged }: { edits: DiffEdit[]; onChange
 }
 
 /** Cursor-style expandable decision & tool-call timeline (live while running, inspectable after). */
+interface LiveLlmTelemetry {
+  slot: {
+    server: string;
+    isProcessing: boolean;
+    isPrefilling: boolean;
+    nCtx: number;
+    promptTotal: number;
+    promptProcessed: number;
+    promptCached: number;
+    prefillPct: number | null;
+    cacheHitPct: number | null;
+    speculative: boolean;
+    speculativeType: string | null;
+  } | null;
+  gpu: { busyPct: number | null; gttUsedGiB: number | null; gttTotalGiB: number | null };
+  cpu: { busyPct: number; cores: number; ramUsedGiB: number; ramTotalGiB: number };
+}
+
+function modelArchOf(name: string) {
+  const n = name.toLowerCase();
+  if (n.includes('qwen3.6') && (n.includes('35b') || n.includes('a3b'))) {
+    return {
+      title: 'Qwen3.6-35B-A3B · Hybrid MoE',
+      layers: 40,
+      specialLabel: '10 KV + 30 DeltaNet',
+      isSpecialLayer: (i: number) => (i + 1) % 4 === 0,
+      expertsLabel: '8 / 256 active experts (3B active)',
+      activeClusters: 8,
+      totalClusters: 32,
+    };
+  }
+  if (n.includes('inkling')) {
+    return {
+      title: 'Inkling 2 Mini · Looped MoE',
+      layers: 24,
+      specialLabel: '12 looped middle layers (×3 = 48 passes)',
+      isSpecialLayer: (i: number) => i >= 6 && i < 18,
+      expertsLabel: '3.4B active / 26.4B MoE',
+      activeClusters: 6,
+      totalClusters: 32,
+    };
+  }
+  return null;
+}
+
+function ModelLiveViz({ modelName, telemetry, live, tps }: { modelName: string; telemetry: LiveLlmTelemetry | null; live: boolean; tps?: number | null }) {
+  const arch = modelArchOf(modelName);
+  const slot = telemetry?.slot;
+  const gpu = telemetry?.gpu;
+  const cpu = telemetry?.cpu;
+  const phase = useState(() => 0)[0];
+  const [tick, setTick] = useState(phase);
+  useEffect(() => {
+    if (!live) return;
+    const id = window.setInterval(() => setTick((v) => (v + 1) % 32), 650);
+    return () => window.clearInterval(id);
+  }, [live]);
+
+  const total = slot?.promptTotal ?? 0;
+  const cachedPct = total > 0 ? Math.min(100, Math.round(((slot?.promptCached ?? 0) / total) * 100)) : 0;
+  const procPct = slot?.prefillPct ?? 0;
+  const gttPct = gpu?.gttUsedGiB != null && gpu?.gttTotalGiB ? Math.min(100, Math.round((gpu.gttUsedGiB / gpu.gttTotalGiB) * 100)) : 0;
+  const ramPct = cpu?.ramTotalGiB ? Math.min(100, Math.round((cpu.ramUsedGiB / cpu.ramTotalGiB) * 100)) : 0;
+
+  return (
+    <div className="llm-viz" dir="ltr">
+      {slot && total > 0 && (
+        <div className="llm-viz-sec">
+          <div className="llm-viz-head">
+            <span>{slot.isPrefilling ? `Prefill ${procPct}%` : 'Prompt ready'}</span>
+            <span className="mono faint">
+              {slot.promptProcessed.toLocaleString()} / {total.toLocaleString()} tok
+              {slot.cacheHitPct != null ? ` · ${slot.cacheHitPct}% cached` : ''}
+            </span>
+          </div>
+          <div className="llm-bar">
+            <span className="llm-bar-cached" style={{ width: `${Math.min(procPct, cachedPct)}%` }} />
+            <span className="llm-bar-new" style={{ width: `${Math.max(0, procPct - cachedPct)}%` }} />
+          </div>
+        </div>
+      )}
+
+      {telemetry && (
+        <div className="llm-split">
+          <div className="llm-split-card">
+            <div className="llm-viz-head">
+              <strong>iGPU</strong>
+              <span className="mono">{gpu?.busyPct != null ? `${gpu.busyPct}%` : '—'}</span>
+            </div>
+            <div className="llm-bar"><span className="llm-bar-gpu" style={{ width: `${gpu?.busyPct ?? 0}%` }} /></div>
+            <small className="faint mono">
+              GTT {gpu?.gttUsedGiB ?? '—'} / {gpu?.gttTotalGiB ?? '—'} GB ({gttPct}%)
+            </small>
+          </div>
+          <div className="llm-split-card">
+            <div className="llm-viz-head">
+              <strong>CPU</strong>
+              <span className="mono">{cpu ? `${cpu.busyPct}%` : '—'}</span>
+            </div>
+            <div className="llm-bar"><span className="llm-bar-cpu" style={{ width: `${cpu?.busyPct ?? 0}%` }} /></div>
+            <small className="faint mono">
+              RAM {cpu?.ramUsedGiB ?? '—'} / {cpu?.ramTotalGiB ?? '—'} GB ({ramPct}%) · {cpu?.cores ?? 0}T
+            </small>
+          </div>
+        </div>
+      )}
+
+      {arch && (
+        <div className="llm-viz-sec">
+          <div className="llm-viz-head">
+            <strong>{arch.title}</strong>
+            <span className="faint mono">
+              {slot?.speculative ? `${slot.speculativeType || 'draft'} · ` : ''}
+              {tps ? `${tps.toFixed(1)} t/s` : arch.specialLabel}
+            </span>
+          </div>
+          <div className="llm-layers" title={arch.specialLabel}>
+            {Array.from({ length: arch.layers }, (_, i) => (
+              <span
+                key={i}
+                className={`llm-layer${arch.isSpecialLayer(i) ? ' special' : ''}${live && !slot?.isPrefilling && (i % 8 === tick % 8) ? ' pulse' : ''}`}
+              />
+            ))}
+          </div>
+          <div className="llm-viz-head" style={{ marginTop: 4 }}>
+            <small className="faint">{arch.expertsLabel}</small>
+            <small className="faint">{arch.specialLabel}</small>
+          </div>
+          <div className="llm-experts" aria-hidden>
+            {Array.from({ length: arch.totalClusters }, (_, i) => {
+              const hot = live && ((i + tick * 3) % Math.floor(arch.totalClusters / arch.activeClusters) === 0);
+              return <span key={i} className={`llm-exp${hot ? ' hot' : ''}`} />;
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function DecisionTimeline({
   steps,
   live,
@@ -318,7 +458,21 @@ export function DecisionTimeline({
 }) {
   const [open, setOpen] = useState(docked ? false : live);
   const [expandedStep, setExpandedStep] = useState<string | null>(null);
+  const [telemetry, setTelemetry] = useState<LiveLlmTelemetry | null>(null);
   const visible = steps.filter((s) => s.kind === 'routing' || s.kind === 'tool' || s.kind === 'model' || s.kind === 'contract');
+
+  const hasExpandedModel = Boolean(expandedStep && visible.some((s) => s.id === expandedStep && s.kind === 'model'));
+  useEffect(() => {
+    if (!live && !hasExpandedModel) return;
+    let alive = true;
+    const poll = () => {
+      void api<LiveLlmTelemetry>('/api/llm/live').then((d) => alive && setTelemetry(d)).catch(() => undefined);
+    };
+    poll();
+    const timer = window.setInterval(poll, live ? 1000 : 3000);
+    return () => { alive = false; window.clearInterval(timer); };
+  }, [live, hasExpandedModel]);
+
   if (!visible.length) return null;
 
   const toolCount = visible.filter((s) => s.kind === 'tool').length;
@@ -328,6 +482,7 @@ export function DecisionTimeline({
   const totalSec = completedModelSteps.reduce((acc, s) => acc + ((s.latencyMs || 0) / 1000), 0);
   const avgTps = totalOut > 0 && totalSec > 0 ? Math.round((totalOut / totalSec) * 10) / 10 : null;
   const shownTps = live ? (liveTokPerSec ?? avgTps) : avgTps;
+  const prefillPct = live && telemetry?.slot?.isPrefilling ? telemetry.slot.prefillPct : null;
 
   return (
     <div className={`decision-trace${docked ? ' docked' : ''}${live ? ' live' : ''}`}>
@@ -337,15 +492,19 @@ export function DecisionTimeline({
           <Cpu size={14} aria-hidden />
           <span>
             {activeStep
-              ? t('Running {0}…', [activeStep.name])
+              ? prefillPct != null
+                ? `${activeStep.name} · Prefill ${prefillPct}%`
+                : t('Running {0}…', [activeStep.name])
               : t('Decision path · {0} steps ({1} tools)', [visible.length, toolCount])}
           </span>
         </button>
-        {shownTps != null && shownTps > 0 && (
+        {prefillPct != null ? (
+          <span className="decision-tps mono">{prefillPct}%</span>
+        ) : shownTps != null && shownTps > 0 ? (
           <span className="decision-tps mono" title={live ? 'Live decode speed' : 'Average decode speed'}>
             {shownTps.toFixed(1)} t/s
           </span>
-        )}
+        ) : null}
         {live && onStop && (
           <button type="button" className="btn ghost small danger" onClick={onStop}>
             <Square size={12} aria-hidden /> {t('Cancel')}
@@ -357,10 +516,11 @@ export function DecisionTimeline({
           {visible.map((step) => {
             const isStepOpen = expandedStep === step.id;
             const icon = step.kind === 'tool' ? (step.name === 'shell' ? <Terminal size={13} /> : <Wrench size={13} />) : <Sparkles size={13} />;
+            const isLiveModel = step.kind === 'model' && step.status === 'running';
             const summary = step.kind === 'routing'
               ? String((step.output as { reason?: string } | null)?.reason || step.name)
               : step.kind === 'model'
-                ? `${step.name}${step.tokensOut ? ` · ${step.tokensOut} tok` : ''}`
+                ? `${step.name}${isLiveModel && prefillPct != null ? ` · Prefill ${prefillPct}%` : step.tokensOut ? ` · ${step.tokensOut} tok` : ''}`
                 : step.name;
             return (
               <li key={step.id} className={`decision-item ${step.status}`}>
@@ -371,8 +531,16 @@ export function DecisionTimeline({
                   {step.latencyMs ? <span className="mono faint decision-ms">{step.latencyMs >= 1000 ? `${(step.latencyMs / 1000).toFixed(1)}s` : `${step.latencyMs}ms`}</span> : null}
                   {isStepOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                 </button>
+                {isLiveModel && prefillPct != null && (
+                  <div className="llm-row-progress" aria-hidden>
+                    <span style={{ width: `${prefillPct}%` }} />
+                  </div>
+                )}
                 {isStepOpen && (
                   <div className="decision-detail">
+                    {step.kind === 'model' && (
+                      <ModelLiveViz modelName={step.name} telemetry={telemetry} live={isLiveModel} tps={shownTps} />
+                    )}
                     {step.input != null && <pre className="mini-out">{typeof step.input === 'string' ? step.input : JSON.stringify(step.input, null, 2).slice(0, 1200)}</pre>}
                     {step.output != null && <pre className="mini-out">{typeof step.output === 'string' ? step.output.slice(0, 1800) : JSON.stringify(step.output, null, 2).slice(0, 1800)}</pre>}
                     {step.error && <pre className="mini-out err">{step.error}</pre>}

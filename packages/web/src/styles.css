@@ -2574,3 +2574,23 @@ button.state-card:hover, a.state-card:hover { background: var(--bg-3); }
 .delete-choice.danger .delete-choice-text strong { color: var(--coral); }
 .delete-choice.danger:hover:not(:disabled) { border-color: rgba(var(--coral-rgb), 0.6); background: rgba(var(--coral-rgb), 0.12); }
 .delete-modal-foot { display: flex; justify-content: flex-end; }
+
+.llm-row-progress { height: 3px; width: 100%; background: var(--bg-3); overflow: hidden; }
+.llm-row-progress > span { display: block; height: 100%; background: var(--brass); transition: width 350ms ease; }
+.llm-viz { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: calc(10px * var(--round)); background: var(--bg-1); }
+.llm-viz-sec { display: flex; flex-direction: column; gap: 5px; }
+.llm-viz-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: calc(12px * var(--fs)); }
+.llm-bar { display: flex; height: 7px; border-radius: 999px; background: var(--bg-3); overflow: hidden; }
+.llm-bar-cached { background: #3b8c5a; height: 100%; transition: width 350ms ease; }
+.llm-bar-new { background: var(--brass); height: 100%; transition: width 350ms ease; }
+.llm-bar-gpu { background: #3b8c5a; height: 100%; transition: width 350ms ease; }
+.llm-bar-cpu { background: #4a7ec7; height: 100%; transition: width 350ms ease; }
+.llm-split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.llm-split-card { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border-radius: calc(8px * var(--round)); background: var(--bg-2); border: 1px solid var(--line); }
+.llm-layers { display: grid; grid-template-columns: repeat(auto-fit, minmax(4px, 1fr)); gap: 2px; height: 12px; }
+.llm-layer { border-radius: 2px; background: rgba(var(--text-rgb), 0.14); }
+.llm-layer.special { background: rgba(var(--brass-rgb), 0.55); }
+.llm-layer.pulse { background: var(--brass); }
+.llm-experts { display: grid; grid-template-columns: repeat(16, minmax(0, 1fr)); gap: 3px; }
+.llm-exp { height: 7px; border-radius: 2px; background: rgba(var(--text-rgb), 0.1); transition: background 250ms ease; }
+.llm-exp.hot { background: var(--brass); }

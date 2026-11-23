@@ -2,6 +2,7 @@ import { needsTitle, previewOf } from './chat-titles.js';
 import { execFile } from 'node:child_process';
 import { safeInside } from './pathsafe.js';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
@@ -1734,6 +1735,81 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   });
   app.get('/api/workbench', async () => ({ workbench: engine.workbench ? await engine.workbench.status() : null }));
   app.get('/api/browser', async () => ({ browser: engine.browser ? await engine.browser.status() : null }));
+  app.get('/api/llm/live', async () => {
+    const readGpuBusy = (): number | null => {
+      try {
+        for (const name of fs.readdirSync('/sys/class/drm').filter((n) => /^card\d+$/.test(n))) {
+          const p = path.join('/sys/class/drm', name, 'device', 'gpu_busy_percent');
+          if (fs.existsSync(p)) {
+            const v = Number(fs.readFileSync(p, 'utf8').trim());
+            if (Number.isFinite(v)) return Math.max(0, Math.min(100, v));
+          }
+        }
+      } catch { /* ignore */ }
+      return null;
+    };
+    const probeSlot = async (baseUrl: string | undefined, label: string) => {
+      if (!baseUrl) return null;
+      const root = baseUrl.replace(/\/v1\/?$/, '').replace(/\/+$/, '');
+      try {
+        const res = await fetchImpl(`${root}/slots`, { signal: AbortSignal.timeout(900) });
+        if (!res.ok) return null;
+        const slots = await res.json() as Array<{
+          id?: number; n_ctx?: number; is_processing?: boolean; speculative?: boolean;
+          n_prompt_tokens?: number; n_prompt_tokens_processed?: number; n_prompt_tokens_cache?: number;
+          params?: { 'speculative.types'?: string };
+        }>;
+        const slot = slots.find((s) => s.is_processing) ?? slots[0];
+        if (!slot) return null;
+        const total = Number(slot.n_prompt_tokens ?? 0);
+        const processed = Number(slot.n_prompt_tokens_processed ?? 0);
+        const cached = Number(slot.n_prompt_tokens_cache ?? 0);
+        const isPrefilling = Boolean(slot.is_processing && total > 0 && processed < total);
+        const prefillPct = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : null;
+        const cacheHitPct = total > 0 ? Math.min(100, Math.round((cached / total) * 100)) : null;
+        return {
+          server: label,
+          isProcessing: Boolean(slot.is_processing),
+          isPrefilling,
+          nCtx: Number(slot.n_ctx ?? 0),
+          promptTotal: total,
+          promptProcessed: processed,
+          promptCached: cached,
+          prefillPct,
+          cacheHitPct,
+          speculative: Boolean(slot.speculative),
+          speculativeType: slot.params?.['speculative.types'] || null,
+        };
+      } catch {
+        return null;
+      }
+    };
+    const [mainSlot, uncSlot] = await Promise.all([
+      probeSlot(process.env.LLAMA_SERVER_URL, 'main'),
+      probeSlot(process.env.LLAMA_UNCENSORED_SERVER_URL, 'uncensored'),
+    ]);
+    const slot = (mainSlot?.isProcessing ? mainSlot : null) ?? (uncSlot?.isProcessing ? uncSlot : null) ?? mainSlot ?? uncSlot;
+    const gtt = readGtt();
+    const gpuBusyPct = readGpuBusy();
+    const cpus = os.cpus().length || 1;
+    const cpuPct = Math.min(100, Math.round((os.loadavg()[0] / cpus) * 100));
+    const totalRam = os.totalmem();
+    const freeRam = os.freemem();
+    return {
+      slot,
+      gpu: {
+        busyPct: gpuBusyPct,
+        gttUsedGiB: gtt ? Math.round((gtt.usedBytes / 1024 ** 3) * 10) / 10 : null,
+        gttTotalGiB: gtt ? Math.round((gtt.totalBytes / 1024 ** 3) * 10) / 10 : null,
+      },
+      cpu: {
+        busyPct: cpuPct,
+        cores: cpus,
+        ramUsedGiB: Math.round(((totalRam - freeRam) / 1024 ** 3) * 10) / 10,
+        ramTotalGiB: Math.round((totalRam / 1024 ** 3) * 10) / 10,
+      },
+    };
+  });
   app.get('/api/resources/trends', async (req) => {
     const hours = Number((req.query as { hours?: string }).hours || 24);
     const since = new Date(Date.now() - hours * 3600_000).toISOString();
