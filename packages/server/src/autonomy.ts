@@ -22,8 +22,8 @@ const act = (args: Record<string, unknown>) => String(args.action || (args.id ? 
  */
 
 export const HELPER_LIMITS = { perChat: 3, total: 4, defaultSteps: 8, maxSteps: 24, defaultMinutes: 10, minMinutes: 1, maxMinutes: 30, maxTimersPerPersona: 20 };
-/** A helper never gets these: no helpers of helpers, no scheduling from the background. */
-export const HELPER_DENIED = ['spawn_agent', 'helpers', 'manage_timer', 'manage_trigger'];
+/** A helper never gets these: no helpers of helpers, no scheduling or creating new projects from the background. */
+export const HELPER_DENIED = ['spawn_agent', 'helpers', 'manage_timer', 'manage_trigger', 'create_project'];
 
 export interface HelperRow {
   id: string; parentSessionId: string; parentRunId: string | null; childSessionId: string; childRunId: string | null;
