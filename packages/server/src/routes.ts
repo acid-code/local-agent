@@ -1196,7 +1196,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     if (engine.sessionBusy(id)) throw http(409, 'A reply is still running in this chat. Press Stop first, then delete it.');
     engine.autonomy.stopForSession(id);
     if (permanent) {
-      deleteSessionPermanently(store.db, id);
+      deleteSessionPermanently(store.db, id, config.dataDir);
     } else {
       store.updateSession(id, { archived: true });
     }

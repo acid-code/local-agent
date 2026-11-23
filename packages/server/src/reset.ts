@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { createBackup, type BackupInfo } from './ops.js';
 
@@ -79,8 +81,8 @@ function hasColumn(db: DatabaseSync, table: string, col: string) {
   return cols.some((c) => c.name === col);
 }
 
-/** Permanently delete a single chat session and everything hanging off it (messages, runs, steps, plans, summaries). */
-export function deleteSessionPermanently(db: DatabaseSync, sessionId: string): void {
+/** Permanently delete a single chat session, everything hanging off it (messages, runs, steps, plans, summaries), and any files attached to it. */
+export function deleteSessionPermanently(db: DatabaseSync, sessionId: string, dataDir?: string): void {
   const runIds = hasColumn(db, 'runs', 'session_id')
     ? (db.prepare('SELECT id FROM runs WHERE session_id = ?').all(sessionId) as { id: string }[]).map((r) => r.id)
     : [];
@@ -90,10 +92,28 @@ export function deleteSessionPermanently(db: DatabaseSync, sessionId: string): v
   const planIds = hasColumn(db, 'plans', 'session_id')
     ? (db.prepare('SELECT id FROM plans WHERE session_id = ?').all(sessionId) as { id: string }[]).map((r) => r.id)
     : [];
+  const attachedFiles = new Map<string, { relPath: string; ownerId: string }>();
+  const hasOwnerCol = hasColumn(db, 'files', 'owner_id');
+  const fileCols = hasOwnerCol ? 'id, rel_path, owner_id' : 'id, rel_path';
+  if (hasColumn(db, 'files', 'session_id') && hasColumn(db, 'files', 'rel_path')) {
+    const bySession = db.prepare(`SELECT ${fileCols} FROM files WHERE session_id = ?`).all(sessionId) as { id: string; rel_path: string; owner_id?: string }[];
+    for (const row of bySession) attachedFiles.set(row.id, { relPath: row.rel_path, ownerId: row.owner_id || 'owner' });
+  }
+  if (msgIds.length && hasColumn(db, 'files', 'message_id') && hasColumn(db, 'files', 'rel_path')) {
+    const byMsg = db.prepare(`SELECT ${fileCols} FROM files WHERE message_id = ?`);
+    for (const msgId of msgIds) {
+      for (const row of byMsg.all(msgId) as { id: string; rel_path: string; owner_id?: string }[]) {
+        attachedFiles.set(row.id, { relPath: row.rel_path, ownerId: row.owner_id || 'owner' });
+      }
+    }
+  }
 
   db.exec('BEGIN IMMEDIATE');
   try {
-    if (hasColumn(db, 'files', 'session_id')) db.prepare('UPDATE files SET session_id = NULL, message_id = NULL WHERE session_id = ?').run(sessionId);
+    if (attachedFiles.size && exists(db, 'files')) {
+      const delFile = db.prepare('DELETE FROM files WHERE id = ?');
+      for (const fileId of attachedFiles.keys()) delFile.run(fileId);
+    }
     for (const runId of runIds) {
       if (hasColumn(db, 'run_steps', 'run_id')) db.prepare('DELETE FROM run_steps WHERE run_id = ?').run(runId);
       if (hasColumn(db, 'checkpoints', 'run_id')) db.prepare('DELETE FROM checkpoints WHERE run_id = ?').run(runId);
@@ -116,5 +136,20 @@ export function deleteSessionPermanently(db: DatabaseSync, sessionId: string): v
   } catch (error) {
     db.exec('ROLLBACK');
     throw error;
+  }
+
+  if (dataDir && attachedFiles.size) {
+    const ownerFilesRoot = path.resolve(dataDir, 'files');
+    const dataRoot = path.resolve(dataDir);
+    for (const [fileId, info] of attachedFiles) {
+      const full = info.ownerId === 'owner'
+        ? path.resolve(ownerFilesRoot, info.relPath)
+        : path.resolve(dataRoot, info.relPath);
+      const allowedRoot = info.ownerId === 'owner' ? ownerFilesRoot : path.resolve(dataRoot, 'accounts', info.ownerId, 'files');
+      if (full.startsWith(`${allowedRoot}${path.sep}`)) {
+        fs.rmSync(path.dirname(full), { recursive: true, force: true });
+      }
+      fs.rmSync(path.join(dataRoot, 'previews', fileId.replace(/[^\w-]/g, '')), { recursive: true, force: true });
+    }
   }
 }
