@@ -176,6 +176,9 @@ export class Autonomy {
     if (this.runningCount('') >= HELPER_LIMITS.total) throw new Error(`${HELPER_LIMITS.total} helpers are already running on this machine. Wait for one to finish.`);
     const cli = input.cli?.trim() || null;
     if (cli && owner !== OWNER_ID) throw new Error('Coding CLIs are for the owner\'s personas.');
+    if (cli && !/^(claude|codex|gemini|aider|opencode|qwen)(?:[-_\w.]*)?$/i.test(cli)) {
+      throw new Error(`cli is only for coding CLIs (claude, codex, gemini, aider, opencode). To run "${cli.slice(0, 60)}", call the shell tool directly (or omit cli so the helper uses shell directly).`);
+    }
     const maxSteps = Math.max(1, Math.min(HELPER_LIMITS.maxSteps, Math.floor(input.maxSteps || HELPER_LIMITS.defaultSteps)));
     const timeoutMs = Math.max(HELPER_LIMITS.minMinutes, Math.min(HELPER_LIMITS.maxMinutes, input.timeoutMinutes || HELPER_LIMITS.defaultMinutes)) * 60_000;
     let tools = input.tools?.length ? input.tools.map(String).filter((name) => !HELPER_DENIED.includes(name)) : null;
