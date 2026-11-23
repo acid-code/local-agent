@@ -1003,9 +1003,14 @@ export class Engine {
     let toolCalls: ToolCall[] | undefined;
     let usage = { inputTokens: built.plan.estimatedTokens, outputTokens: 0 };
     let telemetry: import('./providers.js').Telemetry | undefined;
+    const streamAbort = new AbortController();
+    const onParentAbort = () => streamAbort.abort();
+    signal.addEventListener('abort', onParentAbort, { once: true });
+    let hitDegenerateLoop = false;
+    const isDegenerate = (buf: string) => buf.length >= 40 && /(.)\1{39,}$|(.{2,8})\2{11,}$/.test(buf.slice(-120));
     try {
       for await (const event of provider.complete({
-        model: model.apiName, messages: built.messages, tools, signal,
+        model: model.apiName, messages: built.messages, tools, signal: streamAbort.signal,
         paceMs: model.profileId === 'rehearsal' && process.env.NODE_ENV !== 'test' ? 10 : 0,
         numCtx,
         keepAlive: model.local ? keepAliveFor(model) : undefined,
@@ -1017,11 +1022,23 @@ export class Engine {
         if (signal.aborted) throw new StopError();
         if (event.type === 'token') {
           text += event.text;
+          if (isDegenerate(text)) {
+            hitDegenerateLoop = true;
+            text = text.replace(/(.)\1{19,}$|(.{2,8})\2{6,}$/, '').trimEnd();
+            streamAbort.abort();
+            break;
+          }
           const live = this.liveStreams.get(run.id);
           if (live) live.text = text;
           this.bus.publish({ type: 'token', runId: run.id, text: event.text });
         } else if (event.type === 'thinking') {
           reasoningText += event.text;
+          if (isDegenerate(reasoningText)) {
+            hitDegenerateLoop = true;
+            reasoningText = reasoningText.replace(/(.)\1{19,}$|(.{2,8})\2{6,}$/, '').trimEnd();
+            streamAbort.abort();
+            break;
+          }
           const live = this.liveStreams.get(run.id);
           if (live) live.thinking = reasoningText;
           this.bus.publish({ type: 'thinking', runId: run.id, text: event.text });
@@ -1031,6 +1048,10 @@ export class Engine {
           if (event.telemetry) telemetry = event.telemetry;
         }
       }
+      if (hitDegenerateLoop) {
+        this.store.addLog('warn', `Stopped degenerate token repetition loop from ${model.name}.`, run.id, 'providers');
+      }
+      signal.removeEventListener('abort', onParentAbort);
       if (lease) await this.calibrateLease(lease, model.apiName, numCtx);
       const uncensored = this.llama.uncensoredModel();
       if (!current.cursor.uncensoredRetry

@@ -42,9 +42,15 @@ export function samplingFor(modelName: string, opts: { thinking: boolean; task: 
   if ((process.env.LA_SAMPLING || '').toLowerCase() === 'off') return undefined;
   const name = modelName.toLowerCase();
   if (/qwen3/.test(name)) {
-    if (!opts.thinking) return { temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0, presence_penalty: 1.5, repeat_penalty: 1 };
-    if (opts.task === 'code') return { temperature: 0.6, top_p: 0.95, top_k: 20, min_p: 0, presence_penalty: 0, repeat_penalty: 1 };
-    return { temperature: 1.0, top_p: 0.95, top_k: 20, min_p: 0, presence_penalty: 1.5, repeat_penalty: 1 };
+    // Abliterated/uncensored Qwen3.6 fine-tunes collapse into repeated punctuation (e.g. "/////") under high presence_penalty (1.5) + repeat_penalty 1.
+    if (/uncensored|abliterated|hauhaucs/.test(name)) {
+      if (!opts.thinking) return { temperature: 0.6, top_p: 0.85, top_k: 20, min_p: 0.05, presence_penalty: 0.3, repeat_penalty: 1.08 };
+      if (opts.task === 'code') return { temperature: 0.6, top_p: 0.9, top_k: 20, min_p: 0.05, presence_penalty: 0.2, repeat_penalty: 1.06 };
+      return { temperature: 0.7, top_p: 0.9, top_k: 20, min_p: 0.05, presence_penalty: 0.4, repeat_penalty: 1.08 };
+    }
+    if (!opts.thinking) return { temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0.02, presence_penalty: 0.5, repeat_penalty: 1.05 };
+    if (opts.task === 'code') return { temperature: 0.6, top_p: 0.95, top_k: 20, min_p: 0.02, presence_penalty: 0, repeat_penalty: 1.03 };
+    return { temperature: 0.8, top_p: 0.95, top_k: 20, min_p: 0.02, presence_penalty: 0.6, repeat_penalty: 1.05 };
   }
   if (/gpt-oss/.test(name)) return { temperature: 1.0, top_p: 1.0 };
   if (/gemma/.test(name)) return { temperature: 1.0, top_k: 64, top_p: 0.95, min_p: 0 };
