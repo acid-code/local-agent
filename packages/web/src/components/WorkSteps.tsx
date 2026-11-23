@@ -30,7 +30,7 @@ export function useClockPhase(periodMs: number, offsetMs = 0): CSSProperties {
 
 /** The "Working…" dots: sequential 1-2-3 wave via pure CSS delays; memoized so streaming tokens never re-render them. */
 export const TypingDots = memo(function TypingDots({ label, note }: { label: string; note: string }) {
-  return <div className="typing" role="status" aria-label={label}><span aria-hidden /><span aria-hidden /><span aria-hidden /> <em>{note}</em></div>;
+  return <div className="typing" role="status" aria-label={label}><span aria-hidden /><em>{note}</em></div>;
 });
 
 /** The reasoning streaming in right now: one quiet row that becomes a "Thought" row when the step lands. */

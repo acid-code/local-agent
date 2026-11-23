@@ -23,7 +23,7 @@ fi
 # BEST_FATTN_KERNEL_MMA_F16 which needs F16 K/V (q8_0 forces per-step dequant and faults launch_fattn).
 args+=(-ngl 999 -fit off -lm none -fa on
        -ub "${LLAMA_UBATCH:-64}" -b "${LLAMA_BATCH:-512}" -t "${LLAMA_THREADS:-12}"
-       -c "${LLAMA_CTX:-65536}" -np "${LLAMA_SLOTS:-1}"
+       -c "${LLAMA_CTX:-32768}" -np "${LLAMA_SLOTS:-1}"
        --jinja
        --host "${LLAMA_HOST:-0.0.0.0}" --port "${LLAMA_PORT:-8080}")
 [[ -n "${LLAMA_CACHE_K:-}" ]] && args+=(-ctk "$LLAMA_CACHE_K")
