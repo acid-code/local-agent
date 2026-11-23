@@ -363,7 +363,7 @@ async function inklingHealthy(fetchImpl: typeof fetch, baseUrl: string): Promise
   }
 }
 
-export function inklingVisionRunner(fetchImpl: typeof fetch, baseUrl: string, model = 'inkling-2-mini-uncensored'): NonNullable<OcrRunners['vision']> {
+export function inklingVisionRunner(fetchImpl: typeof fetch, baseUrl: string, model = 'qwen3.6-35b-a3b-uncensored'): NonNullable<OcrRunners['vision']> {
   const root = baseUrl.replace(/\/v1\/?$/, '').replace(/\/$/, '');
   return async (image, prompt) => {
     const started = Date.now();
@@ -374,7 +374,8 @@ export function inklingVisionRunner(fetchImpl: typeof fetch, baseUrl: string, mo
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         model,
-        max_tokens: 1024,
+        max_tokens: 2048,
+        chat_template_kwargs: { enable_thinking: false },
         messages: [{
           role: 'user',
           content: [
@@ -385,9 +386,10 @@ export function inklingVisionRunner(fetchImpl: typeof fetch, baseUrl: string, mo
       }),
       signal: AbortSignal.timeout(120_000),
     });
-    if (!res.ok) throw new Error(`Inkling vision HTTP ${res.status}`);
-    const json = await res.json() as { choices?: { message?: { content?: string } }[] };
-    const text = json.choices?.[0]?.message?.content?.trim() ?? '';
+    if (!res.ok) throw new Error(`Native mmproj vision HTTP ${res.status}`);
+    const json = await res.json() as { choices?: { message?: { content?: string; reasoning_content?: string } }[] };
+    const msg = json.choices?.[0]?.message;
+    const text = (msg?.content?.trim() || msg?.reasoning_content?.trim()) ?? '';
     return { text, model, ms: Date.now() - started };
   };
 }
