@@ -8,6 +8,7 @@ import { t } from '../i18n';
 
 export interface MiniAgentRow {
   id: string;
+  childRunId?: string | null;
   agentName: string;
   modelName?: string | null;
   task: string;

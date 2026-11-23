@@ -2299,6 +2299,7 @@ export class Engine {
     names.add('web_search');
     names.add('web_fetch');
     if ((agent.ownerId || OWNER_ID) === OWNER_ID) {
+      names.add('shell');
       names.add('create_project');
       names.add('vercel');
       names.add('turbo_inspect');

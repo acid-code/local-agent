@@ -249,15 +249,22 @@ export function Chat() {
     }
   }
 
-  async function loadAsks(run: string | null) {
-    if (!run) { setAsks([]); return; }
-    try { const data = await api<{ approvals: { id: string; runId: string; toolName: string; reason: string }[] }>('/api/approvals'); setAsks(data.approvals.filter((row) => row.runId === run)); }
+  const helperRunIds = miniAgents.map((h) => h.childRunId).filter((id): id is string => Boolean(id));
+  const helperWaiting = miniAgents.some((h) => h.status === 'waiting');
+  const helperRunKey = helperRunIds.join(',');
+  async function loadAsks(run: string | null, extraRuns: string[] = []) {
+    const wanted = new Set([run, ...extraRuns].filter((id): id is string => Boolean(id)));
+    if (!wanted.size) { setAsks([]); return; }
+    try { const data = await api<{ approvals: { id: string; runId: string; toolName: string; reason: string }[] }>('/api/approvals'); setAsks(data.approvals.filter((row) => wanted.has(row.runId))); }
     catch { /* the card shows on the next status */ }
   }
-  useEffect(() => { if (status === 'awaiting_approval') void loadAsks(runId); else setAsks([]); }, [status, runId]);
+  useEffect(() => {
+    if (status === 'awaiting_approval' || helperWaiting) void loadAsks(runId, helperRunIds);
+    else setAsks([]);
+  }, [status, runId, helperWaiting, helperRunKey]);
   async function decide(id: string, decision: 'approve' | 'deny') {
     setAsks((rows) => rows.filter((row) => row.id !== id));
-    try { await post(`/api/approvals/${id}`, { decision }); } catch (error) { toast(errorText(error), 'error'); void loadAsks(runId); }
+    try { await post(`/api/approvals/${id}`, { decision }); } catch (error) { toast(errorText(error), 'error'); void loadAsks(runId, helperRunIds); }
   }
 
   // While helpers run in the background, check now and then; when the last one ends, its result is in the chat.
