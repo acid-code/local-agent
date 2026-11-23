@@ -456,7 +456,7 @@ export function roleContextBudget(
     return Math.min(model.contextWindow, Math.max(model.practicalBudget, target));
   }
   if (r === 'fast' || r === 'voice' || model.sizeClass === 'small') {
-    return Math.min(model.contextWindow, Math.min(model.practicalBudget, 16_384));
+    return Math.min(model.contextWindow, Math.min(model.practicalBudget, 24_576));
   }
   return Math.min(model.contextWindow, Math.max(16_384, Math.min(model.practicalBudget, 65_536)));
 }

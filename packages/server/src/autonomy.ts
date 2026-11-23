@@ -94,19 +94,25 @@ export class Autonomy {
     const helper = this.mapHelper(row);
     if (Number(row.delivered)) return helper;
     const answer = [...this.store.listMessages(helper.childSessionId)].reverse().find((message) => message.role === 'assistant' && message.content.trim());
-    const status: HelperRow['status'] = run.status === 'completed' ? 'done' : run.status === 'stopped' ? 'stopped' : 'failed';
     const result = (answer?.content || '').slice(0, 6000) || null;
-    const error = status === 'done' ? null : (run.error || (status === 'stopped' ? 'Stopped.' : 'The helper did not finish.'));
+    const emptyAnswerFail = Boolean(result && /(?:returned an empty answer twice|only produced reasoning and no answer, twice)/i.test(result));
+    const status: HelperRow['status'] = run.status === 'completed'
+      ? (emptyAnswerFail ? 'failed' : 'done')
+      : run.status === 'stopped' ? 'stopped' : 'failed';
+    const error = status === 'done'
+      ? null
+      : (run.error || (emptyAnswerFail ? result : null) || (status === 'stopped' ? 'Stopped.' : 'The helper did not finish.'));
     const claimed = this.store.db.prepare('UPDATE helpers SET status = ?, result = ?, error = ?, ended_at = ?, delivered = 1 WHERE id = ? AND delivered = 0').run(status, result, error, now(), id);
     if (!Number(claimed.changes)) return this.mapHelper(this.store.db.prepare('SELECT * FROM helpers WHERE id = ?').get(id) as Record<string, unknown>);
     const parent = this.store.getSession(helper.parentSessionId);
     if (parent) {
       const head = status === 'done' ? `Helper finished · ${helper.agentName}` : status === 'stopped' ? `Helper stopped · ${helper.agentName}` : `Helper failed · ${helper.agentName}`;
-      const body = status === 'done' ? (result || 'No answer.') : `${error}${result ? `\n\nLast words:\n${result}` : ''}`;
-      this.store.insertMessage({
+      const body = status === 'done' ? (result || 'No answer.') : `${error}${result && result !== error ? `\n\nLast words:\n${result}` : ''}`;
+      const posted = this.store.insertMessage({
         sessionId: parent.id, role: 'assistant', content: `**${head}** — “${helper.task.slice(0, 120)}”\n\n${body}`,
         toolCallId: null, toolName: null, toolCalls: null, agentId: parent.agentId ?? helper.agentId, runId: null, imageUrl: null, routingNote: `helper:${helper.id}`,
       });
+      this.bus.publish({ type: 'message', sessionId: parent.id, message: posted });
     }
     const done = this.mapHelper(this.store.db.prepare('SELECT * FROM helpers WHERE id = ?').get(id) as Record<string, unknown>);
     this.bus.publish({ type: 'helper', sessionId: helper.parentSessionId, helper: done });
