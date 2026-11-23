@@ -124,7 +124,7 @@ export function Computer() {
           {browserLive ? (
             <iframe
               title={t('Live computer')}
-              src={`/novnc/vnc_lite.html?path=${encodeURIComponent('api/computer/vnc')}&autoconnect=1&resize=scale&view_only=${takenOver ? '0' : '1'}`}
+              src={`/api/computer/novnc/vnc_lite.html?path=${encodeURIComponent('api/computer/vnc')}&autoconnect=1&resize=scale&view_only=${takenOver ? '0' : '1'}`}
               className="computer-iframe"
               style={{ pointerEvents: takenOver ? 'auto' : 'none' }}
             />

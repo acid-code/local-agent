@@ -245,7 +245,7 @@ export class ManagedBrowser {
         Image: IMAGE(),
         Labels: { 'com.local-agent.role': 'browser', 'local-agent.role': 'browser' },
         Env: ['DISPLAY=:99', 'CDP_PORT=9222', 'VNC_PORT=5900', 'NOVNC_PORT=6080'],
-        network: null,
+        network: process.env.LA_COMPOSE_PROJECT ? `${process.env.LA_COMPOSE_PROJECT}_default` : null,
         HostConfig: {
           Memory: BROWSER_MEMORY_BYTES,
           NanoCpus: 2_000_000_000,

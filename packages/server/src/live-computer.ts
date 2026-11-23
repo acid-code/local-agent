@@ -108,7 +108,26 @@ export function registerLiveComputer(app: FastifyInstance, deps: {
   browser: ManagedBrowser | null;
   vncUpstreamUrl?: () => string;
 }) {
-  const upstreamUrl = deps.vncUpstreamUrl ?? (() => process.env.LA_NOVNC_WS_URL || 'ws://127.0.0.1:6080/websockify');
+  const defaultHost = process.env.LA_COMPOSE_PROJECT ? 'la-browser:6080' : '127.0.0.1:6080';
+  const upstreamUrl = deps.vncUpstreamUrl ?? (() => process.env.LA_NOVNC_WS_URL || `ws://${defaultHost}/websockify`);
+  const novncHttpBase = () => (process.env.LA_NOVNC_HTTP_URL || `http://${defaultHost}`).replace(/\/+$/, '');
+
+  // Authenticated owner-only HTTP proxy for noVNC static assets served inside la-browser.
+  app.get('/api/computer/novnc/*', async (req, reply) => {
+    if (accountOf(req).role !== 'owner' || accountOf(req).id !== OWNER_ID) {
+      return reply.code(403).send({ error: 'Only the owner can view the live computer.' });
+    }
+    const rel = String((req.params as { '*': string })['*'] || 'vnc_lite.html').replace(/^\/+/, '');
+    if (rel.includes('..')) return reply.code(400).send({ error: 'Invalid path.' });
+    try {
+      const res = await fetch(`${novncHttpBase()}/${rel}`, { signal: AbortSignal.timeout(5000) });
+      const ct = res.headers.get('content-type');
+      if (ct) reply.header('content-type', ct);
+      return reply.code(res.status).send(Buffer.from(await res.arrayBuffer()));
+    } catch {
+      return reply.code(502).send('noVNC is not reachable yet (start a browse task first).');
+    }
+  });
 
   app.get('/api/computer/state', async (req, reply) => {
     if (accountOf(req).role !== 'owner' || accountOf(req).id !== OWNER_ID) {

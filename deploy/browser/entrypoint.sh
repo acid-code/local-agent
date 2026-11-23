@@ -14,9 +14,9 @@ Xvfb "$DISPLAY" -screen 0 "${SCREEN_W}x${SCREEN_H}x24" -nolisten tcp &
 sleep 0.5
 fluxbox >/dev/null 2>&1 &
 
-# VNC and noVNC bind strictly to 127.0.0.1 — never exposed on host ports.
+# VNC stays 127.0.0.1; websockify listens on the private container interface (zero host ports published).
 x11vnc -display "$DISPLAY" -listen 127.0.0.1 -rfbport "$VNC_PORT" -nopw -forever -shared -quiet &
-websockify --web=/usr/share/novnc "127.0.0.1:${NOVNC_PORT}" "127.0.0.1:${VNC_PORT}" >/dev/null 2>&1 &
+websockify --web=/usr/share/novnc "0.0.0.0:${NOVNC_PORT}" "127.0.0.1:${VNC_PORT}" >/dev/null 2>&1 &
 
 CHROME_BIN="$(find /ms-playwright -name chrome -type f 2>/dev/null | head -n 1 || command -v chromium || command -v google-chrome)"
 exec "$CHROME_BIN" \
