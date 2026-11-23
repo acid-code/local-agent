@@ -266,6 +266,9 @@ export const BUILTIN_TOOLS: Tool[] = [
       if (command.length > 4000) throw new Error('Command is too long.');
       if (assessCommand(command) === 'blocked') throw new Error('That command is blocked.');
       const cwd = (ctx.roots?.length ?? 0) > 0 ? projectPath(ctx.roots!, args.cwd ? String(args.cwd) : undefined, ctx.workspace, command) : ctx.workspace;
+      if (!(await fs.access(cwd).then(() => true).catch(() => false))) {
+        throw new Error(`Directory ${cwd} does not exist. Use your sandbox workspace (${ctx.workspace}) or create/clone a project under /data/workspaces/projects.`);
+      }
       if (ctx.sandbox !== 'host' && ctx.docker.available() && ctx.workbench && workbenchEnabled()) {
         try {
           const result = await ctx.workbench.run(command, cwd, shellTimeoutMs());
