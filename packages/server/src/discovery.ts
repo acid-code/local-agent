@@ -161,30 +161,44 @@ export async function llamaContext(fetchImpl: typeof fetch, base: string): Promi
   }
 }
 
-function rememberOpenAI(store: Store, id: string, base: string, json: { data?: { id?: string }[] }, displayName?: string, nCtx = 0) {
+function rememberOpenAI(
+  store: Store,
+  id: string,
+  base: string,
+  json: { data?: { id?: string; architecture?: { input_modalities?: string[] } }[] },
+  displayName?: string,
+  nCtx = 0,
+) {
   const provider = store.upsertProvider({ id: `prov_${id}`, kind: 'openai_compat', name: displayName || id, baseUrl: base, enabled: true });
-  const names = parseOpenAIModels(json).map((name) => {
-    if (id !== 'uncensored') return name;
-    if (/inkling[-_\s]?2[-_\s]?mini/i.test(name) && name.includes('/')) return 'inkling-2-mini-uncensored';
-    if (/flint[-_\s]?40b/i.test(name) && name.includes('/')) return 'flint-40b-abliterated';
-    return name;
-  });
-  for (const name of names) {
+  const rawEntries = (json.data ?? []).filter((entry): entry is { id: string; architecture?: { input_modalities?: string[] } } => Boolean(entry?.id));
+  const normalizeName = (raw: string) => {
+    if (id !== 'uncensored') return raw;
+    if (/qwen3\.?6.*(?:35b|a3b).*(?:uncensored|hauhaucs|abliterated)/i.test(raw) && raw.includes('/')) return 'qwen3.6-35b-a3b-uncensored';
+    if (/inkling[-_\s]?2[-_\s]?mini/i.test(raw) && raw.includes('/')) return 'inkling-2-mini-uncensored';
+    if (/flint[-_\s]?40b/i.test(raw) && raw.includes('/')) return 'flint-40b-abliterated';
+    return raw;
+  };
+  const entries = rawEntries.map((entry) => ({ name: normalizeName(entry.id), inputModalities: entry.architecture?.input_modalities }));
+  for (const { name, inputModalities } of entries) {
     const profile = resolveProfile(name);
     const publicName = id === 'uncensored'
-      ? (profile.id !== 'default' ? profile.displayName : name)
+      ? (name === 'qwen3.6-35b-a3b-uncensored' ? 'Qwen3.6 35B-A3B Uncensored' : profile.id !== 'default' ? profile.displayName : name)
       : name;
+    const advertised = Array.isArray(inputModalities) && inputModalities.length
+      ? (['text', 'image', 'audio'] as const).filter((m) => inputModalities.includes(m))
+      : null;
+    const modalities = advertised && advertised.length ? [...advertised] : profile.modalities;
     store.upsertModel({
       id: `${id}_${name.replace(/[^a-z0-9]+/gi, '_')}`, providerId: provider.id, name: publicName, apiName: name, profileId: profile.id,
-      // llama-server's own -c is the truth. An unknown model (Inkling) got the 8K default profile, so a 32K server
+      // llama-server's own -c is the truth. An unknown model got the 8K default profile, so a 32K server
       // was used as 8K and long chats were trimmed hard ("lost context").
       tokenizer: profile.tokenizer, contextWindow: nCtx || profile.contextWindow,
       practicalBudget: nCtx || profile.practicalBudget, strategy: profile.strategy,
-      sizeClass: profile.sizeClass, local: true, modalities: profile.modalities, strengths: profile.strengths, typicalQ4GiB: profile.typicalQ4GiB ?? null,
+      sizeClass: profile.sizeClass, local: true, modalities, strengths: profile.strengths, typicalQ4GiB: profile.typicalQ4GiB ?? null,
       priceIn: 0, priceOut: 0, notes: profile.notes, parameterSize: null, family: profile.family, source: 'discovered', embedding: isEmbeddingName(name), freeTier: null, enabled: true,
     });
   }
-  const installed = new Set(names);
+  const installed = new Set(entries.map((e) => e.name));
   for (const row of store.listModels()) {
     if (row.providerId !== provider.id || row.source !== 'discovered' || !row.enabled) continue;
     if (!installed.has(row.apiName)) store.updateModel(row.id, { enabled: false });

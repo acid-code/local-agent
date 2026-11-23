@@ -1,5 +1,5 @@
 [Unit]
-Description=llama-server uncensored fallback (Inkling 2 Mini, ROCm HIP)
+Description=llama-server uncensored fallback (Qwen3.6-35B-A3B Uncensored + mmproj + DFlash2, ROCm HIP)
 After=network-online.target llama-server.service
 Wants=network-online.target
 StartLimitIntervalSec=0

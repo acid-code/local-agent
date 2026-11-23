@@ -45,7 +45,7 @@ describe('uncensored provider isolation & GTT-guarded Inkling vision', () => {
       gtt: { usedBytes: 25 * GiB, totalBytes: 40 * GiB },
     });
     const res1 = await withGtt.vision!(Buffer.from([0x89, 0x50, 0x4e, 0x47]), 'describe');
-    expect(res1.model).toBe('inkling-2-mini-uncensored');
+    expect(res1.model).toBe('qwen3.6-35b-a3b-uncensored');
     expect(res1.text).toBe('Inkling saw a red button');
 
     // Tight GTT (2 GiB free) -> skips Inkling and uses Ollama fallback

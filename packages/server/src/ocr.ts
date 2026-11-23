@@ -323,10 +323,10 @@ export interface OcrDeps {
   geminiKey?: string;
   visionModel?: string;
   preferLightweight?: boolean;
-  /** Optional llama-server (Inkling mmproj) base URL, used for vision only when GTT has enough headroom. */
+  /** Optional llama-server (:8081 native mmproj) base URL, used for vision first when healthy and GTT allows (~12s/image, 0 extra GTT). */
   inklingVisionUrl?: string | null;
   inklingVisionModel?: string;
-  /** Optional uncensored llama-server (:8081, e.g. text-only Flint-40B) base URL + companion Ollama vision model. */
+  /** Optional text-only uncensored llama-server (:8081) base URL + companion Ollama vision model fallback. */
   uncensoredUrl?: string | null;
   uncensoredVisionModel?: string | null;
   /** Optional GTT override for unit tests; defaults to readGtt(). */
@@ -392,7 +392,15 @@ export function inklingVisionRunner(fetchImpl: typeof fetch, baseUrl: string, mo
   };
 }
 
-/** Real runners for this account: Tesseract when the service answers; uncensored Ollama vision when :8081 is active & GTT allows, else Gemini vision (if allowed and keyed), else Inkling mmproj when GTT allows, else a local Ollama vision model. */
+/**
+ * Real runners for this account:
+ * 1. Tesseract when the OCR service answers.
+ * 2. Vision priority:
+ *    - :8081 native mmproj (e.g. Qwen3.6-35B-A3B Uncensored + mmproj-f16, ~12s/image, 0 extra GTT) when healthy & GTT allows
+ *    - Ollama abliterated vision fallback (when :8081 is text-only & healthy & GTT allows)
+ *    - Gemini vision (if cloudAllowed & keyed)
+ *    - Lightweight local Ollama vision model (e.g. gemma3:4b)
+ */
 export async function liveRunners(deps: OcrDeps): Promise<OcrRunners> {
   const ocrFound = await resolveServiceUrl(deps.fetchImpl, 'ocr');
   const tesseract = ocrFound ? tesseractRunner(deps.fetchImpl, ocrFound.url) : null;
@@ -401,7 +409,14 @@ export async function liveRunners(deps: OcrDeps): Promise<OcrRunners> {
   const ollamaModel = await pickLocalVision(deps.fetchImpl, deps.ollamaRoot, deps.visionModel, Boolean(deps.preferLightweight));
   const ollamaFallback = ollamaModel ? ollamaVisionRunner(deps.fetchImpl, deps.ollamaRoot, ollamaModel, deps.memory) : null;
 
-  if (
+  if (deps.inklingVisionUrl && hasEnoughGttForVision(gtt) && (await inklingHealthy(deps.fetchImpl, deps.inklingVisionUrl))) {
+    const nativeVision = inklingVisionRunner(deps.fetchImpl, deps.inklingVisionUrl, deps.inklingVisionModel || 'qwen3.6-35b-a3b-uncensored');
+    vision = ollamaFallback
+      ? async (image, prompt) => {
+          try { return await nativeVision(image, prompt); } catch { return ollamaFallback(image, prompt); }
+        }
+      : nativeVision;
+  } else if (
     deps.uncensoredUrl
     && deps.uncensoredVisionModel
     && hasEnoughGttForVision(gtt, UNCENSORED_VISION_MIN_GTT_BYTES())
@@ -416,13 +431,6 @@ export async function liveRunners(deps: OcrDeps): Promise<OcrRunners> {
       : uncensoredVision;
   } else if (deps.cloudAllowed && deps.geminiKey) {
     vision = geminiVisionRunner(deps.fetchImpl, deps.geminiKey);
-  } else if (deps.inklingVisionUrl && hasEnoughGttForVision(gtt) && (await inklingHealthy(deps.fetchImpl, deps.inklingVisionUrl))) {
-    const inkling = inklingVisionRunner(deps.fetchImpl, deps.inklingVisionUrl, deps.inklingVisionModel || 'inkling-2-mini-uncensored');
-    vision = ollamaFallback
-      ? async (image, prompt) => {
-          try { return await inkling(image, prompt); } catch { return ollamaFallback(image, prompt); }
-        }
-      : inkling;
   } else {
     vision = ollamaFallback;
   }
