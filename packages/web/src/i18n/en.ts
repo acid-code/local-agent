@@ -1175,6 +1175,8 @@ export const en: Record<string, string> = {
   "Starting…": "Starting…",
   "Status": "Status",
   "Status views": "Status views",
+  "Steer": "Steer",
+  "Steer (Enter)": "Steer (Enter)",
   "Steer the active agent without stopping it…": "Steer the active agent without stopping it…",
   "Steering added to the active run.": "Steering added to the active run.",
   "Stop": "Stop",

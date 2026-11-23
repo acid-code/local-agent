@@ -25,7 +25,7 @@ object LiveSync {
         }
     }
 
-    private fun isLocal(id: String) = id.startsWith("local")
+    private fun isLocal(id: String) = id.startsWith("local") || id.startsWith("steer-local")
 
     /** Reconnect snapshot: older pages stay, the server's newest page replaces the rest, unechoed local sends stay last. */
     fun <T> mergeSnapshot(local: List<T>, server: List<T>, id: (T) -> String, role: (T) -> String, content: (T) -> String): List<T> {

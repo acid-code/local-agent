@@ -1043,6 +1043,8 @@ export const he: Record<string, string> = {
   "Status": "מצב",
   "Status views": "תצוגות מצב",
   "Stop": "עצירה",
+  "Steer": "הכוונה",
+  "Steer (Enter)": "הכוונה (Enter)",
   "Stop (Esc)": "עצירה (Esc)",
   "Stop every running turn now?": "לעצור עכשיו כל תור שרץ?",
   "Stopped.": "נעצר.",

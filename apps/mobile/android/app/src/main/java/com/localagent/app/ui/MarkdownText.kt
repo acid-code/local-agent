@@ -1,15 +1,20 @@
 package com.localagent.app.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -180,8 +185,37 @@ fun MarkdownBody(raw: String, modifier: Modifier = Modifier) {
                 }
                 Block.Rule -> HorizontalDivider(color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(vertical = 4.dp))
                 is Block.Code -> CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                    val ctx = LocalContext.current
+                    var codeCopied by remember(block.text) { mutableStateOf(false) }
+                    LaunchedEffect(codeCopied) {
+                        if (codeCopied) {
+                            kotlinx.coroutines.delay(1500)
+                            codeCopied = false
+                        }
+                    }
                     Surface(color = MaterialTheme.colorScheme.background, shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
-                        Text(block.text, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace), modifier = Modifier.padding(10.dp))
+                        Box(Modifier.fillMaxWidth()) {
+                            Text(
+                                block.text,
+                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                modifier = Modifier.padding(start = 10.dp, top = 10.dp, bottom = 10.dp, end = 38.dp),
+                            )
+                            IconButton(
+                                onClick = {
+                                    val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    cm.setPrimaryClip(ClipData.newPlainText("code", block.text))
+                                    codeCopied = true
+                                },
+                                modifier = Modifier.align(Alignment.TopEnd).size(32.dp),
+                            ) {
+                                Icon(
+                                    if (codeCopied) Icons.Default.Check else Icons.Default.ContentCopy,
+                                    contentDescription = "Copy code",
+                                    modifier = Modifier.size(14.dp),
+                                    tint = if (codeCopied) AccentMint else MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
                     }
                 }
             }

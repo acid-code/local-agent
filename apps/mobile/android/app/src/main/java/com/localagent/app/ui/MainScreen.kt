@@ -218,6 +218,11 @@ private fun ChatScreen(state: AppUiState, vm: ChatViewModel, onVoiceDictation: (
                         }
                         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                             DropdownMenuItem(
+                                text = { Text("Refresh chat") },
+                                leadingIcon = { Icon(Icons.Default.Refresh, null) },
+                                onClick = { menuOpen = false; vm.refreshCurrentChat() },
+                            )
+                            DropdownMenuItem(
                                 text = { Text(if (state.coderMode) "Switch to chat mode" else "Switch to code mode") },
                                 leadingIcon = { Icon(if (state.coderMode) Icons.AutoMirrored.Outlined.Chat else Icons.Outlined.Code, null) },
                                 onClick = { menuOpen = false; vm.setCoderMode(!state.coderMode) },
@@ -285,6 +290,7 @@ private fun ChatScreen(state: AppUiState, vm: ChatViewModel, onVoiceDictation: (
                                 persona = msg.agentId?.let { id -> state.personas.firstOrNull { it.id == id } },
                                 isSpeaking = state.speakingId == msg.id,
                                 onSpeak = { vm.speakMessage(msg.id, msg.content, msg.agentId) },
+                                onCopied = { vm.showSnackbar("Copied") },
                             )
                         }
                         is WorkSteps.Item.Work -> {

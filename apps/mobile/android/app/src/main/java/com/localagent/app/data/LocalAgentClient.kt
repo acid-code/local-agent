@@ -81,8 +81,11 @@ class LocalAgentClient(context: Context) {
         }
         .build()
 
+    // Server sends an SSE `: ping` heartbeat every 15s; a 35s read timeout catches dead/half-open mobile
+    // sockets (Wi-Fi <-> cellular, Tailscale sleep) quickly instead of hanging forever at readTimeout(0).
     private val sseHttp = http.newBuilder()
-        .readTimeout(0, TimeUnit.SECONDS)
+        .readTimeout(35, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
 
     private fun url(path: String): String {
@@ -240,6 +243,12 @@ class LocalAgentClient(context: Context) {
     suspend fun controlRun(runId: String, action: String) {
         requestJson("POST", "/api/runs/$runId/control", JSONObject().apply {
             put("action", action)
+        })
+    }
+
+    suspend fun steerRun(runId: String, content: String) {
+        requestJson("POST", "/api/runs/$runId/steer", JSONObject().apply {
+            put("content", content)
         })
     }
 

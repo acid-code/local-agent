@@ -87,6 +87,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private var sessionGen = 0
     private var sessionAttempt = 0
     private var sessionFirstSnapshot = true
+    private var sessionApplyFirstSnapshot = false
+    private var lastStreamEventAtMs = 0L
     private var foreground = true
     private var memoryPollJob: Job? = null
 
@@ -96,6 +98,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun consumeSnackbar() = _ui.update { it.copy(snackbar = null) }
+    fun showSnackbar(message: String) = _ui.update { it.copy(snackbar = message) }
     fun setDraft(text: String) = _ui.update { it.copy(draft = text) }
     fun setCoderMode(on: Boolean) = _ui.update { it.copy(coderMode = on) }
     fun keepEdit(id: String) = _ui.update { it.copy(keptEditIds = it.keptEditIds + id) }
@@ -330,7 +333,33 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val text = _ui.value.draft.trim()
         if (text.isBlank()) return
         if (_ui.value.isStreaming) {
-            _ui.update { it.copy(snackbar = "A reply is still running. Tap Stop first.") }
+            val activeId = _ui.value.activeRunId
+            if (activeId.isNullOrBlank()) {
+                _ui.update { it.copy(snackbar = "A reply is still starting. Wait a moment or tap Stop.") }
+                return
+            }
+            val agentId = _ui.value.currentSession?.agentId ?: _ui.value.activePersona?.id
+            val optimistic = ChatMessage(
+                id = "steer-local_${System.currentTimeMillis()}",
+                role = "user",
+                content = text,
+                agentId = agentId,
+                routingNote = "Steering",
+            )
+            _ui.update { it.copy(draft = "", messages = it.messages + optimistic) }
+            viewModelScope.launch {
+                runCatching { client.steerRun(activeId, text) }
+                    .onSuccess { _ui.update { it.copy(snackbar = "Steering sent") } }
+                    .onFailure { err ->
+                        _ui.update {
+                            it.copy(
+                                draft = text,
+                                messages = it.messages.filterNot { m -> m.id == optimistic.id },
+                                snackbar = err.message ?: "Could not steer the active run",
+                            )
+                        }
+                    }
+            }
             return
         }
         viewModelScope.launch {
@@ -371,9 +400,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private fun attachStream(runId: String) {
         closeStream()
         val gen = ++runStreamGen
+        lastStreamEventAtMs = System.currentTimeMillis()
         eventSource = client.streamRun(
             runId = runId,
             onEvent = { json ->
+                lastStreamEventAtMs = System.currentTimeMillis()
                 when (json.optString("type")) {
                     "snapshot" -> {
                         runStreamAttempt = 0
@@ -473,11 +504,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** Keeps the open chat's live feed connected: runs started on another device show up, a reconnect resyncs. */
-    private fun watchSession(sessionId: String, force: Boolean = false) {
+    private fun watchSession(sessionId: String, force: Boolean = false, applyInitialSnapshot: Boolean = false) {
         if (!force && sessionWatchId == sessionId && sessionSource != null) return
         sessionSource?.cancel()
         sessionWatchId = sessionId
         sessionFirstSnapshot = true
+        sessionApplyFirstSnapshot = applyInitialSnapshot
         val gen = ++sessionGen
         sessionSource = client.streamSession(
             sessionId = sessionId,
@@ -488,7 +520,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     if (foreground && _ui.value.currentSession?.id == sessionId) {
                         viewModelScope.launch {
                             delay(LiveSync.backoffMs(sessionAttempt++))
-                            if (gen == sessionGen && foreground && _ui.value.currentSession?.id == sessionId) watchSession(sessionId, force = true)
+                            if (gen == sessionGen && foreground && _ui.value.currentSession?.id == sessionId) {
+                                watchSession(sessionId, force = true, applyInitialSnapshot = true)
+                            }
                         }
                     }
                 }
@@ -504,27 +538,30 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun onSessionEvent(sessionId: String, json: JSONObject) {
         if (_ui.value.currentSession?.id != sessionId) return
+        lastStreamEventAtMs = System.currentTimeMillis()
         val type = json.optString("type")
         if (type == "snapshot") {
             sessionAttempt = 0
             val first = sessionFirstSnapshot
+            val applySnapshot = !first || sessionApplyFirstSnapshot
             sessionFirstSnapshot = false
+            sessionApplyFirstSnapshot = false
             val active = json.optJSONObject("activeRun")
             val activeId = active?.optString("id")?.takeIf { it.isNotBlank() }
-            if (activeId != null && activeId != _ui.value.activeRunId) {
+            if (activeId != null && (activeId != _ui.value.activeRunId || applySnapshot || eventSource == null)) {
                 _ui.update { it.copy(activeRunId = activeId, runStatus = active.optString("status", "running")) }
                 attachStream(activeId)
-            } else if (!first && activeId != null) {
-                attachStream(activeId)
             }
-            if (!first) {
+            if (applySnapshot) {
                 val arr = json.optJSONArray("messages")
                 if (arr != null) {
                     val server = List(arr.length()) { i -> client.parseMessage(arr.getJSONObject(i)) }
                     _ui.update { s -> s.copy(messages = LiveSync.mergeSnapshot(s.messages, server, { it.id }, { it.role }, { it.content })) }
                 }
-                // The streamed run ended while disconnected: load its final state.
-                if (activeId == null && _ui.value.runStatus in ACTIVE_STATUSES) openSession(sessionId)
+                // The streamed run ended while disconnected: load its final state and clear live buffers.
+                if (activeId == null && (_ui.value.runStatus in ACTIVE_STATUSES || _ui.value.streamingText.isNotBlank() || _ui.value.streamingThinking.isNotBlank())) {
+                    openSession(sessionId)
+                }
             }
             return
         }
@@ -603,19 +640,50 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private var approvalPollJob: Job? = null
 
-    /** While the app is on screen, keep approvals fresh so the badge and cards are never stale. */
+    /** Manually resync the open chat and session list from the server. */
+    fun refreshCurrentChat() {
+        val sid = _ui.value.currentSession?.id
+        refreshSessions()
+        refreshPendingApprovals()
+        if (sid != null) {
+            openSession(sid)
+            _ui.update { it.copy(snackbar = "Refreshed") }
+        }
+    }
+
+    /** While the app is on screen, keep approvals, sessions, and live streams fresh so nothing stalls. */
     fun setForeground(on: Boolean) {
         approvalPollJob?.cancel()
         approvalPollJob = null
         val wasForeground = foreground
         foreground = on
-        if (!on) { stopWatchingSession(); return }
-        // Back on screen: reconnect the chat feed (its snapshot resyncs messages and the active run).
-        if (!wasForeground || sessionSource == null) _ui.value.currentSession?.id?.let { watchSession(it, force = true) }
+        if (!on) {
+            stopWatchingSession()
+            closeStream()
+            return
+        }
+        // Back on screen: immediately resync sessions, approvals, and the open chat's SSE feed + snapshot.
+        if (_ui.value.authenticated) {
+            refreshSessions()
+            if (!wasForeground || sessionSource == null) {
+                _ui.value.currentSession?.id?.let { watchSession(it, force = true, applyInitialSnapshot = true) }
+            }
+        }
         approvalPollJob = viewModelScope.launch {
             while (true) {
                 refreshPendingApprovals()
-                delay(8_000)
+                val s = _ui.value
+                val sid = s.currentSession?.id
+                if (s.authenticated && sid != null) {
+                    val staleMs = System.currentTimeMillis() - lastStreamEventAtMs
+                    if (sessionSource == null) {
+                        watchSession(sid, force = true, applyInitialSnapshot = true)
+                    } else if (s.isStreaming && staleMs > 12_000L) {
+                        // Watchdog: stream went quiet during an active run (mobile network switch / sleep) — force resync.
+                        watchSession(sid, force = true, applyInitialSnapshot = true)
+                    }
+                }
+                delay(6_000)
             }
         }
     }

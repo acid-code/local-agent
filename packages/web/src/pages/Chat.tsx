@@ -1432,6 +1432,9 @@ export function Chat() {
               <button className={recording ? 'icon-btn round on' : 'icon-btn round'} type="button" aria-label={t('Hold to talk')} title={t('Hold to talk')} onPointerDown={() => void holdTalk(true)} onPointerUp={() => void holdTalk(false)} onPointerLeave={() => { if (recording) void holdTalk(false); }}><Mic size={18} /></button>
               {active && status !== 'paused' && <button className="btn ghost pause-btn" type="button" onClick={() => control('pause')}>{t('Pause')}</button>}
               {status === 'paused' && <button className="btn ghost" type="button" onClick={() => control('resume')}>{t('Resume')}</button>}
+              {active && draft.trim() && (
+                <button className="icon-btn round primary-fill" type="submit" aria-label={t('Steer')} title={t('Steer (Enter)')}><Send size={17} /></button>
+              )}
               {active ? <button className="icon-btn round danger-fill" type="button" aria-label={t('Stop (Esc)')} title={t('Stop (Esc)')} onClick={() => control('stop')}><Square size={16} /></button>
                 : <button className="icon-btn round primary-fill" type="submit" aria-label={t('Send')} title={t('Send (Enter)')} disabled={!draft.trim() && !quotes.length && !mentions.length}><Send size={17} /></button>}
             </div>

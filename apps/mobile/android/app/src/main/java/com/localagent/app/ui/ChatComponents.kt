@@ -14,6 +14,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -72,8 +73,22 @@ fun MessageBubble(
     persona: Persona?,
     isSpeaking: Boolean,
     onSpeak: () -> Unit,
+    onCopied: () -> Unit = {},
 ) {
     val context = LocalContext.current
+    var copied by remember(msg.id) { mutableStateOf(false) }
+    LaunchedEffect(copied) {
+        if (copied) {
+            kotlinx.coroutines.delay(1500)
+            copied = false
+        }
+    }
+    fun copyMessage() {
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        cm.setPrimaryClip(ClipData.newPlainText("message", stripFileTokens(msg.content).ifBlank { msg.content }))
+        copied = true
+        onCopied()
+    }
     if (msg.role == "tool") {
         var expanded by remember(msg.id) { mutableStateOf(false) }
         Surface(
@@ -88,11 +103,13 @@ fun MessageBubble(
                     Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null, Modifier.size(16.dp))
                 }
                 AnimatedVisibility(expanded) {
-                    Text(
-                        msg.content.take(2000),
-                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                        modifier = Modifier.padding(top = 6.dp),
-                    )
+                    SelectionContainer {
+                        Text(
+                            msg.content.take(2000),
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            modifier = Modifier.padding(top = 6.dp),
+                        )
+                    }
                 }
             }
         }
@@ -101,8 +118,16 @@ fun MessageBubble(
 
     val isUser = msg.role == "user"
     if (isUser) {
-        // Grok-style crisp right-aligned pill for user messages.
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+        // Grok-style crisp right-aligned pill for user messages, with text selection + Copy action.
+        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            if (!msg.routingNote.isNullOrBlank()) {
+                Text(
+                    msg.routingNote,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 6.dp),
+                )
+            }
             Surface(
                 color = MaterialTheme.colorScheme.surfaceVariant,
                 shape = RoundedCornerShape(20.dp, 20.dp, 6.dp, 20.dp),
@@ -111,6 +136,17 @@ fun MessageBubble(
                 Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                     FormattedMessageBody(msg.content)
                 }
+            }
+            IconButton(
+                onClick = ::copyMessage,
+                modifier = Modifier.size(32.dp),
+            ) {
+                Icon(
+                    if (copied) Icons.Default.Check else Icons.Default.ContentCopy,
+                    contentDescription = "Copy message",
+                    modifier = Modifier.size(15.dp),
+                    tint = if (copied) AccentMint else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                )
             }
         }
         return
@@ -128,7 +164,7 @@ fun MessageBubble(
             ThinkingAccordion(thinking = msg.thinking, defaultExpanded = false)
         }
         FormattedMessageBody(msg.content)
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             if (!msg.routingNote.isNullOrBlank()) {
                 Text(
                     msg.routingNote,
@@ -141,19 +177,21 @@ fun MessageBubble(
                 Spacer(Modifier.weight(1f))
             }
             IconButton(
-                onClick = {
-                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    cm.setPrimaryClip(ClipData.newPlainText("message", msg.content))
-                },
-                modifier = Modifier.size(28.dp),
+                onClick = ::copyMessage,
+                modifier = Modifier.size(36.dp),
             ) {
-                Icon(Icons.Default.ContentCopy, contentDescription = "Copy", modifier = Modifier.size(15.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                Icon(
+                    if (copied) Icons.Default.Check else Icons.Default.ContentCopy,
+                    contentDescription = "Copy",
+                    modifier = Modifier.size(16.dp),
+                    tint = if (copied) AccentMint else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
-            IconButton(onClick = onSpeak, modifier = Modifier.size(28.dp)) {
+            IconButton(onClick = onSpeak, modifier = Modifier.size(36.dp)) {
                 Icon(
                     if (isSpeaking) Icons.Default.StopCircle else Icons.Default.VolumeUp,
                     contentDescription = "Speak",
-                    modifier = Modifier.size(16.dp),
+                    modifier = Modifier.size(17.dp),
                     tint = if (isSpeaking) AccentGold else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -192,7 +230,9 @@ fun ThinkingAccordion(thinking: String, defaultExpanded: Boolean, label: String 
                 Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null, Modifier.size(16.dp))
             }
             AnimatedVisibility(visible = expanded, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
-                Text(thinking, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
+                SelectionContainer {
+                    Text(thinking, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
+                }
             }
         }
     }
@@ -203,7 +243,11 @@ private fun FormattedMessageBody(raw: String) {
     val fileIds = remember(raw) { extractFileIds(raw) }
     val text = remember(raw) { stripFileTokens(raw) }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        if (text.isNotBlank()) MarkdownBody(text)
+        if (text.isNotBlank()) {
+            SelectionContainer {
+                MarkdownBody(text)
+            }
+        }
         fileIds.forEach { id -> key(id) { FileCard(id) } }
     }
 }
@@ -291,18 +335,33 @@ fun ComposerBar(
                     decorationBox = { inner ->
                         Box(contentAlignment = Alignment.CenterStart) {
                             if (draft.isEmpty()) {
-                                Text("Message", style = MaterialTheme.typography.bodyLarge, color = scheme.onSurfaceVariant)
+                                Text(
+                                    if (isStreaming) "Steer without stopping…" else "Message",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = scheme.onSurfaceVariant,
+                                )
                             }
                             inner()
                         }
                     },
                 )
                 if (isStreaming) {
-                    FilledIconButton(
-                        onClick = onStop,
-                        modifier = Modifier.size(40.dp),
-                        colors = IconButtonDefaults.filledIconButtonColors(containerColor = scheme.error),
-                    ) { Icon(Icons.Default.Stop, contentDescription = "Stop", modifier = Modifier.size(18.dp)) }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        if (draft.isNotBlank()) {
+                            FilledIconButton(
+                                onClick = onSend,
+                                modifier = Modifier.size(40.dp),
+                                colors = IconButtonDefaults.filledIconButtonColors(containerColor = scheme.tertiary, contentColor = scheme.onTertiary),
+                            ) {
+                                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Steer", modifier = Modifier.size(18.dp))
+                            }
+                        }
+                        FilledIconButton(
+                            onClick = onStop,
+                            modifier = Modifier.size(40.dp),
+                            colors = IconButtonDefaults.filledIconButtonColors(containerColor = scheme.error),
+                        ) { Icon(Icons.Default.Stop, contentDescription = "Stop", modifier = Modifier.size(18.dp)) }
+                    }
                 } else {
                     FilledIconButton(
                         onClick = onSend, enabled = draft.isNotBlank(), modifier = Modifier.size(40.dp),
