@@ -479,6 +479,7 @@ export function browseTool(): Tool {
 
       if (ctx.browser && realBrowserEnabled() && ctx.docker.available()) {
         try {
+          ctx.computer?.notifyBrowserActive(ctx.runId ?? null, ctx.agent.name, url);
           const result = await ctx.browser.browse({
             personaSlug: ctx.agent.slug || ctx.agent.id,
             runId: ctx.runId,

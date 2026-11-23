@@ -317,7 +317,7 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
         {restartKeys.length > 0 && <p className="restart-note">{t('Restart needed. secrets.env changed for')}{' '}{restartKeys.join(', ')}. This process is still using the values it loaded at startup.</p>}
         <header className="topbar">
           <button className="icon-btn menu-btn" aria-label={t('Menu')} aria-expanded={open} onClick={() => setOpen((value) => !value)}><MenuIcon size={20} /></button>
-          <button className="icon-btn collapse-btn" aria-controls="main-sidebar" aria-expanded={!collapsed} aria-label={collapsed ? t('Expand sidebar (Ctrl+B)') : t('Collapse sidebar (Ctrl+B)')} title={collapsed ? t('Expand sidebar (Ctrl+B)') : t('Collapse sidebar (Ctrl+B)')} onClick={() => setCollapsed((value) => !value)}>{collapsed ? <PanelLeftOpen size={19} /> : <PanelLeftClose size={19} />}</button>
+          {collapsed && <button className="icon-btn collapse-btn" aria-controls="main-sidebar" aria-expanded={false} aria-label={t('Expand sidebar (Ctrl+B)')} title={t('Expand sidebar (Ctrl+B)')} onClick={() => setCollapsed(false)}><PanelLeftOpen size={19} /></button>}
           <button className="palette-btn" onClick={() => setPalette(true)}><span>{t('Search or jump')}</span> <span className="kbd">{t('Ctrl K')}</span></button>
         </header>
         {children}

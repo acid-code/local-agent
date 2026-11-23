@@ -62,6 +62,11 @@ export class ComputerControl {
     return this.state();
   }
 
+  /** Notify the owner (via SSE) that an agent has started using the live browser at /computer. */
+  notifyBrowserActive(runId: string | null, personaName: string, url: string) {
+    this.bus.publish({ type: 'computer_browser_started', runId, personaName, url, at: now() } as never);
+  }
+
   /** Pause a run when the agent hits a login screen ("Take over to sign in") and resume after Give back. */
   pauseForLogin(runId: string, personaName: string, url: string, signal?: AbortSignal): Promise<void> {
     if (this.loginPause) {

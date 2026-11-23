@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Hand, Monitor, Play, Terminal } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { Hand, Monitor, Play, Terminal, X } from 'lucide-react';
 import { api, post } from '../lib/api';
 import { fmt, t } from '../i18n';
 
@@ -27,7 +28,9 @@ interface ComputerState {
 }
 
 export function Computer() {
+  const navigate = useNavigate();
   const [state, setState] = useState<ComputerState | null>(null);
+  const closeView = () => { if (window.history.length > 1) navigate(-1); else navigate('/'); };
   const [error, setError] = useState<string | null>(null);
   const [runFilter, setRunFilter] = useState<string>('');
 
@@ -81,6 +84,9 @@ export function Computer() {
               <Play size={15} aria-hidden /> {t('Give back')}
             </button>
           )}
+          <button type="button" className="icon-btn round" aria-label={t('Close')} title={t('Close')} onClick={closeView}>
+            <X size={18} aria-hidden />
+          </button>
         </div>
       </header>
 

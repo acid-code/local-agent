@@ -188,6 +188,7 @@ export function Chat() {
   const openGate = useRef(latestOnly());
   // The open chat's own record, so the header is right even when it is not on the loaded page of the list.
   const [openedMeta, setOpenedMeta] = useState<Session | null>(null);
+  const [browserNotice, setBrowserNotice] = useState<{ persona: string; url: string; needsLogin?: boolean } | null>(null);
   const currentRef = useRef<string | null>(null);
   async function openSession(id: string, gate = openGate.current.begin()) {
     // Restore this chat's unsent draft in the same render as the switch, so the save effect never wipes it.
@@ -547,6 +548,12 @@ export function Chat() {
           const estTokens = Math.max(m.chunks, Math.round(m.chars / 3.6));
           setLiveTps(Math.round((estTokens / elapsed) * 10) / 10);
         }
+      }
+      if (data.type === 'computer_browser_started') {
+        setBrowserNotice({ persona: String(data.personaName || 'Agent'), url: String(data.url || '') });
+      }
+      if (data.type === 'computer_login_pause') {
+        setBrowserNotice({ persona: String(data.personaName || 'Agent'), url: String(data.url || ''), needsLogin: true });
       }
       if (data.type === 'error') setRunError(String(data.message || 'The reply failed.'));
       if (data.type === 'step' && data.step) {
@@ -1244,6 +1251,16 @@ export function Chat() {
           )}
         </div>
         <div className="composer">
+          {browserNotice && isOwner() && (
+            <div className="login-pause-banner" role="status" style={{ marginBottom: 8 }}>
+              <div className="grow">
+                <strong>{browserNotice.needsLogin ? t('Take over to sign in') : `${browserNotice.persona} ${t('started browsing')}`}</strong>
+                {browserNotice.url && <p className="faint ellipsis">{browserNotice.url}</p>}
+              </div>
+              <Link className="btn primary small" to="/computer">{t('Open live view')}</Link>
+              <button type="button" className="icon-btn" aria-label={t('Close')} onClick={() => setBrowserNotice(null)}><X size={14} /></button>
+            </div>
+          )}
           <MiniAgentStrip
             helpers={miniAgents}
             onStop={async (id) => {
