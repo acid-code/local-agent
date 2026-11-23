@@ -175,7 +175,6 @@ function rememberOpenAI(
     if (id !== 'uncensored') return raw;
     if (/qwen3\.?6.*(?:35b|a3b).*(?:uncensored|hauhaucs|abliterated)/i.test(raw) && raw.includes('/')) return 'qwen3.6-35b-a3b-uncensored';
     if (/inkling[-_\s]?2[-_\s]?mini/i.test(raw) && raw.includes('/')) return 'inkling-2-mini-uncensored';
-    if (/flint[-_\s]?40b/i.test(raw) && raw.includes('/')) return 'flint-40b-abliterated';
     return raw;
   };
   const entries = rawEntries.map((entry) => ({ name: normalizeName(entry.id), inputModalities: entry.architecture?.input_modalities }));
