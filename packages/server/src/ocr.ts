@@ -185,9 +185,11 @@ export async function pickLocalVision(fetchImpl: typeof fetch, root: string, pre
   try {
     const response = await fetchImpl(`${root}/api/tags`, { signal: AbortSignal.timeout(2000) });
     const names = ((await response.json()) as { models?: { name: string }[] }).models?.map((row) => row.name) ?? [];
-    if (preferred && names.includes(preferred)) return preferred;
-    const list = preferLightweight ? LIGHTWEIGHT_VISION_MODELS : LOCAL_VISION_MODELS;
-    return list.find((name) => names.includes(name)) ?? LOCAL_VISION_MODELS.find((name) => names.includes(name)) ?? null;
+    if (preferred && names.includes(preferred)) {
+      if (!preferLightweight || LIGHTWEIGHT_VISION_MODELS.includes(preferred)) return preferred;
+    }
+    if (preferLightweight) return LIGHTWEIGHT_VISION_MODELS.find((name) => names.includes(name)) ?? null;
+    return LOCAL_VISION_MODELS.find((name) => names.includes(name)) ?? null;
   } catch { return null; }
 }
 
@@ -202,7 +204,7 @@ export function ollamaVisionRunner(fetchImpl: typeof fetch, root: string, model:
     try {
       const response = await fetchImpl(`${root}/api/chat`, {
         method: 'POST', headers: { 'content-type': 'application/json' }, signal: AbortSignal.timeout(300_000),
-        body: JSON.stringify({ model, stream: false, think: false, options: { temperature: 0, num_ctx: numCtx }, messages: [{ role: 'user', content: prompt, images: [jpeg.toString('base64')] }] }),
+        body: JSON.stringify({ model, stream: false, think: false, keep_alive: '2m', options: { temperature: 0, num_ctx: numCtx }, messages: [{ role: 'user', content: prompt, images: [jpeg.toString('base64')] }] }),
       });
       const json = await response.json() as { message?: { content?: string }; error?: string };
       if (!response.ok) throw new Error(json.error || `Ollama vision failed (HTTP ${response.status}).`);

@@ -11,7 +11,7 @@ import { filePath, getFile } from './files.js';
 import { cleanupHebrew } from './hebrew-cleanup.js';
 import { getLanguage } from './language.js';
 import { ollamaRoot } from './ollama.js';
-import { isUncensoredProvider } from './coexist.js';
+import { isUncensoredProvider, OLLAMA_SIDE_MAX_GIB } from './coexist.js';
 import { buildService, IMAGE_EXT, liveRunners, recognize, serviceStatus, startService, understandImage, type OcrMode, type OcrResult, type ServiceId } from './ocr.js';
 import { preChangeBackup } from './ops.js';
 
@@ -37,14 +37,15 @@ export function registerOcr(app: FastifyInstance, deps: { store: Store; engine: 
     });
   }
 
-  /** Best local Hebrew writer that fits the RAM budget, for the OCR cleanup pass. */
+  /** Best local Hebrew writer that fits the RAM budget (and respects llama-server GTT coexistence), for the OCR cleanup pass. */
   async function cleanupModel(): Promise<string | null> {
     try {
       const response = await fetchImpl(`${ollamaRoot()}/api/tags`, { signal: AbortSignal.timeout(2000) });
       const names = ((await response.json()) as { models?: { name: string }[] }).models?.map((row) => row.name) ?? [];
       const budget = store.getSettings().ramBudgetGiB;
+      const maxGiB = engine.llama.isActive() ? Math.min(budget * 0.85, OLLAMA_SIDE_MAX_GIB) : budget * 0.85;
       return names.map((name) => ({ name, score: hebrewScore({ apiName: name, name, local: true, providerKind: 'ollama' }) }))
-        .filter((row) => row.score > 0 && roughModelGiB(row.name) <= budget * 0.85 && !/vl|vision|embed/.test(row.name))
+        .filter((row) => row.score > 0 && roughModelGiB(row.name) <= maxGiB && !/vl|vision|embed/.test(row.name))
         .sort((a, b) => b.score - a.score)[0]?.name ?? null;
     } catch { return null; }
   }
@@ -55,14 +56,21 @@ export function registerOcr(app: FastifyInstance, deps: { store: Store; engine: 
     if (!on || !isHebrewText(result.text)) return result;
     const model = await cleanupModel();
     if (!model) return result;
-    const cleaned = await cleanupHebrew(result.text, async (prompt) => {
-      const response = await fetchImpl(`${ollamaRoot()}/api/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, signal: AbortSignal.timeout(120_000), body: JSON.stringify({ model, stream: false, think: false, options: { temperature: 0 }, messages: [{ role: 'user', content: prompt }] }) });
-      const json = await response.json() as { message?: { content?: string }; error?: string };
-      if (!response.ok) throw new Error(json.error || `HTTP ${response.status}`);
-      return json.message?.content || '';
-    }, { kind: 'ocr' });
-    if (!cleaned.changed) return { ...result, cleaned: false };
-    return { ...result, text: cleaned.text, cleaned: true, notes: [...result.notes, `Hebrew cleaned up by ${model}.`] };
+    const numCtx = 4096;
+    const bytes = engine.memory ? await engine.memory.estimateModel(model, numCtx) : 0;
+    const lease = engine.memory && bytes ? await engine.memory.admit({ kind: 'background', label: `${model} (OCR cleanup)`, model, bytes }) : null;
+    try {
+      const cleaned = await cleanupHebrew(result.text, async (prompt) => {
+        const response = await fetchImpl(`${ollamaRoot()}/api/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, signal: AbortSignal.timeout(120_000), body: JSON.stringify({ model, stream: false, think: false, keep_alive: '2m', options: { temperature: 0, num_ctx: numCtx }, messages: [{ role: 'user', content: prompt }] }) });
+        const json = await response.json() as { message?: { content?: string }; error?: string };
+        if (!response.ok) throw new Error(json.error || `HTTP ${response.status}`);
+        return json.message?.content || '';
+      }, { kind: 'ocr' });
+      if (!cleaned.changed) return { ...result, cleaned: false };
+      return { ...result, text: cleaned.text, cleaned: true, notes: [...result.notes, `Hebrew cleaned up by ${model}.`] };
+    } finally {
+      lease?.release();
+    }
   }
 
   async function readFile(fileId: string, mode: OcrMode, ownerId: string, cleanup?: boolean) {
