@@ -81,8 +81,14 @@ function hasColumn(db: DatabaseSync, table: string, col: string) {
   return cols.some((c) => c.name === col);
 }
 
-/** Permanently delete a single chat session, everything hanging off it (messages, runs, steps, plans, summaries), and any files attached to it. */
+/** Permanently delete a single chat session, any child helper sessions spawned by it, everything hanging off them, and any files attached to them. */
 export function deleteSessionPermanently(db: DatabaseSync, sessionId: string, dataDir?: string): void {
+  const childIds = hasColumn(db, 'chat_sessions', 'helper_of')
+    ? (db.prepare('SELECT id FROM chat_sessions WHERE helper_of = ?').all(sessionId) as { id: string }[]).map((r) => r.id)
+    : [];
+  for (const childId of childIds) {
+    if (childId !== sessionId) deleteSessionPermanently(db, childId, dataDir);
+  }
   const runIds = hasColumn(db, 'runs', 'session_id')
     ? (db.prepare('SELECT id FROM runs WHERE session_id = ?').all(sessionId) as { id: string }[]).map((r) => r.id)
     : [];
