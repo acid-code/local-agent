@@ -11,7 +11,11 @@ export type RiskTier = 'safe' | 'low' | 'medium' | 'high';
 export type ApprovalMode = 'cautious' | 'balanced' | 'autonomous';
 export const RISK_ORDER: RiskTier[] = ['safe', 'low', 'medium', 'high'];
 
-const SAFE_TOOLS = new Set(['read_file', 'list_dir', 'kb_search', 'web_search', 'web_fetch', 'recall', 'search_chats', 'docker_ps', 'docker_inspect', 'read_slides', 'load_skill', 'read_output', 'consult_agent']);
+const SAFE_TOOLS = new Set([
+  'read_file', 'list_dir', 'grep', 'glob', 'find_tools', 'find_context', 'time_now',
+  'kb_search', 'web_search', 'web_fetch', 'recall', 'search_chats', 'docker_ps', 'docker_inspect',
+  'read_slides', 'load_skill', 'read_output', 'consult_agent', 'read_image_text', 'understand_image',
+]);
 const LOW_TOOLS = new Set(['write_file', 'make_slides', 'memory_file', 'remember', 'plan', 'send_message', 'handoff']);
 const HIGH_SHELL = [/\bsudo\b/i, /\bgit\s+push\b/i, /\bnpm\s+publish\b/i, /\bdocker\b[^\n]*\b(rm|rmi|system|prune|kill)\b/i, /\b(kill|pkill|killall)\b/i, /\b(mount|umount)\b/i, /\bch(mod|own)\s+-R\b/i, /\brm\s+-[a-z]*r[a-z]*f?\s+(\/|~|\.\.|\$HOME)/i, /\b(ssh|scp|rsync)\b[^\n]*@/i, /\bcurl\b[^\n]*-X\s*(POST|PUT|DELETE|PATCH)/i];
 const MEDIUM_SHELL = [/\brm\b/i, /\bmv\b/i, /\bchmod\b/i, /\bchown\b/i, /(^|[^&=])>{1,2}/, /\btee\b/i, /\bgit\s+(reset|clean|checkout\s+--|rebase)\b/i];
@@ -48,6 +52,7 @@ export function riskOf(tool: string, args: Record<string, unknown>, declared: st
     if (args.scriptName || args.scriptBody) return { tier: 'high', why: declared ?? 'Save a skill with a script' };
     return { tier: args.slug ? 'medium' : 'low', why: declared ?? 'Save a skill' };
   }
+  if (tool === 'git' && ['status', 'diff', 'log', 'fetch', 'branches', 'show'].includes(String(args.action ?? ''))) return { tier: 'safe', why: 'git (read-only)' };
   if (tool === 'git' && /push|remote|open_pr/.test(String(args.action ?? ''))) return { tier: 'high', why: declared ?? `git ${String(args.action)}` };
   if (SAFE_TOOLS.has(tool)) return { tier: declared ? 'low' : 'safe', why: declared ?? `${tool} (read-only)` };
   if (LOW_TOOLS.has(tool)) return { tier: 'low', why: declared ?? `${tool} in the workspace` };

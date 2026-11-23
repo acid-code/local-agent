@@ -47,9 +47,10 @@ const toolSchemas: Record<string, z.ZodTypeAny> = {
     checks: z.array(z.string().min(1)).max(10).optional().describe('Acceptance checks that prove the work is done, e.g. "`npm test` passes" or "README lists the new flag". Commands in backticks are run-verified before the run may finish.'),
   }),
   git: z.object({
-    action: z.enum(['status', 'diff', 'log', 'fetch', 'branch', 'checkout', 'commit', 'pull', 'push', 'force-push', 'revert', 'open_pr']),
+    action: z.enum(['status', 'diff', 'log', 'fetch', 'branches', 'show', 'branch', 'checkout', 'commit', 'pull', 'push', 'force-push', 'revert', 'open_pr']),
     project: z.string().optional().describe('Project label when the chat has more than one project, or "workspace".'),
-    name: z.string().optional().describe('Branch name for branch or checkout.'),
+    name: z.string().optional().describe('Branch name for branch/checkout, or branch/commit/ref:path for show.'),
+    path: z.string().optional().describe('Optional file path for show (e.g. "README.md" when name is a branch).'),
     message: z.string().optional().describe('Commit message.'),
     title: z.string().optional().describe('Pull request title (open_pr).'),
     body: z.string().optional().describe('Pull request body (open_pr).'),

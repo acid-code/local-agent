@@ -2357,6 +2357,9 @@ export class Engine {
     names.add('write_file');
     names.add('read_file');
     names.add('list_dir');
+    names.add('grep');
+    names.add('glob');
+    names.add('git');
     names.add('request_secret');
     names.add('read_output');
     names.add('run_skill_script');
@@ -3027,11 +3030,18 @@ function readOutputTool(): Tool {
     async execute(args, ctx) {
       const message = ctx.store.getMessage(String(args.message || ''));
       if (!message || (ctx.sessionId && message.sessionId !== ctx.sessionId)) throw new Error('That output is not in this chat.');
+      const chars = [...message.content];
+      const total = chars.length;
       const offset = Math.max(0, Number(args.offset || 0));
       const limit = Math.min(8000, Math.max(200, Number(args.limit || 4000)));
-      const slice = [...message.content].slice(offset, offset + limit).join('');
-      const more = offset + limit < [...message.content].length ? `\n…more from offset ${offset + limit}` : '';
-      return slice + more;
+      const end = Math.min(total, offset + limit);
+      if (offset >= total) {
+        return `[offset ${offset} is past the end of stored output (${total} characters total). Do not call read_output on this message again — use what you already read.]`;
+      }
+      const tail = end < total
+        ? `\n…more from offset ${end} (${total - end} characters remaining)`
+        : `\n[end of stored output — ${total} characters total. Do not call read_output on this message again.]`;
+      return `[characters ${offset}..${end} of ${total}]\n${chars.slice(offset, end).join('')}${tail}`;
     },
   };
 }
@@ -3120,7 +3130,7 @@ const CONTRACT_ALWAYS = new Set([
   'time_now', 'tasks', 'think', 'memory_file', 'search_chats', 'web_search', 'web_fetch',
   'spawn_agent', 'helpers', 'propose_skill', 'read_output', 'run_skill_script',
   'find_context', 'share_file', 'make_slides', 'read_slides', 'slide_draft', 'fetch_image', 'browse', 'create_project', 'vercel', 'turbo_inspect', 'read_image_text', 'understand_image', 'generate_image', 'repo_sync',
-  'create_file', 'write_file', 'read_file', 'list_dir', 'grep', 'glob', 'apply_patch', 'shell', 'find_tools',
+  'create_file', 'write_file', 'read_file', 'list_dir', 'grep', 'glob', 'apply_patch', 'shell', 'git', 'find_tools',
 ]);
 
 /** A contract limits a persona's built-in tools; connector (MCP) tools it was granted by allowlist or template stay callable. */

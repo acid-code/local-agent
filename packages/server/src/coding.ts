@@ -365,9 +365,9 @@ export const CODING_TOOLS: Tool[] = [
   },
   {
     name: 'git',
-    description: 'Git in one shared project or your own workspace (project "workspace"): status, diff, log, fetch, branch, checkout, commit, pull (fast-forward only), push, force-push, revert, open_pr (GitHub, needs a saved GITHUB_TOKEN; pass title, body, base). Pass project when several are open. Pull, push, force-push, revert, and open_pr wait for approval. A push to main or a force-push says so in the approval.',
-    parameters: obj({ action: { type: 'string' }, project: { type: 'string' }, name: { type: 'string' }, message: { type: 'string' }, title: { type: 'string' }, body: { type: 'string' }, base: { type: 'string' } }, ['action']),
-    mutates: (args) => !['status', 'diff', 'log', 'fetch'].includes(String(args.action)),
+    description: 'Git in one shared project or your own workspace (project "workspace"): branches (list local and remote branches sorted by latest commit), show (read a commit or file from any branch without checking out, e.g. action="show", name="origin/dspine-v2-custom", path="README.md" or name="origin/dspine-v2-custom:README.md"), status, diff, log, fetch, branch, checkout, commit, pull (fast-forward only), push, force-push, revert, open_pr (GitHub, needs a saved GITHUB_TOKEN; pass title, body, base). Pass project when several are open. Pull, push, force-push, revert, and open_pr wait for approval. A push to main or a force-push says so in the approval.',
+    parameters: obj({ action: { type: 'string' }, project: { type: 'string' }, name: { type: 'string' }, path: { type: 'string' }, message: { type: 'string' }, title: { type: 'string' }, body: { type: 'string' }, base: { type: 'string' } }, ['action']),
+    mutates: (args) => !['status', 'diff', 'log', 'fetch', 'branches', 'show'].includes(String(args.action)) && !(String(args.action) === 'branch' && !String(args.name || '').trim()),
     approval: (args, ctx) => {
       const action = String(args.action || '');
       if (action === 'revert') return `Git revert${args.project ? ` in ${args.project}` : ''}`;
@@ -396,7 +396,8 @@ export const CODING_TOOLS: Tool[] = [
       }
       const cwd = projectPath(roots, named, ctx.workspace);
       const label = roots.find((root) => root.path === cwd)?.label;
-      if (label && !['status', 'diff', 'log', 'fetch'].includes(action)) {
+      const readOnlyAction = ['status', 'diff', 'log', 'fetch', 'branches', 'show'].includes(action) || (action === 'branch' && !String(args.name || '').trim());
+      if (label && !readOnlyAction) {
         const lock = tryLockRepo(ctx.store, label, ctx.runId || 'manual', ctx.agent.id);
         if (!lock.ok) throw new Error(`${label} is being edited by ${lock.holder}. You can still read it.`);
       }
@@ -404,6 +405,16 @@ export const CODING_TOOLS: Tool[] = [
       if (action === 'diff') return git(cwd, ['diff', '--', '.'], identity);
       if (action === 'fetch') return git(cwd, ['fetch'], identity);
       if (action === 'log') return git(cwd, ['log', '-15', '--oneline', '--decorate'], identity);
+      if (action === 'branches' || (action === 'branch' && !String(args.name || '').trim())) {
+        return git(cwd, ['branch', '-a', '-v', '--sort=-committerdate'], identity);
+      }
+      if (action === 'show') {
+        const ref = String(args.name || 'HEAD').trim();
+        const file = args.path ? String(args.path).trim() : '';
+        const spec = file && !ref.includes(':') ? `${ref}:${file}` : ref;
+        const out = await git(cwd, ['show', spec], identity);
+        return out.length > 48_000 ? `${out.slice(0, 48_000)}\n…[truncated at 48,000 characters]` : out;
+      }
       if (action === 'branch' || action === 'checkout') {
         const name = String(args.name || '').trim() || (action === 'branch' ? 'agent/task' : '');
         if (!validBranch(name)) throw new Error('Branch names look like agent/fix-login.');

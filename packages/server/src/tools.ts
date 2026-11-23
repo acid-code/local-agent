@@ -158,6 +158,7 @@ export async function fetchPublicText(
     raw = raw.replace(/<script[\s\S]*?<\/script>/gi, ' ');
   }
   const text = raw
+    .replace(/<(?:br\s*\/?|\/p|\/div|\/li|\/tr|\/h[1-6]|\/pre|\/blockquote|\/section|\/article)\b[^>]*>/gi, '\n')
     .replace(/<[^>]+>/g, ' ')
     .replace(/&nbsp;/gi, ' ')
     .replace(/&amp;/gi, '&')
@@ -165,9 +166,15 @@ export async function fetchPublicText(
     .replace(/&gt;/gi, '>')
     .replace(/&quot;/gi, '"')
     .replace(/&#0*39;|&#x27;/gi, "'")
-    .replace(/\s+/g, ' ')
+    .replace(/[ \t\f\v\r]+/g, ' ')
+    .split('\n')
+    .map((line) => line.trim())
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
-  return text.slice(0, 8_000) || '(empty page)';
+  if (!text) return '(empty page)';
+  if (text.length > 48_000) return `${text.slice(0, 48_000)}\n…[truncated at 48,000 of ${text.length} characters]`;
+  return text;
 }
 
 export const BUILTIN_TOOLS: Tool[] = [
