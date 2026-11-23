@@ -107,6 +107,8 @@ export interface RunCursor {
   userMessageId?: string;
   /** One retry after an empty answer, with thinking turned off. */
   emptyRetry?: boolean;
+  /** Retry with conservative anti-repetition sampling after a degenerate output loop. */
+  safeSampling?: boolean;
   noThink?: boolean;
   /** One retry on the next Auto tier after a model rejected tools. */
   toolRetry?: boolean;

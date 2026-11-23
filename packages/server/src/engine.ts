@@ -1006,8 +1006,11 @@ export class Engine {
     const streamAbort = new AbortController();
     const onParentAbort = () => streamAbort.abort();
     signal.addEventListener('abort', onParentAbort, { once: true });
-    let hitDegenerateLoop = false;
-    const isDegenerate = (buf: string) => buf.length >= 40 && /(.)\1{39,}$|(.{2,8})\2{11,}$/.test(buf.slice(-120));
+    let degenerateMatch: string | null = null;
+    const baseSampling = samplingFor(`${model.apiName} ${model.name}`, { thinking: thinkingOn, task: repoTask ? 'code' : 'general' });
+    const effectiveSampling = current.cursor.safeSampling
+      ? { temperature: 0.6, top_p: 0.85, top_k: 20, min_p: 0.05, presence_penalty: 0.3, repeat_penalty: 1.08 }
+      : baseSampling;
     try {
       for await (const event of provider.complete({
         model: model.apiName, messages: built.messages, tools, signal: streamAbort.signal,
@@ -1016,15 +1019,16 @@ export class Engine {
         keepAlive: model.local ? keepAliveFor(model) : undefined,
         think: Boolean(current.cursor.reasoning) && !current.cursor.noThink,
         noThink: Boolean(current.cursor.noThink),
-        sampling: samplingFor(`${model.apiName} ${model.name}`, { thinking: thinkingOn, task: repoTask ? 'code' : 'general' }),
+        sampling: effectiveSampling,
         maxTokens: maxTokensFor({ thinking: thinkingOn }),
       })) {
         if (signal.aborted) throw new StopError();
         if (event.type === 'token') {
           text += event.text;
-          if (isDegenerate(text)) {
-            hitDegenerateLoop = true;
-            text = text.replace(/(.)\1{19,}$|(.{2,8})\2{6,}$/, '').trimEnd();
+          const hit = detectDegenerateRepeat(text);
+          if (hit) {
+            degenerateMatch = hit;
+            text = text.slice(0, text.length - hit.length).trimEnd();
             streamAbort.abort();
             break;
           }
@@ -1033,9 +1037,10 @@ export class Engine {
           this.bus.publish({ type: 'token', runId: run.id, text: event.text });
         } else if (event.type === 'thinking') {
           reasoningText += event.text;
-          if (isDegenerate(reasoningText)) {
-            hitDegenerateLoop = true;
-            reasoningText = reasoningText.replace(/(.)\1{19,}$|(.{2,8})\2{6,}$/, '').trimEnd();
+          const hit = detectDegenerateRepeat(reasoningText);
+          if (hit) {
+            degenerateMatch = hit;
+            reasoningText = reasoningText.slice(0, reasoningText.length - hit.length).trimEnd();
             streamAbort.abort();
             break;
           }
@@ -1048,8 +1053,8 @@ export class Engine {
           if (event.telemetry) telemetry = event.telemetry;
         }
       }
-      if (hitDegenerateLoop) {
-        this.store.addLog('warn', `Stopped degenerate token repetition loop from ${model.name}.`, run.id, 'providers');
+      if (degenerateMatch) {
+        this.store.addLog('warn', `Stopped degenerate output loop from ${model.name} (snippet=${JSON.stringify(degenerateMatch.slice(0, 16))}).`, run.id, 'providers');
       }
       signal.removeEventListener('abort', onParentAbort);
       if (lease) await this.calibrateLease(lease, model.apiName, numCtx);
@@ -1187,14 +1192,20 @@ export class Engine {
         text = recovered.text;
       }
     }
+    let emptyAnswerFailed = false;
     if (!text.trim() && !toolCalls?.length) {
       if (!current.cursor.emptyRetry) {
-        const why = reasoningText ? `${model.name} thought but gave no answer. Retrying once with thinking off.` : `${model.name} returned an empty answer. Retrying once.`;
+        const why = degenerateMatch
+          ? `${model.name} hit a repetition loop before answering. Retrying once with safer sampling.`
+          : reasoningText
+            ? `${model.name} thought but gave no answer. Retrying once with thinking off.`
+            : `${model.name} returned an empty answer. Retrying once.`;
         this.store.updateStep(step.id, { status: 'failed', error: why, output: reasoningText ? { reasoning: reasoningText.slice(0, 4000) } : null, endedAt: now(), latencyMs: Date.now() - started });
         this.store.addLog('warn', why, undefined, 'providers');
-        this.store.updateRun(run.id, { cursor: { ...current.cursor, emptyRetry: true, noThink: true, phase: 'model' } });
+        this.store.updateRun(run.id, { cursor: { ...current.cursor, emptyRetry: true, noThink: true, ...(degenerateMatch ? { safeSampling: true } : {}), phase: 'model' } });
         return;
       }
+      emptyAnswerFailed = true;
       text = reasoningText
         ? `${model.name} only produced reasoning and no answer, twice. Try again, rephrase, or pick a bigger model.`
         : `${model.name} returned an empty answer twice. Try again or pick another model.`;
@@ -1205,7 +1216,7 @@ export class Engine {
     // Researcher persona: automatically enforce web_search on turn 0 when answering a substantive question without having searched yet.
     const speakerContract = contractForAgent(agent.name);
     const isResearcher = speakerContract?.slug === 'researcher' || agent.templateId === 'researcher';
-    if (!toolCalls?.length && text.trim() && isResearcher && !current.cursor.researchRetried && tools.some((t) => t.name === 'web_search')) {
+    if (!emptyAnswerFailed && !toolCalls?.length && text.trim() && isResearcher && !current.cursor.researchRetried && tools.some((t) => t.name === 'web_search')) {
       const userPrompt = this.userText(run).trim();
       const trivial = userPrompt.length < 12 || /^(hi|hello|hey|thanks|thank you|ok|okay|שלום|היי|תודה)[!.\s?]*$/i.test(userPrompt);
       const alreadySearched = this.store.listSteps(run.id).some((s) => s.kind === 'tool' && (
@@ -1235,7 +1246,7 @@ export class Engine {
         return;
       }
     }
-    if (!toolCalls?.length && text.trim()) {
+    if (!emptyAnswerFailed && !toolCalls?.length && text.trim()) {
       const rounds = current.cursor.recovery?.rounds ?? 0;
       const check = checkFinalReply(this.store.listSteps(run.id), text, rounds, maxSteps - current.cursor.turn, this.replyLang(agent, this.userText(run)) === 'he', tools.map((t) => t.name), this.store.getRun(run.id)?.cursor.acceptance ?? []);
       if (check.action === 'retry') {
@@ -1419,7 +1430,13 @@ export class Engine {
         const changedSince = prior ? history.some((step) => step.index > prior.index && step.kind === 'tool' && step.status === 'completed' && Boolean(tools.find((item) => item.name === step.name)?.mutates((step.input ?? {}) as Record<string, unknown>))) : false;
         if (prior && !changedSince) {
           const output = String(prior.output ?? '');
-          const repeated = `Already ran ${call.name} with these arguments in this run and nothing has changed since; the result is above.${output.length > 1500 ? ` First part again:\n${output.slice(0, 1500)}\n… (use read_output or narrower arguments for more)` : `\n${output}`}${loopNote || '\nDo not repeat it: use that result or try something different.'}`;
+          const priorMsg = prior.toolCallId
+            ? this.store.listMessages(run.sessionId).find((m) => m.role === 'tool' && m.toolCallId === prior.toolCallId)
+            : undefined;
+          const moreHint = priorMsg
+            ? `… (use read_output with message="${priorMsg.id}" and offset=1500, or narrower arguments, for more)`
+            : '… (use read_output or narrower arguments for more)';
+          const repeated = `Already ran ${call.name} with these arguments in this run and nothing has changed since; the result is above.${output.length > 1500 ? ` First part again:\n${output.slice(0, 1500)}\n${moreHint}` : `\n${output}`}${loopNote || '\nDo not repeat it: use that result or try something different.'}`;
           this.persistTool(run, call, repeated, 'completed', false);
           completed.add(call.id);
           this.bumpTools(run.id, completed);
@@ -3129,4 +3146,18 @@ export function extractInlineToolCalls(raw: string): { text: string; calls: Tool
     return full;
   }).trim();
   return { text: cleaned, calls };
+}
+
+/**
+ * Detect genuine degenerate repetition loops (e.g. "/////////..." or "foo foo foo...")
+ * while ignoring legitimate Markdown/ASCII formatting (table separators, rules, indentation).
+ */
+export function detectDegenerateRepeat(buf: string): string | null {
+  if (buf.length < 60) return null;
+  const tail = buf.slice(-240);
+  const single = tail.match(/([^\s\-=_*#|.─═~`])\1{59,}$/);
+  if (single) return single[0];
+  const multi = tail.match(/(.{2,8})\1{19,}$/);
+  if (multi && /[^\s\-=_*#|.─═~`]/.test(multi[1])) return multi[0];
+  return null;
 }
