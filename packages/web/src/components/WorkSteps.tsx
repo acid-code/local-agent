@@ -28,13 +28,13 @@ export function useClockPhase(periodMs: number, offsetMs = 0): CSSProperties {
   return style;
 }
 
-/** The "Working…" dots: mounted once for the whole run; only the note changes, fading in under its own key. */
-export function TypingDots({ label, note }: { label: string; note: string }) {
-  const a = useClockPhase(1800, 0);
-  const b = useClockPhase(1800, 220);
-  const c = useClockPhase(1800, 440);
+/** The "Working…" dots: mounted once for the whole run; memoized so streaming tokens never re-render them. */
+export const TypingDots = memo(function TypingDots({ label, note }: { label: string; note: string }) {
+  const a = useClockPhase(2000, 0);
+  const b = useClockPhase(2000, 200);
+  const c = useClockPhase(2000, 400);
   return <div className="typing" role="status" aria-label={label}><span style={a} aria-hidden /><span style={b} aria-hidden /><span style={c} aria-hidden /> <em key={note}>{note}</em></div>;
-}
+});
 
 /** The reasoning streaming in right now: one quiet row that becomes a "Thought" row when the step lands. */
 function LiveThoughtRow({ text }: { text: string }) {
