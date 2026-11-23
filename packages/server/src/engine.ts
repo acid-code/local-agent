@@ -417,10 +417,10 @@ export class Engine {
     const model = this.fastSummaryModel(session.activeModelId);
     const prevRoot = [...existing].reverse().find((s) => s.level === 2)?.content || '';
     const transcript = older
-      .map((m) => `${m.role}${m.toolName ? `(${m.toolName})` : ''}: ${m.content.replace(/\s+/g, ' ').slice(0, 420)}`)
+      .map((m) => `${m.role}${m.toolName ? `(${m.toolName})` : ''}: ${m.content.replace(/\s+/g, ' ').slice(0, m.role === 'tool' ? 200 : 360)}`)
       .join('\n')
-      .slice(-6_500);
-    const prompt = `Compact this conversation into a dense handoff summary (under 220 words) with bullet sections: Goal, Decisions, Files & Repos, Open Next Steps.\n\n${prevRoot ? `Previous summary:\n${prevRoot.slice(0, 900)}\n\n` : ''}Transcript:\n${transcript}`;
+      .slice(-4_500);
+    const prompt = `Compact this conversation into a concise handoff summary (under 160 words) with bullets: Goal, Decisions, Files & Repos, Open Next Steps.\n\n${prevRoot ? `Previous summary:\n${prevRoot.slice(0, 700)}\n\n` : ''}Transcript:\n${transcript}`;
     const generated = model ? await this.trySummarize(model, prompt) : null;
     const summary = generated || this.fallbackSummary(older, prevRoot);
     const version = Math.max(0, ...existing.map((s) => s.version)) + 1;
@@ -1481,7 +1481,6 @@ export class Engine {
   private async stepSummarize(run: RunRow) {
     const agent = this.store.getAgent(run.agentId);
     const model = run.modelId ? this.store.getModel(run.modelId) : null;
-    if (agent && model) await this.maybeFold(run.sessionId, agent, model).catch(() => undefined);
     if (agent && run.cursor.stage === 'implement') {
       const labels = turnRoots(this.store, run, this.libraryDir).map((root) => root.label);
       for (const label of labels) addProjectNote(this.store, { label, agentId: agent.id, kind: 'change', body: `${agent.name} finished a change on ${label}.` });
@@ -1489,6 +1488,11 @@ export class Engine {
     const cursor = { ...this.store.getRun(run.id)!.cursor, phase: 'done' as const };
     this.store.updateRun(run.id, { cursor, status: 'completed', endedAt: now() });
     this.checkpoint(run.id, cursor, 'Finished');
+    // Run auto-compaction in the background after marking the run done so the user never waits 5-10s after the reply lands.
+    if (agent && model) {
+      const fold = this.maybeFold(run.sessionId, agent, model).catch(() => undefined);
+      if (process.env.VITEST) await fold;
+    }
   }
 
   private choose(agent: Agent, run: RunRow): RouteDecision {
@@ -1904,8 +1908,11 @@ export class Engine {
     const ids = foldCandidates(messages.map((message) => ({ id: message.id, role: message.role as 'user', content: message.content })), covered, tok, summaryTriggerFor(model, settings.summaryTriggerTokens), messageBudget);
     if (!ids) return;
     const slice = messages.filter((message) => ids.includes(message.id));
-    const transcript = slice.map((message) => `${message.role}: ${message.content}`).join('\n').slice(0, 12_000);
-    const summary = await this.trySummarize(model, `Summarize this conversation segment in under 180 words. Keep names, decisions, numbers, and open questions.\n\n${transcript}`);
+    const transcript = slice
+      .map((message) => `${message.role}: ${message.content.replace(/\s+/g, ' ').slice(0, message.role === 'tool' ? 220 : 400)}`)
+      .join('\n')
+      .slice(-4_500);
+    const summary = await this.trySummarize(model, `Summarize this conversation segment in under 140 words. Keep names, decisions, numbers, and open questions.\n\n${transcript}`);
     if (!summary) {
       this.store.addLog('warn', 'Summary failed. Raw messages were kept and will be tried again later.', undefined, 'context');
       return;
@@ -2072,7 +2079,7 @@ export class Engine {
       const provider = this.provider(model);
       let text = '';
       const timer = AbortSignal.timeout(30_000);
-      for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, noThink: true, sampling: samplingFor(`${model.apiName} ${model.name}`, { thinking: false, task: 'general' }), maxTokens: maxTokensFor({ thinking: false, side: true }), signal: timer })) {
+      for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, noThink: true, sampling: samplingFor(`${model.apiName} ${model.name}`, { thinking: false, task: 'general' }), maxTokens: Math.min(280, maxTokensFor({ thinking: false, side: true })), signal: timer })) {
         if (event.type === 'token') text += event.text;
       }
       return text.trim().slice(0, 4000) || null;
