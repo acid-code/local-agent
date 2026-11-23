@@ -181,7 +181,13 @@ export function thinkTool(): Tool {
       thoughts.set(key, chain.slice(-30));
       if (thoughts.size > 200) thoughts.delete(thoughts.keys().next().value!);
       const total = Number(args.total_thoughts) || chain.length;
-      return `Thought ${args.thought_number}/${total} recorded${args.done ? ' — done; write the answer now.' : '.'}\nChain:\n${chain.map((row) => `${row.n}${row.revises ? ` (revises ${row.revises})` : ''}. ${row.text.slice(0, 200)}`).join('\n')}`;
+      const capped = chain.length >= 2 && !args.done;
+      const status = args.done
+        ? ' — done; write the answer now.'
+        : capped
+          ? ' — scratchpad limit reached; stop calling think and either call a real tool or write your final answer now.'
+          : '.';
+      return `Thought ${args.thought_number}/${total} recorded${status}\nChain:\n${chain.map((row) => `${row.n}${row.revises ? ` (revises ${row.revises})` : ''}. ${row.text.slice(0, 200)}`).join('\n')}`;
     },
   };
 }

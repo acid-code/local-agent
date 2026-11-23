@@ -960,8 +960,14 @@ export class Engine {
       if (kind === 'uncensored') await this.llama.switchToUncensored();
       else await this.llama.switchToQwen();
     }
+    const thinkingOn = !current.cursor.noThink && (Boolean(current.cursor.reasoning) || Boolean(providerRow && (isLlamaServerProvider(providerRow) || isUncensoredProvider(providerRow))));
+    const nativeThinking = thinkingOn || (/(?:qwen3|flint|deepseek[-_]?r1|qwq|\bo[134]\b)/i.test(`${model.apiName} ${model.name}`) && !/-instruct\b/i.test(model.apiName));
     const toolless = Boolean(current.cursor.noTools) || this.toolSupportOf(model) === false;
-    const tools = toolless ? [] : this.tools(agent, this.store.getSession(run.sessionId)?.mode, current.cursor.stage, current.cursor.toolSubset, Boolean(current.cursor.helperId), current).map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
+    const tools = toolless
+      ? []
+      : this.tools(agent, this.store.getSession(run.sessionId)?.mode, current.cursor.stage, current.cursor.toolSubset, Boolean(current.cursor.helperId), current)
+          .filter((tool) => !(nativeThinking && tool.name === 'think'))
+          .map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
     const sessionForCtx = this.store.getSession(run.sessionId);
     const repoTask = Boolean(sessionForCtx?.mode === 'code' || sessionForCtx?.workshopId || current.cursor.stage || turnRoots(this.store, current, this.libraryDir).length > 0);
     const roleForCtx = current.cursor.autoRole || contractForAgent(agent.name)?.modelRole || 'main';
@@ -991,8 +997,6 @@ export class Engine {
     });
     this.bus.publish({ type: 'step', runId: run.id, step });
     const started = Date.now();
-    // llama-server models think unless told not to; Ollama models only when the route asked for reasoning.
-    const thinkingOn = !current.cursor.noThink && (Boolean(current.cursor.reasoning) || Boolean(providerRow && (isLlamaServerProvider(providerRow) || isUncensoredProvider(providerRow))));
     let text = '';
     let reasoningText = '';
     this.liveStreams.set(run.id, { text: '', thinking: '', status: 'running' });
