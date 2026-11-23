@@ -354,12 +354,12 @@ export class Engine {
     return plan.breakdown;
   }
 
-  /** Skip older messages already covered by an active Level-2 summary (always keeping the latest 4 messages). */
+  /** Skip older messages already covered by any summary (including older summaries already folded into the root), always keeping the latest 4 messages. */
   private uncoveredMessages<T extends { id: string }>(messages: T[], summaries: { level: number; covers: string[]; foldedInto: string | null }[]): T[] {
-    const activeCovers = new Set(summaries.filter((s) => s.level === 2 && !s.foldedInto).flatMap((s) => s.covers));
-    if (!activeCovers.size || messages.length <= 4) return messages;
+    const covered = new Set(summaries.flatMap((s) => s.covers));
+    if (!covered.size || messages.length <= 4) return messages;
     const tailStart = Math.max(0, messages.length - 4);
-    return messages.filter((m, idx) => idx >= tailStart || !activeCovers.has(m.id));
+    return messages.filter((m, idx) => idx >= tailStart || !covered.has(m.id));
   }
 
   /** Pick a fast lightweight model (e.g. gemma3:4b) for compaction/handoff so it finishes in ~3-5s without evicting llama-server's KV prefix cache. */
@@ -1847,10 +1847,10 @@ export class Engine {
     const uiBreakdown = {
       ...plan.breakdown,
       budget: fullUsableBudget,
-      free: Math.max(0, fullUsableBudget - plan.breakdown.used),
+      remaining: Math.max(0, fullUsableBudget - plan.breakdown.used),
     };
     this.lastContext.set(run.sessionId, uiBreakdown);
-    this.bus.publish({ type: 'context', runId: run.id, used: uiBreakdown.used, budget: uiBreakdown.budget, breakdown: uiBreakdown });
+    this.bus.publish({ type: 'context', runId: run.id, sessionId: run.sessionId, used: uiBreakdown.used, budget: uiBreakdown.budget, breakdown: uiBreakdown });
     const recent = new Map(messages.map((message) => [message.id, message]));
     const runIds = new Set(runMessageIds);
     const chat: ChatMessage[] = [{ role: 'system', content: plan.preamble }];
