@@ -23,13 +23,13 @@ describe('llama-server requests', () => {
     await drain(provider.complete({ model: 'qwen3.6-35b-a3b', messages: [{ role: 'user', content: 'hi' }], noThink: true, sampling: samplingFor('qwen3.6-35b-a3b', { thinking: false, task: 'general' }), maxTokens: 512 }));
     const body = bodies[0]!;
     expect(body.chat_template_kwargs).toEqual({ enable_thinking: false });
-    expect(body).toMatchObject({ temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0, presence_penalty: 1.5, max_tokens: 512, cache_prompt: true });
+    expect(body).toMatchObject({ temperature: 0.6, top_p: 0.85, top_k: 20, min_p: 0.05, presence_penalty: 0.3, repeat_penalty: 1.08, max_tokens: 512, cache_prompt: true });
     expect(body.stream_options).toEqual({ include_usage: true });
   });
 
-  it('uses the Qwen card values per mode and task, and nothing for unknown models', () => {
-    expect(samplingFor('qwen3.6-35b-a3b', { thinking: true, task: 'code' })).toMatchObject({ temperature: 0.6, top_p: 0.95, top_k: 20, presence_penalty: 0 });
-    expect(samplingFor('qwen3.6-35b-a3b', { thinking: true, task: 'general' })).toMatchObject({ temperature: 1.0, presence_penalty: 1.5 });
+  it('uses the Qwen sampling values per mode and task, and nothing for unknown models', () => {
+    expect(samplingFor('qwen3.6-35b-a3b', { thinking: true, task: 'code' })).toMatchObject({ temperature: 0.6, top_p: 0.9, top_k: 20, min_p: 0.05, presence_penalty: 0.2, repeat_penalty: 1.06 });
+    expect(samplingFor('qwen3.6-35b-a3b', { thinking: true, task: 'general' })).toMatchObject({ temperature: 0.7, top_p: 0.9, min_p: 0.05, presence_penalty: 0.4, repeat_penalty: 1.08 });
     expect(samplingFor('gpt-oss-20b', { thinking: true, task: 'general' })).toEqual({ temperature: 1.0, top_p: 1.0 });
     expect(samplingFor('Inkling 2 Mini', { thinking: true, task: 'general' })).toBeUndefined();
     process.env.LA_SAMPLING = 'off';
