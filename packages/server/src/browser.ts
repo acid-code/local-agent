@@ -134,9 +134,29 @@ function dockerCdpDriver(docker: DockerCtl, dataDir: string): CdpDriver {
       const shotFile = screenshot ? `.shot-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.png` : null;
       const payload = Buffer.from(JSON.stringify({ url, actions, shotPath: shotFile ? `/profiles/${shotFile}` : null, profile: `/profiles/${personaFolder}` })).toString('base64');
       const script = `
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { chromium } = require('playwright');
 (async () => {
   const cfg = JSON.parse(Buffer.from(process.env.LA_BROWSE_REQ, 'base64').toString('utf8'));
+  // Clean stale Chromium Singleton* locks left behind after a container recreate or crash.
+  try {
+    const lockPath = path.join(cfg.profile, 'SingletonLock');
+    const target = fs.readlinkSync(lockPath);
+    const sep = target.lastIndexOf('-');
+    const lockHost = sep > 0 ? target.slice(0, sep) : '';
+    const lockPid = sep > 0 ? Number(target.slice(sep + 1)) : 0;
+    let alive = false;
+    if (lockHost === os.hostname() && lockPid > 0) {
+      try { process.kill(lockPid, 0); alive = true; } catch {}
+    }
+    if (!alive) {
+      for (const name of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+        try { fs.unlinkSync(path.join(cfg.profile, name)); } catch {}
+      }
+    }
+  } catch {}
   const ctx = await chromium.launchPersistentContext(cfg.profile, {
     headless: false,
     args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--disable-extensions', '--disable-background-networking', '--no-first-run'],
