@@ -1,7 +1,7 @@
 {
   "name": "local-agent-desktop",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Windows shell for the local-agent web console. It stores a server URL and loads that origin with a normal cookie login.",
   "author": "local-agent",
   "main": "main.js",

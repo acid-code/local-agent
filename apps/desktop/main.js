@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, Menu, MenuItem, dialog, ipcMain, shell } = require('electron');
 // Downloads (Save in the file viewer) ask where to put the file with the native save dialog.
 const fs = require('fs');
 const path = require('path');
@@ -92,7 +92,52 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      spellcheck: true,
     },
+  });
+
+  // Enable English + Hebrew spellcheck dictionaries when available in Electron's built-in Hunspell bundle.
+  try {
+    const avail = win.webContents.session.availableSpellCheckerLanguages || [];
+    const wanted = ['en-US', 'he'].filter((lang) => avail.includes(lang));
+    if (wanted.length) win.webContents.session.setSpellCheckerLanguages(wanted);
+    win.webContents.session.setSpellCheckerEnabled(true);
+  } catch { /* ignore on platforms without spellcheck dictionaries */ }
+
+  // Native right-click menu with spelling suggestions, "Add to dictionary", and Cut/Copy/Paste.
+  win.webContents.on('context-menu', (_event, params) => {
+    const items = [];
+    if (params.misspelledWord) {
+      if (params.dictionarySuggestions && params.dictionarySuggestions.length > 0) {
+        for (const suggestion of params.dictionarySuggestions.slice(0, 6)) {
+          items.push(new MenuItem({
+            label: suggestion,
+            click: () => win.webContents.replaceMisspelling(suggestion),
+          }));
+        }
+      } else {
+        items.push(new MenuItem({ label: 'No spelling suggestions', enabled: false }));
+      }
+      items.push(new MenuItem({ type: 'separator' }));
+      items.push(new MenuItem({
+        label: `Add "${params.misspelledWord}" to dictionary`,
+        click: () => win.webContents.session.addWordToSpellCheckerDictionary(params.misspelledWord),
+      }));
+      items.push(new MenuItem({ type: 'separator' }));
+    }
+    if (params.isEditable) {
+      items.push(new MenuItem({ role: 'cut', enabled: params.editFlags.canCut }));
+      items.push(new MenuItem({ role: 'copy', enabled: params.editFlags.canCopy }));
+      items.push(new MenuItem({ role: 'paste', enabled: params.editFlags.canPaste }));
+      items.push(new MenuItem({ type: 'separator' }));
+      items.push(new MenuItem({ role: 'selectAll', enabled: params.editFlags.canSelectAll }));
+    } else if (params.selectionText && params.selectionText.trim()) {
+      items.push(new MenuItem({ role: 'copy' }));
+    }
+    if (!items.length) return;
+    const ctxMenu = new Menu();
+    for (const item of items) ctxMenu.append(item);
+    ctxMenu.popup({ window: win });
   });
 
   // Links to the console stay in the window. Anything else (search results, citations) opens in the default browser.

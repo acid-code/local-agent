@@ -1336,7 +1336,7 @@ export function Chat() {
                 )}
               </div>
             )}
-            <textarea ref={input} dir="auto" rows={1} value={draft} aria-label={t('Message')} placeholder={active ? t('Steer the active agent without stopping it…') : mode === 'code' ? t('Ask for a plan, then an edit…') : t('Message')} onChange={(event) => {
+            <textarea ref={input} dir="auto" rows={1} spellCheck={true} autoCorrect="on" autoCapitalize="sentences" value={draft} aria-label={t('Message')} placeholder={active ? t('Steer the active agent without stopping it…') : mode === 'code' ? t('Ask for a plan, then an edit…') : t('Message')} onChange={(event) => {
               const value = event.target.value;
               setDraft(value);
               const upto = value.slice(0, event.target.selectionStart ?? value.length);
