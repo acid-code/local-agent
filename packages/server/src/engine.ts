@@ -1158,6 +1158,14 @@ export class Engine {
     const split = splitThinking(text);
     text = split.answer;
     reasoningText = [reasoningText, split.reasoning].filter(Boolean).join('\n');
+    // Fallback parser for raw Qwen3/XML <tool_call> blocks when llama-server's peg-native parser misses whitespace variants.
+    if (!toolCalls?.length && /<tool_call>\s*(?:<function=|\{)/i.test(text)) {
+      const recovered = extractInlineToolCalls(text);
+      if (recovered.calls.length) {
+        toolCalls = recovered.calls;
+        text = recovered.text;
+      }
+    }
     if (!text.trim() && !toolCalls?.length) {
       if (!current.cursor.emptyRetry) {
         const why = reasoningText ? `${model.name} thought but gave no answer. Retrying once with thinking off.` : `${model.name} returned an empty answer. Retrying once.`;
@@ -3056,4 +3064,46 @@ function contractAllows(contract: { tools: string[] } | null, name: string, serv
 export function roughModelGiB(apiName: string): number {
   const size = Number(apiName.toLowerCase().match(/(\d+(?:\.\d+)?)b\b/)?.[1] ?? 4);
   return size * 0.6 + 1;
+}
+
+/** Fallback parser for leaked Qwen3 XML (<tool_call> <function=name> <parameter=k>v</parameter> </function> </tool_call>) or JSON <tool_call>{...}</tool_call>. */
+export function extractInlineToolCalls(raw: string): { text: string; calls: ToolCall[] } {
+  const calls: ToolCall[] = [];
+  const blockRe = /<tool_call>([\s\S]*?)<\/tool_call>/gi;
+  const cleaned = raw.replace(blockRe, (full, body: string) => {
+    const fnMatch = /<function\s*=\s*([^\s>]+)\s*>([\s\S]*?)<\/function>/i.exec(body);
+    if (fnMatch) {
+      const name = fnMatch[1]!.trim();
+      const args: Record<string, unknown> = {};
+      const paramRe = /<parameter\s*=\s*([^\s>]+)\s*>([\s\S]*?)<\/parameter>/gi;
+      let pm: RegExpExecArray | null;
+      while ((pm = paramRe.exec(fnMatch[2]!)) !== null) {
+        const key = pm[1]!.trim();
+        const val = pm[2]!.trim();
+        if (val === 'true') args[key] = true;
+        else if (val === 'false') args[key] = false;
+        else if (/^-?\d+(?:\.\d+)?$/.test(val) && val.length < 16) args[key] = Number(val);
+        else if ((val.startsWith('{') && val.endsWith('}')) || (val.startsWith('[') && val.endsWith(']'))) {
+          try { args[key] = JSON.parse(val); } catch { args[key] = val; }
+        } else {
+          args[key] = val;
+        }
+      }
+      calls.push({ id: `call_${Date.now().toString(36)}_${calls.length}`, name, arguments: JSON.stringify(args) });
+      return '';
+    }
+    const trimmed = body.trim();
+    if (trimmed.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(trimmed) as { name?: string; arguments?: unknown };
+        if (parsed.name) {
+          const argStr = typeof parsed.arguments === 'string' ? parsed.arguments : JSON.stringify(parsed.arguments ?? {});
+          calls.push({ id: `call_${Date.now().toString(36)}_${calls.length}`, name: parsed.name, arguments: argStr });
+          return '';
+        }
+      } catch { /* leave unmatched */ }
+    }
+    return full;
+  }).trim();
+  return { text: cleaned, calls };
 }
