@@ -2594,3 +2594,14 @@ button.state-card:hover, a.state-card:hover { background: var(--bg-3); }
 .llm-experts { display: grid; grid-template-columns: repeat(16, minmax(0, 1fr)); gap: 3px; }
 .llm-exp { height: 7px; border-radius: 2px; background: rgba(var(--text-rgb), 0.1); transition: background 250ms ease; }
 .llm-exp.hot { background: var(--brass); }
+
+/* ── Plan / Tasks card ── */
+.task-list { display: flex; flex-direction: column; gap: 8px; }
+.task-list.completed { padding-block: 10px; opacity: 0.85; }
+.task-list-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.task-list-title { display: inline-flex; align-items: center; gap: 8px; border: 0; background: transparent; padding: 0; color: var(--text); font: inherit; cursor: pointer; }
+.task-list-actions { display: inline-flex; align-items: center; gap: 4px; }
+.task-list label.row { display: flex; flex-wrap: nowrap; align-items: flex-start; gap: 10px; cursor: pointer; }
+.task-list label.row input[type="checkbox"] { flex: 0 0 auto; margin-top: 3px; }
+.task-list label.row span { flex: 1 1 auto; min-width: 0; line-height: 1.45; }
+.task-list label.row span.done-text { text-decoration: line-through; opacity: 0.65; }

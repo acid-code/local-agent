@@ -96,6 +96,7 @@ export function Chat() {
   const [breakdown, setBreakdown] = useState<ContextBreakdown | null>(null);
   const [miniAgents, setMiniAgents] = useState<MiniAgentRow[]>([]);
   const [nudgeDismissed, setNudgeDismissed] = useState(false);
+  const [planExpanded, setPlanExpanded] = useState(false);
   const [voiceLoop, setVoiceLoop] = useState(false);
   const voiceLoopRef = useRef(false);
   voiceLoopRef.current = voiceLoop;
@@ -1228,30 +1229,59 @@ export function Chat() {
               <div className="row"><button className="btn primary" onClick={retry}><RotateCcw size={15} />{' '}{t('Try again')}</button><button className="btn ghost" onClick={() => setTrace(true)}>{t('Open trace')}</button></div>
             </div>
           )}
-          {plan && plan.items.length > 0 && (
-            <div className="card task-list">
-              <h3>
-                {mode === 'code' ? t('Plan') : t('Tasks')} <span className="faint small">{plan.items.filter((item) => item.status === 'done').length}/{plan.items.length}</span>
-                {plan.canUndo && current && (
-                  <button type="button" className="btn ghost small" style={{ float: 'inline-end' }} onClick={async () => {
-                    try {
-                      const res = await post<{ plan: Plan | null }>(`/api/sessions/${current}/plan/undo`, {});
-                      setPlan(res.plan);
-                      toast(t('Plan change undone.'), 'ok');
-                    } catch (error) { toast(errorText(error), 'error'); }
-                  }}><RotateCcw size={12} aria-hidden /> {t('Undo plan')}</button>
-                )}
-              </h3>
-              {plan.items.map((item) => (
-                <label key={item.id} className="row" title={item.note ?? undefined}>
-                  <input type="checkbox" checked={item.status === 'done'} onChange={async (event) => { await api(`/api/plan-items/${item.id}`, { method: 'PATCH', body: JSON.stringify({ status: event.target.checked ? 'done' : 'pending' }) }); if (current) void openSession(current); }} />
-                  <span dir="auto" className={item.status === 'blocked' ? 'bad' : item.status === 'doing' ? 'strong' : undefined}>{item.text}</span>
-                  {item.status === 'doing' && <span className="badge">{t('working')}</span>}
-                  {item.status === 'blocked' && <span className="badge bad">{t('blocked')}</span>}
-                </label>
-              ))}
-            </div>
-          )}
+          {plan && plan.items.length > 0 && (() => {
+            const doneCount = plan.items.filter((item) => item.status === 'done').length;
+            const allDone = doneCount === plan.items.length;
+            const showBody = !allDone || active || planExpanded;
+            return (
+              <div className={`card task-list${allDone && !active ? ' completed' : ''}`}>
+                <div className="task-list-head">
+                  <button
+                    type="button"
+                    className="task-list-title"
+                    onClick={() => { if (allDone && !active) setPlanExpanded((v) => !v); }}
+                  >
+                    <strong>{mode === 'code' ? t('Plan') : t('Tasks')}</strong>
+                    <span className="faint small">{doneCount}/{plan.items.length}</span>
+                  </button>
+                  <div className="task-list-actions">
+                    {plan.canUndo && current && (
+                      <button type="button" className="btn ghost small" onClick={async () => {
+                        try {
+                          const res = await post<{ plan: Plan | null }>(`/api/sessions/${current}/plan/undo`, {});
+                          setPlan(res.plan);
+                          toast(t('Plan change undone.'), 'ok');
+                        } catch (error) { toast(errorText(error), 'error'); }
+                      }}><RotateCcw size={12} aria-hidden /> {t('Undo plan')}</button>
+                    )}
+                    {!active && current && (
+                      <button
+                        type="button"
+                        className="btn ghost small"
+                        title={t('Dismiss')}
+                        aria-label={t('Dismiss')}
+                        onClick={async () => {
+                          try {
+                            await api(`/api/sessions/${current}/plan`, { method: 'PUT', body: JSON.stringify({ items: [] }) });
+                            setPlan(null);
+                            setPlanExpanded(false);
+                          } catch (error) { toast(errorText(error), 'error'); }
+                        }}
+                      ><X size={13} aria-hidden /></button>
+                    )}
+                  </div>
+                </div>
+                {showBody && plan.items.map((item) => (
+                  <label key={item.id} className="row" title={item.note ?? undefined}>
+                    <input type="checkbox" checked={item.status === 'done'} onChange={async (event) => { await api(`/api/plan-items/${item.id}`, { method: 'PATCH', body: JSON.stringify({ status: event.target.checked ? 'done' : 'pending' }) }); if (current) void openSession(current); }} />
+                    <span dir="auto" className={item.status === 'blocked' ? 'bad' : item.status === 'doing' ? 'strong' : item.status === 'done' ? 'done-text' : undefined}>{item.text}</span>
+                    {item.status === 'doing' && <span className="badge">{t('working')}</span>}
+                    {item.status === 'blocked' && <span className="badge bad">{t('blocked')}</span>}
+                  </label>
+                ))}
+              </div>
+            );
+          })()}
           {edits.length > 0 && <BulkDiffCard edits={edits} onChanged={() => { if (current) void openSession(current); }} />}
           </div>
           {!nearBottom && (

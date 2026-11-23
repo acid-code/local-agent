@@ -50,7 +50,7 @@ import { scanMachine } from './discovery.js';
 import { CrashError, InterruptedToolError, StopError, clampText, now } from './util.js';
 import type { Vault } from './vault.js';
 import { cleanupHebrew } from './hebrew-cleanup.js';
-import { LONG_TASK_STEPS, MAX_TASK_ROUNDS, TASKS_HINT, openTasks, tasksNote, tasksTool } from './tasks.js';
+import { LONG_TASK_STEPS, MAX_TASK_ROUNDS, TASKS_HINT, completeFinalReplyTask, openTasks, tasksNote, tasksTool } from './tasks.js';
 import { HONESTY_RULE, checkFinalReply, recoveryHint } from './recovery.js';
 import { ocrTool, understandImageTool, type ImageAnalysisResult, type OcrMode, type OcrResult } from './ocr.js';
 import { getLanguage, languageHint, replyLanguage, wantsCleanup } from './language.js';
@@ -1211,6 +1211,7 @@ export class Engine {
         this.store.updateRun(run.id, { cursor: { ...current.cursor, phase: 'model', turn: current.cursor.turn + 1, recovery: { rounds: rounds + 1, note: check.note } }, inputTokens: fresh.inputTokens + usage.inputTokens, outputTokens: fresh.outputTokens + usage.outputTokens, costUsd: fresh.costUsd + cost });
         return;
       }
+      if (check.action === 'ok') completeFinalReplyTask(this.store, run.sessionId, run.id, text);
       const open = check.action === 'ok' ? openTasks(this.store, run.sessionId, run.id) : [];
       const taskRounds = current.cursor.taskRounds ?? 0;
       const taskSnapshot = open.slice().sort().join('\n');

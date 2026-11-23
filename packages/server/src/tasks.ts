@@ -62,6 +62,22 @@ export function openTasks(store: Store, sessionId: string, runId: string): strin
     .map((row) => `${row.position + 1}. [${row.status}] ${row.text}`);
 }
 
+const FINAL_REPLY_TASK = /\b(summariz|summary|report|present|respond|answer|recommend|explain|deliver|reply|conclud|wrap\s*up|share\s+(?:the\s+)?(?:findings|results|recommendations))\b|לסכם|סיכום|להציג|המלצות/i;
+
+/** If the only remaining open item is the final "summarize / present recommendations" step and the agent just wrote a real final answer, mark it done automatically. */
+export function completeFinalReplyTask(store: Store, sessionId: string, runId: string, replyText: string): boolean {
+  if (replyText.trim().length < 60) return false;
+  const plan = store.db.prepare('SELECT id, run_id AS runId FROM plans WHERE session_id = ?').get(sessionId) as { id: string; runId: string | null } | undefined;
+  if (!plan || plan.runId !== runId) return false;
+  const all = store.db.prepare('SELECT id, text, status, position FROM plan_items WHERE plan_id = ? ORDER BY position').all(plan.id) as { id: string; text: string; status: string; position: number }[];
+  const open = all.filter((row) => row.status === 'pending' || row.status === 'doing');
+  if (open.length !== 1 || !all.length) return false;
+  const only = open[0]!;
+  const isLast = only.position === all[all.length - 1]!.position;
+  if (!isLast || !FINAL_REPLY_TASK.test(only.text)) return false;
+  return Boolean(updatePlanItem(store, only.id, { status: 'done', note: 'Delivered in final reply.' }));
+}
+
 export function tasksNote(open: string[]) {
   return `\n\nCHECK BEFORE FINISHING: your task list still has open items:\n${open.join('\n')}\nContinue with the next one now. If one cannot be done, mark it blocked with the reason. Finish only when every item is done (with evidence) or blocked.`;
 }
