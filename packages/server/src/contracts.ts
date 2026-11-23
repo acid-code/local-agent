@@ -75,7 +75,7 @@ const toolSchemas: Record<string, z.ZodTypeAny> = {
     endLine: z.coerce.number().int().min(1).optional().describe('Optional 1-based last line (inclusive).'),
   }),
   web_search: z.object({ query: z.string().min(1) }),
-  web_fetch: z.object({ url: z.string().min(1) }),
+  web_fetch: z.object({ url: z.string().min(1), include_scripts: z.boolean().optional() }),
   request_secret: z.object({ name: z.string().min(1), reason: z.string().min(1), scope: z.string().optional() }),
 };
 

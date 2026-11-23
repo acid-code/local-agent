@@ -112,6 +112,8 @@ export interface RunCursor {
   toolRetry?: boolean;
   /** Send no tools on this turn. */
   noTools?: boolean;
+  /** Set once when maxSteps is reached so the model gets one final tool-free turn to synthesize its answer. */
+  finalSynthesis?: boolean;
   /** One retry on the next Auto tier after the model was missing from Ollama. */
   missingRetry?: boolean;
   /** One automatic retry on the uncensored local llama-server after a clear refusal. */

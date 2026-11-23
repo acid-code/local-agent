@@ -73,7 +73,7 @@ export const DEFAULT_SETTINGS: Settings = {
   goodModelId: null,
   autoResume: true,
   sandbox: 'docker-or-host',
-  maxSteps: 12,
+  maxSteps: 24,
   outputReserveTokens: 2048,
   summaryTriggerTokens: 1800,
   searxngUrl: '',

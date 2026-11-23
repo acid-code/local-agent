@@ -857,8 +857,33 @@ export class Engine {
       }
     }
     if (current.cursor.turn >= maxSteps) {
-      this.store.updateRun(run.id, { cursor: { ...current.cursor, phase: 'summarize' } });
-      return;
+      if (!current.cursor.finalSynthesis) {
+        // Give the model one final tool-free turn to synthesize everything it gathered so a run never ends silently on a tool output.
+        current = this.store.updateRun(run.id, {
+          cursor: {
+            ...current.cursor,
+            noTools: true,
+            finalSynthesis: true,
+            recovery: {
+              rounds: current.cursor.recovery?.rounds ?? 0,
+              note: 'You have reached the tool-call limit. Do not call any more tools. Synthesize everything you gathered so far into a clear, definitive answer for the user now.',
+            },
+          },
+        })!;
+      } else {
+        this.store.updateRun(run.id, { cursor: { ...current.cursor, phase: 'summarize' } });
+        return;
+      }
+    } else if (current.cursor.turn === maxSteps - 1 && !current.cursor.recovery?.note) {
+      current = this.store.updateRun(run.id, {
+        cursor: {
+          ...current.cursor,
+          recovery: {
+            rounds: current.cursor.recovery?.rounds ?? 0,
+            note: 'Note: this is your last tool step before the final answer — wrap up and synthesize what you have.',
+          },
+        },
+      })!;
     }
     const agent = this.store.getAgent(run.agentId);
     if (!agent) throw new Error('Persona disappeared.');
@@ -1707,7 +1732,7 @@ export class Engine {
       })(),
     ].join('');
     const searchFirstNote = toolNames.includes('web_search')
-      ? '\n\nWeb lookup rule: always call web_search (SearXNG) first before calling web_fetch or browse; never invent URLs.'
+      ? '\n\nWeb lookup rule: always call web_search (SearXNG) first before calling web_fetch or browse; never invent URLs. If web_fetch returns navigation chrome or no prices (JS-rendered store), do not keep calling web_fetch on similar store pages — use browse or a targeted web_search instead, then synthesize a clear answer.'
       : '';
     const sharedRepoNote = sharedRepoBrief(this.store);
     // llama-server reuses the longest cached prompt prefix, and the hybrid Qwen3.6 cannot roll back into the middle of

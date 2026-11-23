@@ -133,8 +133,13 @@ export function formatSearch(query: string, result: SearchResult): string {
   return note ? `${note}\n\n${body}` : body;
 }
 
-/** Public page fetch used by the web_fetch tool. */
-export async function fetchPublicText(url: string, fetchImpl: typeof fetch, signal?: AbortSignal): Promise<string> {
+/** Public page fetch used by the web_fetch tool. Strips comments, styles, nav/footer chrome, and (by default) scripts. */
+export async function fetchPublicText(
+  url: string,
+  fetchImpl: typeof fetch,
+  signal?: AbortSignal,
+  opts: { includeScripts?: boolean } = {},
+): Promise<string> {
   const blocked = isBlockedUrl(url);
   if (blocked) throw new Error(blocked);
   const response = await fetchImpl(url, {
@@ -143,13 +148,26 @@ export async function fetchPublicText(url: string, fetchImpl: typeof fetch, sign
   });
   if (!response.ok) throw new Error(`Fetch returned ${response.status}.`);
   const bytes = new Uint8Array(await response.arrayBuffer());
-  const text = new TextDecoder().decode(bytes.slice(0, 500_000))
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+  let raw = new TextDecoder().decode(bytes.slice(0, 500_000))
+    .replace(/<!--[\s\S]*?-->/g, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<svg[\s\S]*?<\/svg>/gi, ' ')
+    .replace(/<(nav|footer|aside)\b[\s\S]*?<\/\1>/gi, ' ');
+  if (!opts.includeScripts) {
+    raw = raw.replace(/<script[\s\S]*?<\/script>/gi, ' ');
+  }
+  const text = raw
     .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#0*39;|&#x27;/gi, "'")
     .replace(/\s+/g, ' ')
     .trim();
-  return text.slice(0, 12_000) || '(empty page)';
+  return text.slice(0, 8_000) || '(empty page)';
 }
 
 export const BUILTIN_TOOLS: Tool[] = [
@@ -321,12 +339,15 @@ export const BUILTIN_TOOLS: Tool[] = [
   },
   {
     name: 'web_fetch',
-    description: 'Fetch a public http(s) URL and return visible text.',
-    parameters: obj({ url: { type: 'string' } }, ['url']),
+    description: 'Fetch a public http(s) URL and return clean visible text (strips scripts, styles, comments, and nav/footer boilerplate by default). Set include_scripts=true only if you specifically need inline scripts. For JS-rendered stores/pages that return no prices or content, use browse instead.',
+    parameters: obj({
+      url: { type: 'string' },
+      include_scripts: { type: 'boolean', description: 'Include inline <script> contents (default false).' },
+    }, ['url']),
     mutates: () => false,
     approval: () => null,
     async execute(args, ctx) {
-      return fetchPublicText(String(args.url || ''), ctx.fetchImpl, ctx.signal);
+      return fetchPublicText(String(args.url || ''), ctx.fetchImpl, ctx.signal, { includeScripts: Boolean(args.include_scripts) });
     },
   },
   {
