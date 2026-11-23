@@ -324,8 +324,8 @@ export interface OcrDeps {
   visionModel?: string;
   preferLightweight?: boolean;
   /** Optional llama-server (:8081 native mmproj) base URL, used for vision first when healthy and GTT allows (~12s/image, 0 extra GTT). */
-  inklingVisionUrl?: string | null;
-  inklingVisionModel?: string;
+  llamaVisionUrl?: string | null;
+  llamaVisionModel?: string;
   /** Optional text-only uncensored llama-server (:8081) base URL + companion Ollama vision model fallback. */
   uncensoredUrl?: string | null;
   uncensoredVisionModel?: string | null;
@@ -353,7 +353,7 @@ async function hasOllamaModel(fetchImpl: typeof fetch, root: string, name: strin
   }
 }
 
-async function inklingHealthy(fetchImpl: typeof fetch, baseUrl: string): Promise<boolean> {
+async function llamaVisionHealthy(fetchImpl: typeof fetch, baseUrl: string): Promise<boolean> {
   const root = baseUrl.replace(/\/v1\/?$/, '').replace(/\/$/, '');
   try {
     const res = await fetchImpl(`${root}/health`, { signal: AbortSignal.timeout(2000) });
@@ -363,7 +363,7 @@ async function inklingHealthy(fetchImpl: typeof fetch, baseUrl: string): Promise
   }
 }
 
-export function inklingVisionRunner(fetchImpl: typeof fetch, baseUrl: string, model = 'qwen3.6-35b-a3b-uncensored'): NonNullable<OcrRunners['vision']> {
+export function llamaVisionRunner(fetchImpl: typeof fetch, baseUrl: string, model = 'qwen3.6-35b-a3b-uncensored'): NonNullable<OcrRunners['vision']> {
   const root = baseUrl.replace(/\/v1\/?$/, '').replace(/\/$/, '');
   return async (image, prompt) => {
     const started = Date.now();
@@ -411,8 +411,8 @@ export async function liveRunners(deps: OcrDeps): Promise<OcrRunners> {
   const ollamaModel = await pickLocalVision(deps.fetchImpl, deps.ollamaRoot, deps.visionModel, Boolean(deps.preferLightweight));
   const ollamaFallback = ollamaModel ? ollamaVisionRunner(deps.fetchImpl, deps.ollamaRoot, ollamaModel, deps.memory) : null;
 
-  if (deps.inklingVisionUrl && hasEnoughGttForVision(gtt) && (await inklingHealthy(deps.fetchImpl, deps.inklingVisionUrl))) {
-    const nativeVision = inklingVisionRunner(deps.fetchImpl, deps.inklingVisionUrl, deps.inklingVisionModel || 'qwen3.6-35b-a3b-uncensored');
+  if (deps.llamaVisionUrl && hasEnoughGttForVision(gtt) && (await llamaVisionHealthy(deps.fetchImpl, deps.llamaVisionUrl))) {
+    const nativeVision = llamaVisionRunner(deps.fetchImpl, deps.llamaVisionUrl, deps.llamaVisionModel || 'qwen3.6-35b-a3b-uncensored');
     vision = ollamaFallback
       ? async (image, prompt) => {
           try { return await nativeVision(image, prompt); } catch { return ollamaFallback(image, prompt); }
@@ -422,7 +422,7 @@ export async function liveRunners(deps: OcrDeps): Promise<OcrRunners> {
     deps.uncensoredUrl
     && deps.uncensoredVisionModel
     && hasEnoughGttForVision(gtt, UNCENSORED_VISION_MIN_GTT_BYTES())
-    && (await inklingHealthy(deps.fetchImpl, deps.uncensoredUrl))
+    && (await llamaVisionHealthy(deps.fetchImpl, deps.uncensoredUrl))
     && (await hasOllamaModel(deps.fetchImpl, deps.ollamaRoot, deps.uncensoredVisionModel))
   ) {
     const uncensoredVision = ollamaVisionRunner(deps.fetchImpl, deps.ollamaRoot, deps.uncensoredVisionModel, deps.memory);

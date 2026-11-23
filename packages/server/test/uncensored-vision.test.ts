@@ -41,7 +41,7 @@ describe('uncensored provider isolation & GTT-guarded native mmproj vision', () 
       fetchImpl: fakeFetch,
       ollamaRoot: 'http://127.0.0.1:11434',
       cloudAllowed: false,
-      inklingVisionUrl: 'http://127.0.0.1:8081/v1',
+      llamaVisionUrl: 'http://127.0.0.1:8081/v1',
       gtt: { usedBytes: 25 * GiB, totalBytes: 40 * GiB },
     });
     const res1 = await withGtt.vision!(Buffer.from([0x89, 0x50, 0x4e, 0x47]), 'describe');
@@ -53,7 +53,7 @@ describe('uncensored provider isolation & GTT-guarded native mmproj vision', () 
       fetchImpl: fakeFetch,
       ollamaRoot: 'http://127.0.0.1:11434',
       cloudAllowed: false,
-      inklingVisionUrl: 'http://127.0.0.1:8081/v1',
+      llamaVisionUrl: 'http://127.0.0.1:8081/v1',
       gtt: { usedBytes: 38 * GiB, totalBytes: 40 * GiB },
     });
     const res2 = await lowGtt.vision!(Buffer.from([0x89, 0x50, 0x4e, 0x47]), 'describe');

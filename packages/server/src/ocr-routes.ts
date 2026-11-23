@@ -33,8 +33,8 @@ export function registerOcr(app: FastifyInstance, deps: { store: Store; engine: 
       fetchImpl, memory: engine.memory, ollamaRoot: ollamaRoot(), cloudAllowed,
       geminiKey: process.env.GEMINI_API_KEY, visionModel: process.env.OCR_VISION_MODEL,
       preferLightweight: engine.llama.isActive(),
-      inklingVisionUrl: uncensoredHasVision ? (uncensoredProvider?.baseUrl || null) : null,
-      inklingVisionModel: uncensoredModel?.apiName || 'qwen3.6-35b-a3b-uncensored',
+      llamaVisionUrl: uncensoredHasVision ? (uncensoredProvider?.baseUrl || null) : null,
+      llamaVisionModel: uncensoredModel?.apiName || 'qwen3.6-35b-a3b-uncensored',
       uncensoredUrl: uncensoredProvider?.baseUrl || null,
       uncensoredVisionModel: process.env.LA_UNCENSORED_VISION_MODEL || UNCENSORED_VISION_MODEL,
     });
