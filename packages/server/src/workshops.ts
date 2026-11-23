@@ -149,6 +149,11 @@ export function projectPath(roots: { label: string; path: string }[], project: s
   if (roots.length > 1) {
     const inferred = inferProject(roots, hint);
     if (inferred) return roots.find((root) => root.label === inferred)!.path;
+    // General utility / package-install / script commands (e.g. pip install, python3, ffmpeg) are not repo-specific:
+    // default to the persona's workspace instead of failing with "Name the project".
+    if (workspace && /^\s*(?:pip3?|uv\s+pip|python3?|which|echo|env|ffmpeg|ffprobe|convert|curl|wget)\b/i.test(hint || '')) {
+      return workspace;
+    }
     throw new Error(`Name the project: ${[...roots.map((root) => root.label), 'workspace'].join(', ')}.`);
   }
   return workspace;
