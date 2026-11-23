@@ -101,7 +101,7 @@ describe('shared workbench', () => {
   it('refuses to start when memory is short and releases nothing leaked', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'la-wb-oom-'));
     const { docker, startedSpecs } = fakeDocker();
-    const { budget } = fakeBudget({ availableGiB: 4, budgetGiB: 32 }); // 4 GiB available - 2 GiB reserve = 2 GiB < 6 GiB
+    const { budget } = fakeBudget({ availableGiB: 2.5, budgetGiB: 32 }); // 2.5 GiB available - 2 GiB reserve = 0.5 GiB < 1 GiB lease
     const wb = new Workbench(docker, tmp, () => budget);
     await expect(wb.run('echo hi', tmp)).rejects.toThrow(/not enough free memory/i);
     expect(startedSpecs).toHaveLength(0);

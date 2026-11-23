@@ -6,6 +6,8 @@ import { GiB, type Lease, type MemoryBudget } from './memory.js';
 
 export const BROWSER_NAME = 'la-browser';
 export const BROWSER_MEMORY_BYTES = 2 * GiB;
+/** Upfront RAM lease checked before starting la-browser; Docker still enforces BROWSER_MEMORY_BYTES (2 GB) as a hard ceiling. */
+export const browserLeaseBytes = () => Math.max(0.25, Number(process.env.LA_BROWSER_LEASE_GIB || 1)) * GiB;
 const IMAGE = () => process.env.LA_BROWSER_IMAGE || 'la-browser:latest';
 const IDLE_MS = () => Number(process.env.LA_BROWSER_IDLE_MS || 15 * 60_000);
 const ADMIT_WAIT_MS = () => Number(process.env.LA_BROWSER_ADMIT_WAIT_MS || 5_000);
@@ -223,12 +225,13 @@ export class ManagedBrowser {
     this.starting = (async () => {
       const memory = this.memory();
       if (!this.lease && memory) {
+        const leaseBytes = browserLeaseBytes();
         const usage = await memory.usage();
         const reserve = 2 * GiB;
-        if (usage.usedBytes + BROWSER_MEMORY_BYTES > usage.budgetBytes || BROWSER_MEMORY_BYTES > Math.max(0, usage.systemAvailable - reserve)) {
-          throw new Error('Browser refused: not enough free memory for its 2 GB lease.');
+        if (usage.usedBytes + leaseBytes > usage.budgetBytes || leaseBytes > Math.max(0, usage.systemAvailable - reserve)) {
+          throw new Error(`Browser refused: not enough free memory for its ${(leaseBytes / GiB).toFixed(1)} GB lease.`);
         }
-        this.lease = await memory.admit({ kind: 'background', label: 'browser', bytes: BROWSER_MEMORY_BYTES, maxWaitMs: ADMIT_WAIT_MS() });
+        this.lease = await memory.admit({ kind: 'background', label: 'browser', bytes: leaseBytes, maxWaitMs: ADMIT_WAIT_MS() });
       }
       if (state?.state === 'running') return;
       if (state) { await this.docker.start(state.id); return; }

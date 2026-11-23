@@ -11,6 +11,8 @@ import { GiB, type Lease, type MemoryBudget } from './memory.js';
  */
 export const WORKBENCH_NAME = 'la-workbench';
 export const WORKBENCH_MEMORY_BYTES = 6 * GiB;
+/** Upfront RAM lease checked before starting la-workbench; Docker still enforces WORKBENCH_MEMORY_BYTES (6 GB) as a hard ceiling. */
+export const workbenchLeaseBytes = () => Math.max(0.25, Number(process.env.LA_WORKBENCH_LEASE_GIB || 1)) * GiB;
 export const WORKBENCH_CACHE_VOLUMES = [
   'la-workbench-npm:/cache/npm',
   'la-workbench-pip:/cache/pip',
@@ -115,9 +117,10 @@ export class Workbench {
     this.starting = (async () => {
       const memory = this.memory();
       if (!this.lease && memory) {
-        const req = { kind: 'background' as const, label: 'workbench', bytes: WORKBENCH_MEMORY_BYTES, maxWaitMs: ADMIT_WAIT_MS() };
+        const leaseBytes = workbenchLeaseBytes();
+        const req = { kind: 'background' as const, label: 'workbench', bytes: leaseBytes, maxWaitMs: ADMIT_WAIT_MS() };
         if (!(await memory.fitsNow(req))) {
-          throw new Error('Workbench refused: not enough free memory for its 6 GB lease.');
+          throw new Error(`Workbench refused: not enough free memory for its ${(leaseBytes / GiB).toFixed(1)} GB lease.`);
         }
         this.lease = await memory.admit(req);
       }
