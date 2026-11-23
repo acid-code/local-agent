@@ -1235,7 +1235,8 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       try {
         const result = await engine.ocrReader(mention.id, mention.ocr, me(req));
         const how = `${result.engine === 'vision' ? `vision model ${result.model}` : `Tesseract, confidence ${Math.round(result.confidence ?? 0)}`}; direction ${result.direction}`;
-        context += `${context ? '\n\n' : ''}### Text read from ${file.name} (${how})\n${result.text || '(no text found)'}${result.notes.length ? `\n(${result.notes.join(' ')})` : ''}`;
+        const ocrBody = result.text || '(no text found — OCR-only; call understand_image with file_id ' + mention.id + ' to inspect the visual contents of this image)';
+        context += `${context ? '\n\n' : ''}### Text read from ${file.name} (${how})\n${ocrBody}${result.notes.length ? `\n(${result.notes.join(' ')})` : ''}`;
       } catch (error) {
         context += `${context ? '\n\n' : ''}### Text read from ${file.name}\n(OCR failed: ${error instanceof Error ? error.message : 'error'})`;
       }

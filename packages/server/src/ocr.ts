@@ -488,7 +488,10 @@ export function ocrTool(read: (fileId: string, mode: OcrMode, ownerId: string) =
     async execute(args, ctx) {
       const result = await read(String(args.file_id || '').replace(/^file:/, ''), (['printed', 'handwriting'].includes(String(args.mode)) ? args.mode : 'auto') as OcrMode, ctx.agent.ownerId || 'owner');
       const head = `Engine: ${result.engine}${result.model ? ` (${result.model})` : ''}${result.confidence != null ? `, confidence ${Math.round(result.confidence)}` : ''}; direction ${result.direction}.${result.notes.length ? ` ${result.notes.join(' ')}` : ''}`;
-      return `${head}\n\n${result.text || '(no text found)'}`;
+      const body = result.text
+        ? result.text
+        : '(no text found)\n\nNote: read_image_text is OCR-only. Call understand_image to inspect the visual contents of this image.';
+      return `${head}\n\n${body}`;
     },
   };
 }
