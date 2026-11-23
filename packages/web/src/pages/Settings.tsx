@@ -2,7 +2,7 @@ import { LanguageSettings } from '../components/LanguagePicker';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { api, post } from '../lib/api';
-import { toast } from '../lib/toast';
+import { errorText, toast } from '../lib/toast';
 import { Appearance } from '../components/Appearance';
 import { AccountCard, People, QuotaCard } from '../components/People';
 import { ImageRole } from '../components/ImageRole';
@@ -435,21 +435,7 @@ function OwnerSettings() {
           <button className="btn" onClick={async () => { const result = await track(post<{ backup: { id: string }; shipped: { detail: string } }>('/api/backups')); toast(tr('Saved {0}. {1}', [result.backup.id, result.shipped.detail]), 'ok'); }}>{tr('Take a snapshot')}</button>
           <p className="faint">{tr('Schedule and target live in the setup site (Defaults → Backup cron, Backup target).')}</p>
         </div>
-        <div className="card" id="fresh-start">
-          <h3>{tr('Start fresh')}</h3>
-          <p className="muted">{tr('Delete every chat, run and its history after a backup. Personas, skills, memory, the knowledge base, settings, secrets and models stay.')}</p>
-          <button className="btn danger" type="button" onClick={async () => {
-            const preview = await track(post<{ counts: { label: string; rows: number }[]; total: number; filesUnlinked: number }>('/api/admin/reset', {}));
-            const lines = preview.counts.filter((row) => row.rows > 0).map((row) => `${row.rows} ${row.label}`).join('\n');
-            if (!preview.total) { toast(tr('There are no chats to delete.'), 'ok'); return; }
-            const typed = window.prompt(tr('This deletes:\n{0}\n\nA backup is taken first. Type {1} to confirm.', [lines, 'DELETE ALL CHATS']));
-            if (typed === null) return;
-            if (typed.trim() !== 'DELETE ALL CHATS') { toast(tr('Not confirmed. Nothing was deleted.'), 'error'); return; }
-            const done = await track(post<{ total: number; backup?: { id: string } }>('/api/admin/reset', { confirm: true, phrase: typed.trim() }));
-            toast(tr('Deleted {0} rows. Backup {1}.', [done.total, done.backup?.id ?? '']), 'ok');
-            window.setTimeout(() => window.location.assign('/'), 800);
-          }}>{tr('Start fresh…')}</button>
-        </div>
+        <FreshStartCard track={track} />
         <AccountCard />
       </Block>}
       {show('people') && <Block id="people"><People /></Block>}
@@ -608,5 +594,81 @@ function OwnerSettings() {
       </div>}
       </>; }}
     </SettingsPage>
+  );
+}
+
+function FreshStartCard({ track }: { track: <T>(p: Promise<T>) => Promise<T> }) {
+  const [preview, setPreview] = useState<{ counts: { label: string; rows: number }[]; total: number; filesUnlinked: number } | null>(null);
+  const [phrase, setPhrase] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const openPreview = async () => {
+    setBusy(true);
+    try {
+      const data = await track(post<{ counts: { label: string; rows: number }[]; total: number; filesUnlinked: number }>('/api/admin/reset', {}));
+      if (!data.total) { toast(tr('There are no chats to delete.'), 'ok'); return; }
+      setPreview(data);
+      setPhrase('');
+    } catch (error) {
+      toast(errorText(error), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirmReset = async () => {
+    if (phrase.trim() !== 'DELETE ALL CHATS') { toast(tr('Not confirmed. Nothing was deleted.'), 'error'); return; }
+    setBusy(true);
+    try {
+      const done = await track(post<{ total: number; backup?: { id: string } }>('/api/admin/reset', { confirm: true, phrase: phrase.trim() }));
+      toast(tr('Deleted {0} rows. Backup {1}.', [done.total, done.backup?.id ?? '']), 'ok');
+      setPreview(null);
+      window.setTimeout(() => window.location.assign('/'), 800);
+    } catch (error) {
+      toast(errorText(error), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card" id="fresh-start">
+      <h3>{tr('Start fresh')}</h3>
+      <p className="muted">{tr('Delete every chat, run and its history after a backup. Personas, skills, memory, the knowledge base, settings, secrets and models stay.')}</p>
+      {!preview ? (
+        <button className="btn danger" type="button" disabled={busy} onClick={() => void openPreview()}>
+          {tr('Start fresh…')}
+        </button>
+      ) : (
+        <div className="stack" style={{ gap: 10, marginTop: 10 }}>
+          <p className="faint" style={{ whiteSpace: 'pre-line', margin: 0 }}>
+            {tr('This deletes:\n{0}\n\nA backup is taken first. Type {1} to confirm.', [
+              preview.counts.filter((row) => row.rows > 0).map((row) => `${row.rows} ${row.label}`).join('\n'),
+              'DELETE ALL CHATS',
+            ])}
+          </p>
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+            <input
+              value={phrase}
+              onChange={(e) => setPhrase(e.target.value)}
+              placeholder="DELETE ALL CHATS"
+              aria-label="DELETE ALL CHATS"
+              autoFocus
+            />
+            <button
+              className="btn danger"
+              type="button"
+              disabled={busy || phrase.trim() !== 'DELETE ALL CHATS'}
+              onClick={() => void confirmReset()}
+            >
+              {tr('Start fresh')}
+            </button>
+            <button className="btn ghost" type="button" disabled={busy} onClick={() => { setPreview(null); setPhrase(''); }}>
+              {tr('Cancel')}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }

@@ -829,7 +829,7 @@ input[type="range"], input[type="checkbox"], input[type="radio"], progress { acc
 .group-block { max-width: 980px; margin-bottom: 8px; }
 .group-block .group-title { margin-bottom: 2px; }
 .group-blurb { margin: 0 0 8px; font-size: calc(13px * var(--fs)); }
-.group-block > .card { padding: 4px 16px; }
+.group-block > .card { padding: 4px 16px; margin-bottom: 14px; }
 .menu-heading { font-size: calc(11px * var(--fs)); letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); padding: 8px 10px 4px; }
 .menu-check { color: var(--brass) !important; margin-inline-start: auto; }
 .menu-item[aria-checked=true] { color: var(--text); font-weight: 530; }
