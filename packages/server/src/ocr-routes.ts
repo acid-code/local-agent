@@ -12,7 +12,7 @@ import { cleanupHebrew } from './hebrew-cleanup.js';
 import { getLanguage } from './language.js';
 import { ollamaRoot } from './ollama.js';
 import { isUncensoredProvider, OLLAMA_SIDE_MAX_GIB } from './coexist.js';
-import { buildService, IMAGE_EXT, liveRunners, recognize, serviceStatus, startService, understandImage, type OcrMode, type OcrResult, type ServiceId } from './ocr.js';
+import { buildService, IMAGE_EXT, liveRunners, recognize, serviceStatus, startService, UNCENSORED_VISION_MODEL, understandImage, type OcrMode, type OcrResult, type ServiceId } from './ocr.js';
 import { preChangeBackup } from './ops.js';
 
 /**
@@ -35,6 +35,8 @@ export function registerOcr(app: FastifyInstance, deps: { store: Store; engine: 
       preferLightweight: engine.llama.isActive(),
       inklingVisionUrl: uncensoredHasVision ? (uncensoredProvider?.baseUrl || null) : null,
       inklingVisionModel: uncensoredModel?.apiName || 'inkling-2-mini-uncensored',
+      uncensoredUrl: uncensoredProvider?.baseUrl || null,
+      uncensoredVisionModel: process.env.LA_UNCENSORED_VISION_MODEL || UNCENSORED_VISION_MODEL,
     });
   }
 
