@@ -163,12 +163,17 @@ export async function llamaContext(fetchImpl: typeof fetch, base: string): Promi
 
 function rememberOpenAI(store: Store, id: string, base: string, json: { data?: { id?: string }[] }, displayName?: string, nCtx = 0) {
   const provider = store.upsertProvider({ id: `prov_${id}`, kind: 'openai_compat', name: displayName || id, baseUrl: base, enabled: true });
-  const names = parseOpenAIModels(json).map((name) => id === 'uncensored'
-    ? (name.includes('Inkling-2-Mini-Uncensored') ? 'inkling-2-mini-uncensored' : name)
-    : name);
+  const names = parseOpenAIModels(json).map((name) => {
+    if (id !== 'uncensored') return name;
+    if (/inkling[-_\s]?2[-_\s]?mini/i.test(name) && name.includes('/')) return 'inkling-2-mini-uncensored';
+    if (/flint[-_\s]?40b/i.test(name) && name.includes('/')) return 'flint-40b-abliterated';
+    return name;
+  });
   for (const name of names) {
     const profile = resolveProfile(name);
-    const publicName = id === 'uncensored' ? 'Inkling 2 Mini Uncensored' : name;
+    const publicName = id === 'uncensored'
+      ? (profile.id !== 'default' ? profile.displayName : name)
+      : name;
     store.upsertModel({
       id: `${id}_${name.replace(/[^a-z0-9]+/gi, '_')}`, providerId: provider.id, name: publicName, apiName: name, profileId: profile.id,
       // llama-server's own -c is the truth. An unknown model (Inkling) got the 8K default profile, so a 32K server

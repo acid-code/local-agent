@@ -28,11 +28,12 @@ export function registerOcr(app: FastifyInstance, deps: { store: Store; engine: 
     const cloudAllowed = !account || account.role === 'owner' || account.limits.cloud !== false;
     const uncensoredProvider = store.listProviders().find((p) => p.enabled && isUncensoredProvider(p));
     const uncensoredModel = uncensoredProvider ? store.listModels().find((m) => m.providerId === uncensoredProvider.id && m.enabled && !m.embedding) : undefined;
+    const uncensoredHasVision = Boolean(uncensoredModel && Array.isArray(uncensoredModel.modalities) && uncensoredModel.modalities.includes('image'));
     return liveRunners({
       fetchImpl, memory: engine.memory, ollamaRoot: ollamaRoot(), cloudAllowed,
       geminiKey: process.env.GEMINI_API_KEY, visionModel: process.env.OCR_VISION_MODEL,
       preferLightweight: engine.llama.isActive(),
-      inklingVisionUrl: uncensoredProvider?.baseUrl || null,
+      inklingVisionUrl: uncensoredHasVision ? (uncensoredProvider?.baseUrl || null) : null,
       inklingVisionModel: uncensoredModel?.apiName || 'inkling-2-mini-uncensored',
     });
   }
