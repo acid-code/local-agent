@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { assessCommand, isBlockedUrl, resolveInside } from '@local-agent/shared';
+import { assessCommand, isBlockedUrl, resolveInside, type WorkPhase } from '@local-agent/shared';
 import { formatCitations, searchKnowledge } from './kb.js';
 import { loadSkill } from './skills.js';
 import { lineDiff } from './coding.js';
@@ -38,6 +38,7 @@ export interface ToolContext {
   roots?: { label: string; path: string; write?: boolean }[];
   gitIdentity?: { name?: string; email?: string; sshKey?: string; token?: string | null };
   toolCallId?: string;
+  setFocus?: (focus: string, phase?: WorkPhase) => void;
 }
 
 export interface Tool {
@@ -177,27 +178,93 @@ export async function fetchPublicText(
   return text;
 }
 
+export const READ_FILE_MAX_CHARS = 20_000;
+const OUTLINE_CODE_EXT = /\.(?:[cm]?[jt]sx?|py|kt|kts|java|go|rs|c|cc|cpp|h|hpp)$/i;
+const OUTLINE_MD_EXT = /\.(?:md|mdx|markdown)$/i;
+
+/** Compact section/symbol outline with 1-based line numbers so large files can be navigated without reading everything. */
+export function extractFileOutline(raw: string, filePath: string, maxItems = 40): string {
+  const lines = raw.split('\n');
+  const out: string[] = [];
+  const isMd = OUTLINE_MD_EXT.test(filePath);
+  const isCode = OUTLINE_CODE_EXT.test(filePath);
+  if (!isMd && !isCode) return '';
+  for (let i = 0; i < lines.length && out.length < maxItems; i += 1) {
+    const rawLine = lines[i]!;
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('*')) continue;
+    if (isMd) {
+      if (/^#{1,3}\s+\S/.test(trimmed)) out.push(`L${i + 1}: ${trimmed.slice(0, 90)}`);
+      continue;
+    }
+    const isSymbol = /^(?:export\s+(?:default\s+)?)?(?:async\s+)?(?:function|class|interface|type|enum)\s+[A-Za-z_$][\w$]*/.test(trimmed)
+      || /^export\s+const\s+[A-Za-z_$][\w$]*\s*=/.test(trimmed)
+      || /^(?:public|private|internal|protected|open|abstract|sealed|data|suspend|override|\s)*(?:fun|class|data\s+class|sealed\s+class|object|interface|enum\s+class)\s+[A-Za-z_]\w*/.test(rawLine)
+      || /^(?:async\s+)?def\s+[A-Za-z_]\w*/.test(trimmed)
+      || /^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:fn|struct|enum|trait|impl)\s+[A-Za-z_]\w*/.test(trimmed)
+      || /^func\s+(?:\([^)]+\)\s+)?[A-Za-z_]\w*/.test(trimmed);
+    if (isSymbol) out.push(`L${i + 1}: ${trimmed.slice(0, 90)}`);
+  }
+  return out.join('\n');
+}
+
+function boundedLineSlice(lines: string[], startIndex: number, maxLinesEndIndex: number, maxChars = READ_FILE_MAX_CHARS) {
+  const out: string[] = [];
+  let chars = 0;
+  let lastIndex = startIndex - 1;
+  for (let i = startIndex; i <= maxLinesEndIndex; i += 1) {
+    const entry = `${i + 1}: ${lines[i] ?? ''}`;
+    const addLen = entry.length + (out.length > 0 ? 1 : 0);
+    if (out.length > 0 && chars + addLen > maxChars) break;
+    if (out.length === 0 && entry.length > maxChars) {
+      out.push(`${entry.slice(0, maxChars)}…`);
+      lastIndex = i;
+      break;
+    }
+    out.push(entry);
+    chars += addLen;
+    lastIndex = i;
+  }
+  return { body: out.join('\n'), endLine: lastIndex + 1, charCapped: lastIndex < maxLinesEndIndex };
+}
+
+async function writeWorkspaceTarget(args: Record<string, unknown>, ctx: ToolContext, verb: 'Created' | 'Wrote'): Promise<string> {
+  const target = String(args.path || '');
+  const hit = locatePath({ workspace: ctx.workspace, roots: ctx.roots, target });
+  if (!hit?.write) throw new Error('That file is not in a writable project.');
+  let before: string | null = null;
+  try { before = await fs.readFile(hit.full, 'utf8'); } catch { before = null; }
+  if (before != null && args.overwrite !== true) {
+    const existingLines = before.split('\n').length;
+    if (existingLines > 100) {
+      throw new Error(`File ${target} already has ${existingLines} lines. Use apply_patch for targeted edits instead of replacing the whole file (or pass overwrite: true if a full rewrite is intended).`);
+    }
+  }
+  const content = String(args.content ?? '');
+  if (ctx.sessionId) {
+    const rel = path.relative(ctx.workspace, hit.full);
+    ctx.store.db.prepare('INSERT INTO edit_batches (id, session_id, run_id, label, files, diff, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+      nid('edit'), ctx.sessionId, ctx.runId ?? null, target, JSON.stringify([{ path: hit.full, before, after: content }]), lineDiff(rel, before ?? '', content), now(),
+    );
+  }
+  await fs.mkdir(path.dirname(hit.full), { recursive: true });
+  await fs.writeFile(hit.full, content, 'utf8');
+  return `${verb} ${hit.label ? `${hit.label}/` : ''}${path.relative(hit.root, hit.full)} (${content.length} bytes).`;
+}
+
 export const BUILTIN_TOOLS: Tool[] = [
   {
     name: 'create_file',
     description: 'Create or replace a text file in the agent workspace. Alias for write_file, for clients that use create-file names.',
-    parameters: obj({ path: { type: 'string' }, content: { type: 'string' } }, ['path', 'content']),
+    parameters: obj({
+      path: { type: 'string' },
+      content: { type: 'string' },
+      overwrite: { type: 'boolean', description: 'Set true only when intentionally replacing an existing file of >100 lines.' },
+    }, ['path', 'content']),
     mutates: () => true,
     approval: (args) => `Write ${args.path}`,
     async execute(args, ctx) {
-      const hit = locatePath({ workspace: ctx.workspace, roots: ctx.roots, target: String(args.path || '') });
-      if (!hit?.write) throw new Error('That file is not in a writable project.');
-      if (ctx.sessionId) {
-        let before: string | null = null;
-        try { before = await fs.readFile(hit.full, 'utf8'); } catch { before = null; }
-        const rel = path.relative(ctx.workspace, hit.full);
-        ctx.store.db.prepare('INSERT INTO edit_batches (id, session_id, run_id, label, files, diff, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
-          nid('edit'), ctx.sessionId, ctx.runId ?? null, String(args.path), JSON.stringify([{ path: hit.full, before, after: String(args.content ?? '') }]), lineDiff(rel, before ?? '', String(args.content ?? '')), now(),
-        );
-      }
-      await fs.mkdir(path.dirname(hit.full), { recursive: true });
-      await fs.writeFile(hit.full, String(args.content ?? ''), 'utf8');
-      return `Created ${hit.label ? `${hit.label}/` : ''}${path.relative(hit.root, hit.full)} (${String(args.content ?? '').length} bytes).`;
+      return writeWorkspaceTarget(args, ctx, 'Created');
     },
   },
   {
@@ -219,11 +286,12 @@ export const BUILTIN_TOOLS: Tool[] = [
   },
   {
     name: 'read_file',
-    description: 'Read a text file in the workspace or a workshop project. Prefix the path with the project label, such as server/src/index.ts. Pass startLine and endLine (1-based) to read slices of large files.',
+    description: 'Read a text file in the workspace or a workshop project. Prefix the path with the project label, such as server/src/index.ts. Pass startLine and endLine (1-based) to read slices of large files, or outlineOnly=true to view headings/symbols first.',
     parameters: obj({
       path: { type: 'string' },
       startLine: { type: 'number', description: 'Optional 1-based starting line.' },
       endLine: { type: 'number', description: 'Optional 1-based ending line (inclusive).' },
+      outlineOnly: { type: 'boolean', description: 'When true, return only line count and section/symbol outline.' },
     }, ['path']),
     mutates: () => false,
     approval: () => null,
@@ -239,17 +307,22 @@ export const BUILTIN_TOOLS: Tool[] = [
       if (stat.size > 1_000_000) throw new Error('File is larger than 1 MB.');
       const raw = await fs.readFile(hit.full, 'utf8');
       const lines = raw.split('\n');
+      const outline = extractFileOutline(raw, hit.full);
+      if (args.outlineOnly) {
+        return `File ${args.path} (${lines.length} lines, ${stat.size} bytes):\n${outline ? `Outline:\n${outline}` : '(no outline headings or declarations detected)'}`;
+      }
       const hasRange = args.startLine != null || args.endLine != null;
       if (hasRange) {
         const start = Math.max(1, Math.floor(Number(args.startLine || 1)));
         const end = Math.min(lines.length, Math.max(start, Math.floor(Number(args.endLine || start + 399))));
-        const body = lines.slice(start - 1, end).map((line, i) => `${start + i}: ${line}`).join('\n');
-        return `Lines ${start}-${end} of ${lines.length}:\n${body}`;
+        const slice = boundedLineSlice(lines, start - 1, end - 1);
+        const capNote = slice.charCapped ? ` (char cap ${READ_FILE_MAX_CHARS.toLocaleString('en-US')} reached — pass startLine=${slice.endLine + 1} to read more)` : '';
+        return `Lines ${start}-${slice.endLine} of ${lines.length}${capNote}:\n${slice.body}${slice.charCapped && outline ? `\n\nOutline:\n${outline}` : ''}`;
       }
-      if (lines.length > 400 || stat.size > 200_000) {
-        const cap = Math.min(400, lines.length);
-        const body = lines.slice(0, cap).map((line, i) => `${i + 1}: ${line}`).join('\n');
-        return `Lines 1-${cap} of ${lines.length} (truncated — pass startLine/endLine to read more):\n${body}`;
+      if (lines.length > 400 || raw.length > READ_FILE_MAX_CHARS || stat.size > 200_000) {
+        const maxIdx = Math.min(400, lines.length) - 1;
+        const slice = boundedLineSlice(lines, 0, Math.max(0, maxIdx));
+        return `Lines 1-${slice.endLine} of ${lines.length} (truncated — pass startLine=${slice.endLine + 1} to read more):\n${slice.body}${outline ? `\n\nOutline:\n${outline}` : ''}`;
       }
       return raw;
     },
@@ -257,30 +330,25 @@ export const BUILTIN_TOOLS: Tool[] = [
   {
     name: 'write_file',
     description: 'Write a text file inside the agent workspace. This changes disk and needs approval.',
-    parameters: obj({ path: { type: 'string' }, content: { type: 'string' } }, ['path', 'content']),
+    parameters: obj({
+      path: { type: 'string' },
+      content: { type: 'string' },
+      overwrite: { type: 'boolean', description: 'Set true only when intentionally replacing an existing file of >100 lines.' },
+    }, ['path', 'content']),
     mutates: () => true,
     approval: (args) => `Write ${args.path}`,
     async execute(args, ctx) {
-      const hit = locatePath({ workspace: ctx.workspace, roots: ctx.roots, target: String(args.path || '') });
-      if (!hit?.write) throw new Error('That file is not in a writable project.');
-      // Pre-edit checkpoint, so the reply's changes can be rolled back in one click.
-      if (ctx.sessionId) {
-        let before: string | null = null;
-        try { before = await fs.readFile(hit.full, 'utf8'); } catch { before = null; }
-        const rel = path.relative(ctx.workspace, hit.full);
-        ctx.store.db.prepare('INSERT INTO edit_batches (id, session_id, run_id, label, files, diff, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
-          nid('edit'), ctx.sessionId, ctx.runId ?? null, String(args.path), JSON.stringify([{ path: hit.full, before, after: String(args.content ?? '') }]), lineDiff(rel, before ?? '', String(args.content ?? '')), now(),
-        );
-      }
-      await fs.mkdir(path.dirname(hit.full), { recursive: true });
-      await fs.writeFile(hit.full, String(args.content ?? ''), 'utf8');
-      return `Wrote ${hit.label ? `${hit.label}/` : ''}${path.relative(hit.root, hit.full)} (${String(args.content ?? '').length} bytes).`;
+      return writeWorkspaceTarget(args, ctx, 'Wrote');
     },
   },
   {
     name: 'shell',
     description: 'Run a shell command. Runs in the shared workbench computer (Debian, node 22, python3, git; network on; installs and caches persist; Python projects get a .venv automatically) when Docker is available, otherwise a workspace-jailed host process. Destructive commands need approval.',
-    parameters: obj({ command: { type: 'string' }, cwd: { type: 'string', description: 'Workshop project label, when this chat has more than one.' } }, ['command']),
+    parameters: obj({
+      command: { type: 'string' },
+      cwd: { type: 'string', description: 'Workshop project label, when this chat has more than one.' },
+      why: { type: 'string', description: 'Optional 3-8 word intent shown in the step log.' },
+    }, ['command']),
     mutates: (args) => assessCommand(String(args.command || '')) !== 'ok',
     approval: (args) => {
       const command = String(args.command || '');
@@ -340,7 +408,10 @@ export const BUILTIN_TOOLS: Tool[] = [
   {
     name: 'web_search',
     description: 'Search the web through SearXNG.',
-    parameters: obj({ query: { type: 'string' } }, ['query']),
+    parameters: obj({
+      query: { type: 'string' },
+      why: { type: 'string', description: 'Optional 3-8 word intent shown in the step log.' },
+    }, ['query']),
     mutates: () => false,
     approval: () => null,
     async execute(args, ctx) {
@@ -510,6 +581,26 @@ export function loadSkillTool(): Tool {
     approval: () => null,
     async execute(args, ctx) {
       return loadSkill(ctx.store, ctx.libraryDir || '', ctx.agent.id, String(args.slug || ''));
+    },
+  };
+}
+
+export function setFocusTool(): Tool {
+  return {
+    name: 'set_focus',
+    description: 'Update the live 3-8 word focus status and current workflow phase visible to the user while you work.',
+    parameters: obj({
+      focus: { type: 'string', description: 'Concise present-participle phrase, e.g. "Inspecting auth token flow".' },
+      phase: { type: 'string', enum: ['planning', 'investigating', 'editing', 'verifying', 'fixing', 'summarizing'] },
+    }, ['focus']),
+    mutates: () => false,
+    approval: () => null,
+    async execute(args, ctx) {
+      const focus = String(args.focus || '').trim();
+      if (!focus) throw new Error('Pass a non-empty focus phrase.');
+      const phase = args.phase ? String(args.phase) as WorkPhase : undefined;
+      ctx.setFocus?.(focus, phase);
+      return `Focus set: ${focus}${phase ? ` (${phase})` : ''}.`;
     },
   };
 }

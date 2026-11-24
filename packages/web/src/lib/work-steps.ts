@@ -23,6 +23,7 @@ export interface WorkStep {
   icon: StepIcon;
   verb: string;
   target: string;
+  why?: string;
   files: string[];
   durationMs: number | null;
   args: Record<string, unknown> | null;
@@ -75,6 +76,20 @@ export function describeStep(name: string, args: Record<string, unknown> | null)
       return { icon: 'web', verb: 'Fetched', target: clip(str(a.url).replace(/^https?:\/\//, '')), files: [] };
     case 'remember': case 'memory_file':
       return { icon: 'memory', verb: 'Saved to memory', target: clip(str(a.content) || str(a.text), 60), files: [] };
+    case 'grep':
+      return { icon: 'search', verb: 'Searched files for', target: clip(str(a.pattern)), files: [] };
+    case 'glob':
+      return { icon: 'search', verb: 'Matched files', target: clip(str(a.pattern)), files: [] };
+    case 'set_focus':
+      return { icon: 'think', verb: 'Focus', target: clip(str(a.focus)), files: [] };
+    case 'enter_plan_mode':
+      return { icon: 'think', verb: 'Entered plan mode', target: clip(str(a.goal) || str(a.reason)), files: [] };
+    case 'exit_plan_mode':
+      return { icon: 'think', verb: 'Exited plan mode', target: clip(str(a.summary)), files: [] };
+    case 'spawn_agent':
+      return { icon: 'agent', verb: `Spawned ${str(a.role) || 'helper'}`, target: clip(str(a.why) || str(a.goal) || str(a.task)), files: [] };
+    case 'helpers':
+      return { icon: 'agent', verb: 'Helpers', target: str(a.action) || 'list', files: [] };
     case 'consult_agent':
       return { icon: 'agent', verb: 'Asked', target: str(a.agent) || str(a.name) || 'a helper', files: [] };
     case 'docker_ps': case 'docker_inspect': case 'docker_run': case 'docker_rm':
@@ -126,8 +141,9 @@ function buildGroup(msgs: WorkMessage[]): WorkGroup {
         const start = time(m.createdAt);
         const end = time(result?.createdAt);
         const output = result?.content ?? '';
+        const why = clip(str(args?.why) || str(args?.summary), 100) || undefined;
         rows.push({
-          type: 'step', id: `${m.id}:${call.id ?? i}`, ...d, args,
+          type: 'step', id: `${m.id}:${call.id ?? i}`, ...d, why, args,
           durationMs: Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : null,
           output, pending: !result, failed: /^(error|denied|blocked|failed)\b/i.test(output.trim()),
         });
@@ -181,7 +197,7 @@ export function sameRow(a: WorkRow, b: WorkRow): boolean {
   if (a.type !== b.type || a.id !== b.id) return false;
   if (a.type !== 'step' || b.type !== 'step') return (a as WorkThought).text === (b as WorkThought).text;
   return a.pending === b.pending && a.failed === b.failed && a.output === b.output && a.durationMs === b.durationMs
-    && a.verb === b.verb && a.target === b.target && a.icon === b.icon && a.files.join('\n') === b.files.join('\n')
+    && a.verb === b.verb && a.target === b.target && (a.why ?? '') === (b.why ?? '') && a.icon === b.icon && a.files.join('\n') === b.files.join('\n')
     && JSON.stringify(a.args) === JSON.stringify(b.args);
 }
 

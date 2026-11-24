@@ -228,6 +228,23 @@ class LocalAgentClient(context: Context) {
         })
     }
 
+    suspend fun patchPlanItem(itemId: String, status: String) {
+        requestJson("PATCH", "/api/plan-items/$itemId", JSONObject().apply {
+            put("status", status)
+        })
+    }
+
+    suspend fun undoPlan(sessionId: String): SessionPlan? {
+        val json = requestJson("POST", "/api/sessions/$sessionId/plan/undo", JSONObject())
+        return parsePlan(json.optJSONObject("plan"))
+    }
+
+    suspend fun clearPlan(sessionId: String) {
+        requestJson("PUT", "/api/sessions/$sessionId/plan", JSONObject().apply {
+            put("items", JSONArray())
+        })
+    }
+
     suspend fun getSession(sessionId: String): SessionDetail {
         return try {
             val json = requestJson("GET", "/api/sessions/$sessionId?limit=150")
@@ -510,16 +527,42 @@ class LocalAgentClient(context: Context) {
                 status = it.optString("status", ""),
                 detail = it.optString("detail", ""),
                 waitInfo = it.optJSONObject("waitInfo"),
+                focus = it.optString("focus", "").takeIf { s -> s != "null" }.orEmpty(),
+                phase = it.optString("phase", "").takeIf { s -> s != "null" }.orEmpty(),
+                startedAt = it.optString("startedAt", "").takeIf { s -> s.isNotBlank() && s != "null" },
             )
         }
         return SessionDetail(
             session = session,
             messages = messages,
             edits = edits,
+            plan = parsePlan(json.optJSONObject("plan")),
             activeRunId = activeRun?.optString("id")?.takeIf { it.isNotBlank() },
             activeRunStatus = activeRun?.optString("status")?.takeIf { it.isNotBlank() },
             live = live,
             breakdown = parseBreakdown(json.optJSONObject("breakdown")),
+        )
+    }
+
+    private fun parsePlan(obj: JSONObject?): SessionPlan? {
+        obj ?: return null
+        val arr = obj.optJSONArray("items") ?: JSONArray()
+        val items = List(arr.length()) { i ->
+            val item = arr.getJSONObject(i)
+            PlanItem(
+                id = item.optString("id", ""),
+                text = item.optString("text", ""),
+                status = item.optString("status", "pending"),
+                note = item.optString("note", "").takeIf { it.isNotBlank() && it != "null" },
+            )
+        }
+        if (items.isEmpty()) return null
+        return SessionPlan(
+            id = obj.optString("id", ""),
+            items = items,
+            canUndo = obj.optBoolean("canUndo", false),
+            createdAt = obj.optString("createdAt", "").takeIf { it.isNotBlank() && it != "null" },
+            updatedAt = obj.optString("updatedAt", "").takeIf { it.isNotBlank() && it != "null" },
         )
     }
 }

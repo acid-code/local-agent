@@ -1325,6 +1325,9 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       thinking: live?.thinking ?? '',
       statusDetail: live?.detail ?? '',
       waitInfo: live?.waitInfo ?? null,
+      focus: live?.focus ?? run.cursor.focus ?? '',
+      phase: live?.phase ?? run.cursor.workPhase ?? '',
+      startedAt: live?.startedAt ?? run.startedAt,
     });
     const off = bus.subscribeRun(id, send);
     const beat = setInterval(() => reply.raw.write(': ping\n\n'), 15000);

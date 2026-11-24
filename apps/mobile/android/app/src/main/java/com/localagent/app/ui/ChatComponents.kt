@@ -497,3 +497,141 @@ fun ContextBreakdownSheet(breakdown: ContextBreakdown, onDismiss: () -> Unit) {
         }
     }
 }
+
+private fun formatCompactDuration(startIso: String?, endIso: String?, nowMs: Long): String {
+    if (startIso.isNullOrBlank()) return ""
+    return runCatching {
+        val start = java.time.Instant.parse(startIso).toEpochMilli()
+        val end = if (endIso.isNullOrBlank()) nowMs else java.time.Instant.parse(endIso).toEpochMilli()
+        val s = ((end - start) / 1000L).coerceAtLeast(0L)
+        when {
+            s < 60L -> "${s}s"
+            s < 3600L -> "${s / 60L}m"
+            else -> "${s / 3600L}h ${(s % 3600L) / 60L}m"
+        }
+    }.getOrDefault("")
+}
+
+@Composable
+fun PlanProgressPill(
+    plan: SessionPlan,
+    active: Boolean,
+    liveFocus: String = "",
+    livePhase: String = "",
+    runStartedAt: String? = null,
+    onToggleItem: (String, Boolean) -> Unit,
+    onUndo: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var open by remember(plan.id) { mutableStateOf(false) }
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(active) {
+        while (active) {
+            kotlinx.coroutines.delay(1000)
+            nowMs = System.currentTimeMillis()
+        }
+    }
+    val doneCount = plan.items.count { it.status == "done" }
+    val total = plan.items.size
+    val elapsed = formatCompactDuration(if (active) (runStartedAt ?: plan.createdAt) else plan.createdAt, if (active) null else plan.updatedAt, nowMs)
+    val workedText = if (active) {
+        if (elapsed.isNotEmpty()) "Working · $elapsed" else "Working…"
+    } else {
+        if (elapsed.isNotEmpty()) "Worked for $elapsed" else "Completed steps"
+    }
+    val fraction = if (total > 0) (doneCount.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(10.dp))
+                .clickable { open = !open }
+                .padding(horizontal = 4.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(workedText, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Icon(
+                if (open) Icons.Default.ExpandMore else Icons.Default.ChevronRight,
+                contentDescription = if (open) "Collapse steps" else "Expand steps",
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Canvas(Modifier.size(15.dp)) {
+                val stroke = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
+                val pad = 1.5.dp.toPx()
+                val arcSize = Size(size.width - pad * 2, size.height - pad * 2)
+                drawArc(Color.Gray.copy(alpha = 0.25f), 0f, 360f, false, Offset(pad, pad), arcSize, style = stroke)
+                if (fraction > 0f) {
+                    drawArc(Color.White.copy(alpha = 0.85f), -90f, 360f * fraction, false, Offset(pad, pad), arcSize, style = stroke)
+                }
+            }
+            Text("$doneCount/$total steps", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface)
+            if (active && (livePhase.isNotBlank() || liveFocus.isNotBlank())) {
+                val focusText = listOfNotNull(livePhase.takeIf { it.isNotBlank() }?.replaceFirstChar { it.uppercase() }, liveFocus.takeIf { it.isNotBlank() }).joinToString(" · ")
+                Text(
+                    focusText,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = AccentGold,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+            }
+        }
+        AnimatedVisibility(visible = open) {
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.fillMaxWidth().padding(top = 6.dp).border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f), RoundedCornerShape(14.dp)),
+            ) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    plan.items.forEach { item ->
+                        val isDone = item.status == "done"
+                        val isDoing = item.status == "doing"
+                        val isBlocked = item.status == "blocked"
+                        Row(
+                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { onToggleItem(item.id, !isDone) }.padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.Top,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            when {
+                                isDone -> Icon(Icons.Default.CheckCircle, null, Modifier.size(18.dp).padding(top = 2.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f))
+                                isDoing -> Icon(Icons.Default.Pause, null, Modifier.size(18.dp).padding(top = 2.dp), tint = MaterialTheme.colorScheme.onSurface)
+                                isBlocked -> Icon(Icons.Default.WarningAmber, null, Modifier.size(18.dp).padding(top = 2.dp), tint = MaterialTheme.colorScheme.error)
+                                else -> Box(Modifier.padding(top = 3.dp).size(15.dp).border(1.5.dp, MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f), CircleShape))
+                            }
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    item.text,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = if (isDoing) FontWeight.SemiBold else FontWeight.Normal,
+                                    color = when {
+                                        isDone -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f)
+                                        isBlocked -> MaterialTheme.colorScheme.error
+                                        else -> MaterialTheme.colorScheme.onSurface
+                                    },
+                                )
+                                if (!item.note.isNullOrBlank()) {
+                                    Text(
+                                        item.note,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                                        maxLines = 2,
+                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    if (plan.canUndo || !active) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                            if (plan.canUndo) TextButton(onClick = onUndo) { Text("Undo") }
+                            if (!active) TextButton(onClick = onDismiss) { Text("Dismiss") }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

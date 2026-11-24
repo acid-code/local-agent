@@ -73,6 +73,20 @@ object WorkSteps {
                 Described(Icon.Web, "Fetched", clip(str(a["url"]).replace(Regex("^https?://"), "")), emptyList())
             "remember", "memory_file" ->
                 Described(Icon.Memory, "Saved to memory", clip(str(a["content"]).ifBlank { str(a["text"]) }, 60), emptyList())
+            "grep" ->
+                Described(Icon.Search, "Searched files for", clip(str(a["pattern"])), emptyList())
+            "glob" ->
+                Described(Icon.Search, "Matched files", clip(str(a["pattern"])), emptyList())
+            "set_focus" ->
+                Described(Icon.Think, "Focus", clip(str(a["focus"])), emptyList())
+            "enter_plan_mode" ->
+                Described(Icon.Think, "Entered plan mode", clip(str(a["goal"]).ifBlank { str(a["reason"]) }), emptyList())
+            "exit_plan_mode" ->
+                Described(Icon.Think, "Exited plan mode", clip(str(a["summary"])), emptyList())
+            "spawn_agent" -> {
+                val role = str(a["role"]).ifBlank { "helper" }
+                Described(Icon.Agent, "Spawned $role", clip(str(a["why"]).ifBlank { str(a["goal"]).ifBlank { str(a["task"]) } }), emptyList())
+            }
             "consult_agent" ->
                 Described(Icon.Agent, "Asked", str(a["agent"]).ifBlank { str(a["name"]).ifBlank { "a helper" } }, emptyList())
             "docker_ps", "docker_inspect", "docker_run", "docker_rm" -> {

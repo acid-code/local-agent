@@ -92,6 +92,24 @@ data class LiveStreamSnapshot(
     val status: String = "",
     val detail: String = "",
     val waitInfo: org.json.JSONObject? = null,
+    val focus: String = "",
+    val phase: String = "",
+    val startedAt: String? = null,
+)
+
+data class PlanItem(
+    val id: String,
+    val text: String,
+    val status: String = "pending",
+    val note: String? = null,
+)
+
+data class SessionPlan(
+    val id: String,
+    val items: List<PlanItem> = emptyList(),
+    val canUndo: Boolean = false,
+    val createdAt: String? = null,
+    val updatedAt: String? = null,
 )
 
 data class EditDiff(
@@ -115,6 +133,7 @@ data class SessionDetail(
     val session: ChatSession,
     val messages: List<ChatMessage>,
     val edits: List<EditDiff> = emptyList(),
+    val plan: SessionPlan? = null,
     val activeRunId: String? = null,
     val activeRunStatus: String? = null,
     val live: LiveStreamSnapshot? = null,

@@ -18,7 +18,7 @@ import { PersonaPanel, useWorkspaces, type PanelAgent } from '../components/Pers
 import { PersonaChip, greetingFor, startersFor } from '../components/ChatChips';
 import { ContextPanel } from '../components/ContextPanel';
 import { ContextRing } from '../components/ContextRing';
-import { TypingDots, WorkGroupView } from '../components/WorkSteps';
+import { PlanProgressPill, TypingDots, WorkGroupView, type PlanView } from '../components/WorkSteps';
 import { TraceList } from '../components/TraceList';
 import { groupWork, savedSkills } from '../lib/work-steps';
 import { ContextNudgeBanner, DecisionTimeline, BulkDiffCard, LocalRepoPicker, MiniAgentStrip, type MiniAgentRow } from '../components/ChatUpgrades';
@@ -38,7 +38,7 @@ interface Session { id: string; title: string; agentId: string | null; mode: 'ch
 type Agent = PanelAgent & FaceAgent;
 interface Message { id: string; role: string; content: string; createdAt?: string; agentId?: string | null; toolName?: string | null; toolCallId?: string | null; runId?: string | null; routingNote?: string | null; thinking?: string | null; toolCalls?: { id?: string; name: string; arguments?: string }[] | null }
 interface Step { id: string; kind: string; name: string; status: string; latencyMs?: number; output?: unknown; error?: string | null }
-interface Plan { id: string; items: { id: string; text: string; status: string; note?: string | null }[]; canUndo?: boolean }
+type Plan = PlanView;
 interface Edit { id: string; runId: string | null; label: string; diff: string; revertedAt: string | null; keptAt: string | null; keptFiles: string[]; revertedFiles: string[] }
 interface Offer { id: string; kind: string; masked: string }
 interface CheckItem { id: string; title: string; ok: boolean; detail: string; optional: boolean }
@@ -97,7 +97,9 @@ export function Chat() {
   const [breakdown, setBreakdown] = useState<ContextBreakdown | null>(null);
   const [miniAgents, setMiniAgents] = useState<MiniAgentRow[]>([]);
   const [nudgeDismissed, setNudgeDismissed] = useState(false);
-  const [planExpanded, setPlanExpanded] = useState(false);
+  const [liveFocus, setLiveFocus] = useState('');
+  const [livePhase, setLivePhase] = useState('');
+  const [runStartedAt, setRunStartedAt] = useState<string | null>(null);
   const [voiceLoop, setVoiceLoop] = useState(false);
   const voiceLoopRef = useRef(false);
   voiceLoopRef.current = voiceLoop;
@@ -207,7 +209,7 @@ export function Chat() {
     try {
       const [data, wsData] = await Promise.all([
         // Newest page only; a jump to an older message loads everything so it can be found.
-        api<{ session: Session; activeRun?: { id: string; status: string } | null; live?: { text: string; thinking: string; status: string; detail?: string } | null; breakdown?: ContextBreakdown | null; messages: Message[]; hasMore?: boolean; plan: Plan | null; edits: Edit[] }>(pendingJump.current ? `/api/sessions/${id}` : `/api/sessions/${id}?limit=${PAGE}`, { signal: gate.signal }),
+        api<{ session: Session; activeRun?: { id: string; status: string } | null; live?: { text: string; thinking: string; status: string; detail?: string; focus?: string; phase?: string; startedAt?: string } | null; breakdown?: ContextBreakdown | null; messages: Message[]; hasMore?: boolean; plan: Plan | null; edits: Edit[] }>(pendingJump.current ? `/api/sessions/${id}` : `/api/sessions/${id}?limit=${PAGE}`, { signal: gate.signal }),
         api<typeof chatWs>(`/api/sessions/${id}/workspaces`, { signal: gate.signal }).catch((error) => { if (isAbort(error)) throw error; return { items: [], roots: [], sets: [] }; }),
       ]);
       if (!gate.current()) return;
@@ -233,6 +235,9 @@ export function Chat() {
         setStreaming(data.live?.text || '');
         setThinking(data.live?.thinking || '');
         setLoadingNote(data.live?.detail || '');
+        setLiveFocus(data.live?.focus || '');
+        setLivePhase(data.live?.phase || '');
+        setRunStartedAt(data.live?.startedAt || null);
         setWaitInfo((data.live as { waitInfo?: unknown } | null)?.waitInfo ?? null);
       } else if (runSession.current !== id) {
         runSession.current = null;
@@ -241,9 +246,15 @@ export function Chat() {
         setStreaming('');
         setThinking('');
         setLoadingNote('');
+        setLiveFocus('');
+        setLivePhase('');
+        setRunStartedAt(null);
       } else {
         setStreaming('');
         setThinking('');
+        setLiveFocus('');
+        setLivePhase('');
+        setRunStartedAt(null);
       }
       if (data.session.agentId) void post(`/api/agents/${data.session.agentId}/read`, {}).catch(() => undefined);
     } catch (error) {
@@ -511,6 +522,9 @@ export function Chat() {
         if (typeof data.streaming === 'string' && data.streaming) setStreaming(data.streaming);
         if (typeof data.thinking === 'string' && data.thinking) setThinking(data.thinking);
         if (typeof data.statusDetail === 'string' && data.statusDetail) setLoadingNote(data.statusDetail);
+        if (typeof data.focus === 'string') setLiveFocus(data.focus);
+        if (typeof data.phase === 'string') setLivePhase(data.phase);
+        if (typeof data.startedAt === 'string' && data.startedAt) setRunStartedAt(data.startedAt);
         setWaitInfo(data.waitInfo ?? null);
         if (Array.isArray(data.messages) && data.run?.sessionId === currentRef.current) {
           setMessages((prev) => (data.messages.length >= prev.length ? keepIdentity(prev, data.messages as Message[]) : prev));
@@ -574,7 +588,7 @@ export function Chat() {
         setSteps((value) => [...value.filter((step) => step.id !== data.step.id), data.step]);
         if (data.step.kind === 'model' && data.step.name) setLastModel(String(data.step.name));
         const cur = currentRef.current;
-        if ((data.step.name === 'tasks' || data.step.name === 'plan') && data.step.status === 'completed' && cur) void api<{ plan: Plan | null }>(`/api/sessions/${cur}?limit=1`).then((fresh) => setPlan(fresh.plan)).catch(() => undefined);
+        if (['tasks', 'plan', 'enter_plan_mode', 'exit_plan_mode'].includes(data.step.name) && data.step.status === 'completed' && cur) void api<{ plan: Plan | null }>(`/api/sessions/${cur}?limit=1`).then((fresh) => setPlan(fresh.plan)).catch(() => undefined);
       }
       if (data.type === 'message') {
         if (data.message?.sessionId && data.message.sessionId !== currentRef.current) return;
@@ -616,11 +630,17 @@ export function Chat() {
         setStatus(data.status);
         setLoadingNote(data.status === 'loading' || data.status === 'waiting' ? String(data.detail || (data.status === 'waiting' ? 'Waiting' : 'Loading model')) : '');
         setWaitInfo(data.status === 'waiting' ? (data.waitInfo ?? null) : null);
+        if (typeof data.focus === 'string') setLiveFocus(data.focus);
+        if (typeof data.phase === 'string') setLivePhase(data.phase);
+        if (typeof data.startedAt === 'string' && data.startedAt) setRunStartedAt(data.startedAt);
       }
       if (data.type === 'secret' && data.request) setSecret(data.request);
       if (data.type === 'approval' || (data.type === 'status' && data.status === 'awaiting_approval')) void loadAsks(runId);
       if (data.type === 'done') {
         setLoadingNote('');
+        setLiveFocus('');
+        setLivePhase('');
+        setRunStartedAt(null);
         setStatus(data.run?.status || 'completed');
         if (data.run?.modelId) setLastModel(modelsRef.current.find((model) => model.id === data.run.modelId)?.name || String(data.run.modelId));
         if (data.run?.status === 'failed' && data.run?.error) setRunError(String(data.run.error));
@@ -1120,7 +1140,7 @@ export function Chat() {
               const live = Boolean(active) && itemIndex === items.length - 1;
               const runs = new Set(item.runIds);
               const skills = live ? [] : savedSkills(item);
-              const view = <WorkGroupView key={item.id} group={item} live={live} liveThought={live && thoughtInGroup ? thinking : undefined} diffs={edits.filter((edit) => edit.runId && runs.has(edit.runId)).map((edit) => edit.diff)} />;
+              const view = <WorkGroupView key={item.id} group={item} live={live} liveThought={live && thoughtInGroup ? thinking : undefined} liveFocus={live ? liveFocus : undefined} livePhase={live ? livePhase : undefined} diffs={edits.filter((edit) => edit.runId && runs.has(edit.runId)).map((edit) => edit.diff)} />;
               if (!skills.length) return view;
               return <div key={item.id}>{view}{skills.map((skill) => <SkillSavedNotice key={skill.slug} slug={skill.slug} version={skill.version} />)}</div>;
             }
@@ -1239,59 +1259,32 @@ export function Chat() {
               <div className="row"><button className="btn primary" onClick={retry}><RotateCcw size={15} />{' '}{t('Try again')}</button><button className="btn ghost" onClick={() => setTrace(true)}>{t('Open trace')}</button></div>
             </div>
           )}
-          {plan && plan.items.length > 0 && (() => {
-            const doneCount = plan.items.filter((item) => item.status === 'done').length;
-            const allDone = doneCount === plan.items.length;
-            const showBody = !allDone || active || planExpanded;
-            return (
-              <div className={`card task-list${allDone && !active ? ' completed' : ''}`}>
-                <div className="task-list-head">
-                  <button
-                    type="button"
-                    className="task-list-title"
-                    onClick={() => { if (allDone && !active) setPlanExpanded((v) => !v); }}
-                  >
-                    <strong>{mode === 'code' ? t('Plan') : t('Tasks')}</strong>
-                    <span className="faint small">{doneCount}/{plan.items.length}</span>
-                  </button>
-                  <div className="task-list-actions">
-                    {plan.canUndo && current && (
-                      <button type="button" className="btn ghost small" onClick={async () => {
-                        try {
-                          const res = await post<{ plan: Plan | null }>(`/api/sessions/${current}/plan/undo`, {});
-                          setPlan(res.plan);
-                          toast(t('Plan change undone.'), 'ok');
-                        } catch (error) { toast(errorText(error), 'error'); }
-                      }}><RotateCcw size={12} aria-hidden /> {t('Undo plan')}</button>
-                    )}
-                    {!active && current && (
-                      <button
-                        type="button"
-                        className="btn ghost small"
-                        title={t('Dismiss')}
-                        aria-label={t('Dismiss')}
-                        onClick={async () => {
-                          try {
-                            await api(`/api/sessions/${current}/plan`, { method: 'PUT', body: JSON.stringify({ items: [] }) });
-                            setPlan(null);
-                            setPlanExpanded(false);
-                          } catch (error) { toast(errorText(error), 'error'); }
-                        }}
-                      ><X size={13} aria-hidden /></button>
-                    )}
-                  </div>
-                </div>
-                {showBody && plan.items.map((item) => (
-                  <label key={item.id} className="row" title={item.note ?? undefined}>
-                    <input type="checkbox" checked={item.status === 'done'} onChange={async (event) => { await api(`/api/plan-items/${item.id}`, { method: 'PATCH', body: JSON.stringify({ status: event.target.checked ? 'done' : 'pending' }) }); if (current) void openSession(current); }} />
-                    <span dir="auto" className={item.status === 'blocked' ? 'bad' : item.status === 'doing' ? 'strong' : item.status === 'done' ? 'done-text' : undefined}>{item.text}</span>
-                    {item.status === 'doing' && <span className="badge">{t('working')}</span>}
-                    {item.status === 'blocked' && <span className="badge bad">{t('blocked')}</span>}
-                  </label>
-                ))}
-              </div>
-            );
-          })()}
+          {plan && plan.items.length > 0 && (
+            <PlanProgressPill
+              plan={plan}
+              active={active}
+              liveFocus={liveFocus}
+              livePhase={livePhase}
+              runStartedAt={runStartedAt}
+              onToggleItem={async (itemId, nextStatus) => {
+                await api(`/api/plan-items/${itemId}`, { method: 'PATCH', body: JSON.stringify({ status: nextStatus }) });
+                if (current) void openSession(current);
+              }}
+              onUndo={current ? async () => {
+                try {
+                  const res = await post<{ plan: Plan | null }>(`/api/sessions/${current}/plan/undo`, {});
+                  setPlan(res.plan);
+                  toast(t('Plan change undone.'), 'ok');
+                } catch (error) { toast(errorText(error), 'error'); }
+              } : undefined}
+              onDismiss={!active && current ? async () => {
+                try {
+                  await api(`/api/sessions/${current}/plan`, { method: 'PUT', body: JSON.stringify({ items: [] }) });
+                  setPlan(null);
+                } catch (error) { toast(errorText(error), 'error'); }
+              } : undefined}
+            />
+          )}
           {edits.length > 0 && <BulkDiffCard edits={edits} onChanged={() => { if (current) void openSession(current); }} />}
           </div>
           {!nearBottom && (

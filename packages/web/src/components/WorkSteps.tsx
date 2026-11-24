@@ -1,5 +1,5 @@
-import { memo, useState, type CSSProperties } from 'react';
-import { Brain, ChevronRight, Container, FileCode2, FilePen, FileText, Globe, Search, Sparkles, SquareTerminal, Users, Wrench } from 'lucide-react';
+import { memo, useEffect, useState, type CSSProperties } from 'react';
+import { AlertCircle, Brain, CheckCircle2, ChevronRight, Container, FileCode2, FilePen, FileText, Globe, Pause, RotateCcw, Search, Sparkles, SquareTerminal, Users, Wrench, X } from 'lucide-react';
 import { Markdown } from './Markdown';
 import { clockDelay } from '../lib/anim-clock';
 import { diffStats, formatDuration, sameGroup, sameRow, type StepIcon, type WorkGroup, type WorkRow, type WorkStep } from '../lib/work-steps';
@@ -49,26 +49,179 @@ function LiveThoughtRow({ text }: { text: string }) {
   );
 }
 
-type GroupProps = { group: WorkGroup; live: boolean; diffs: string[]; defaultOpen?: boolean; liveThought?: string };
+const PHASE_LABELS: Record<string, string> = {
+  planning: 'Planning',
+  investigating: 'Investigating',
+  editing: 'Editing',
+  verifying: 'Verifying',
+  fixing: 'Fixing',
+  summarizing: 'Summarizing',
+};
+
+function fmtCompactElapsed(startIso?: string, endIso?: string, nowMs = Date.now()): string {
+  if (!startIso) return '';
+  const start = new Date(startIso).getTime();
+  const end = endIso ? new Date(endIso).getTime() : nowMs;
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return '';
+  const s = Math.max(0, Math.round((end - start) / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+export interface PlanView {
+  id: string;
+  items: { id: string; text: string; status: string; note?: string | null }[];
+  canUndo?: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+/** Antigravity-style collapsible step summary pill ("Worked for 2m > ◔ 1/3 steps") with expandable checklist & evidence. */
+export function PlanProgressPill({
+  plan,
+  active,
+  liveFocus,
+  livePhase,
+  runStartedAt,
+  onToggleItem,
+  onUndo,
+  onDismiss,
+}: {
+  plan: PlanView;
+  active: boolean;
+  liveFocus?: string;
+  livePhase?: string;
+  runStartedAt?: string | null;
+  onToggleItem: (itemId: string, nextStatus: 'done' | 'pending') => void | Promise<void>;
+  onUndo?: () => void | Promise<void>;
+  onDismiss?: () => void | Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [active]);
+
+  const doneCount = plan.items.filter((item) => item.status === 'done').length;
+  const total = plan.items.length;
+  const startIso = (active ? runStartedAt : undefined) || plan.createdAt;
+  const endIso = active ? undefined : plan.updatedAt;
+  const elapsed = fmtCompactElapsed(startIso, endIso, nowMs);
+  const workedLabel = active
+    ? (elapsed ? t('Working · {0}', [elapsed]) : t('Working…'))
+    : (elapsed ? t('Worked for {0}', [elapsed]) : t('Completed steps'));
+  const pct = total > 0 ? Math.max(0, Math.min(1, doneCount / total)) : 0;
+  const radius = 5.5;
+  const circ = 2 * Math.PI * radius;
+  const phaseTitle = livePhase ? t(PHASE_LABELS[livePhase] ?? livePhase) : '';
+
+  return (
+    <div className={`plan-pill-wrap${open ? ' open' : ''}${active ? ' live' : ''}`}>
+      <div className="plan-pill-bar">
+        <button type="button" className="plan-pill-head" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+          <span className="plan-worked">{workedLabel}</span>
+          <ChevronRight size={14} className="plan-chev" aria-hidden />
+          <svg className="plan-ring" viewBox="0 0 16 16" aria-hidden>
+            <circle cx="8" cy="8" r={radius} className="plan-ring-track" />
+            {pct > 0 && (
+              <circle
+                cx="8" cy="8" r={radius}
+                className="plan-ring-fill"
+                strokeDasharray={`${pct * circ} ${circ}`}
+                transform="rotate(-90 8 8)"
+              />
+            )}
+          </svg>
+          <span className="plan-count">{t('{0}/{1} steps', [doneCount, total])}</span>
+        </button>
+        {active && (liveFocus || phaseTitle) && (
+          <span className="plan-focus-inline ellipsis" dir="auto">
+            {phaseTitle && <span className="work-phase-pill">{phaseTitle}</span>}
+            {liveFocus}
+          </span>
+        )}
+      </div>
+      {open && (
+        <div className="plan-card" role="region" aria-label={t('Plan progress')}>
+          <div className="plan-card-list">
+            {plan.items.map((item) => {
+              const st = item.status === 'doing' || item.status === 'done' || item.status === 'blocked' ? item.status : 'pending';
+              return (
+                <div key={item.id} className={`plan-item-row ${st}`}>
+                  <button
+                    type="button"
+                    className="plan-item-icon-btn"
+                    title={st === 'done' ? t('Mark pending') : t('Mark done')}
+                    onClick={() => void onToggleItem(item.id, st === 'done' ? 'pending' : 'done')}
+                  >
+                    {st === 'done' ? (
+                      <CheckCircle2 size={16} aria-hidden />
+                    ) : st === 'doing' ? (
+                      <Pause size={15} aria-hidden />
+                    ) : st === 'blocked' ? (
+                      <AlertCircle size={16} aria-hidden />
+                    ) : (
+                      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden>
+                        <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="1.5" />
+                      </svg>
+                    )}
+                  </button>
+                  <div className="plan-item-body">
+                    <div className="plan-item-text" dir="auto">{item.text}</div>
+                    {item.note && <div className="plan-item-note" dir="auto">{item.note}</div>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {(plan.canUndo || (!active && onDismiss)) && (
+            <div className="plan-card-actions">
+              {plan.canUndo && onUndo && (
+                <button type="button" className="btn ghost small" onClick={() => void onUndo()}>
+                  <RotateCcw size={12} aria-hidden /> {t('Undo plan')}
+                </button>
+              )}
+              {!active && onDismiss && (
+                <button type="button" className="btn ghost small" onClick={() => void onDismiss()}>
+                  <X size={12} aria-hidden /> {t('Dismiss')}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+type GroupProps = { group: WorkGroup; live: boolean; diffs: string[]; defaultOpen?: boolean; liveThought?: string; liveFocus?: string; livePhase?: string };
 const sameDiffs = (a: string[], b: string[]) => a.length === b.length && a.every((d, i) => d === b[i]);
 
 /** Memoised: the chat re-renders on every streamed token, but a group only re-renders when its rows change. */
 export const WorkGroupView = memo(WorkGroupViewInner, (a: GroupProps, b: GroupProps) =>
-  a.live === b.live && a.defaultOpen === b.defaultOpen && a.liveThought === b.liveThought && sameGroup(a.group, b.group) && sameDiffs(a.diffs, b.diffs));
+  a.live === b.live && a.defaultOpen === b.defaultOpen && a.liveThought === b.liveThought
+  && (a.liveFocus ?? '') === (b.liveFocus ?? '') && (a.livePhase ?? '') === (b.livePhase ?? '')
+  && sameGroup(a.group, b.group) && sameDiffs(a.diffs, b.diffs));
 
-function WorkGroupViewInner({ group, live, diffs, defaultOpen, liveThought }: GroupProps) {
+function WorkGroupViewInner({ group, live, diffs, defaultOpen, liveThought, liveFocus, livePhase }: GroupProps) {
   const [open, setOpen] = useState(Boolean(defaultOpen || live));
   const stats = diffs.length ? diffStats(diffs) : null;
   const duration = formatDuration(group.durationMs);
   const n = group.stepCount;
+  const phaseTitle = livePhase ? t(PHASE_LABELS[livePhase] ?? livePhase) : '';
   const title = live
-    ? t('Working · {0} steps so far', [n])
+    ? (liveFocus ? liveFocus : t('Working · {0} steps so far', [n]))
     : duration ? t('Completed {0} steps in {1}', [n, duration]) : t('Completed {0} steps', [n]);
   return (
     <section className={`work-group${open ? ' open' : ''}${live ? ' live' : ''}`} aria-label={title}>
       <button type="button" className="work-head" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
         <ChevronRight size={15} className="work-chev" aria-hidden />
         {live && <span className="work-live-dot" aria-hidden />}
+        {live && phaseTitle && <span className="work-phase-pill">{phaseTitle}</span>}
         <span className="work-title">{n === 1 && !live ? (duration ? t('Completed 1 step in {0}', [duration]) : t('Completed 1 step')) : title}</span>
         {stats && (stats.added > 0 || stats.removed > 0) && (
           <span className="work-diffstat mono"><span className="add">+{stats.added}</span> <span className="del">-{stats.removed}</span></span>
@@ -115,7 +268,9 @@ function StepRow({ step, stopped }: { step: WorkStep; stopped: boolean }) {
       <button type="button" className="work-row" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
         <Icon size={15} className="work-icon" aria-hidden />
         <span className="work-verb">{step.verb}</span>
-        {step.target && step.files.length === 0 && <span className="work-target ellipsis" title={step.target}>{step.target}</span>}
+        {(step.why || (step.target && step.files.length === 0)) && (
+          <span className="work-target ellipsis" title={step.target || step.why}>{step.why || step.target}</span>
+        )}
         {step.files.slice(0, 3).map((file) => (
           <span key={file} className="work-file mono" title={file}><FileCode2 size={12} aria-hidden />{file.split('/').pop()}</span>
         ))}

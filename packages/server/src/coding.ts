@@ -34,10 +34,60 @@ export function lineDiff(file: string, before: string, after: string): string {
   return lines.join('\n');
 }
 
+/** Locate the closest matching line window when an exact search-and-replace snippet misses. */
+export function findClosestBlock(before: string, search: string): { startLine: number; endLine: number; snippet: string } | null {
+  const lines = before.split('\n');
+  const searchLines = search.split('\n').map((l) => l.trim());
+  const nonEmpty = searchLines.filter(Boolean);
+  if (!nonEmpty.length || !lines.length) return null;
+  const trimmedLines = lines.map((l) => l.trim());
+  const nonEmptySet = new Set(nonEmpty);
+  const candidates = new Set<number>();
+  for (let i = 0; i < trimmedLines.length; i += 1) {
+    if (!trimmedLines[i] || !nonEmptySet.has(trimmedLines[i]!)) continue;
+    for (let s = 0; s < searchLines.length; s += 1) {
+      if (searchLines[s] === trimmedLines[i]) candidates.add(Math.max(0, i - s));
+    }
+  }
+  if (!candidates.size && nonEmpty[0]!.length >= 10) {
+    const head = nonEmpty[0]!.slice(0, 24);
+    for (let i = 0; i < trimmedLines.length; i += 1) {
+      if (trimmedLines[i]!.includes(head)) candidates.add(Math.max(0, i));
+    }
+  }
+  if (!candidates.size) return null;
+  let bestStart = 0;
+  let bestHits = 0;
+  for (const start of candidates) {
+    let hits = 0;
+    const end = Math.min(lines.length, start + searchLines.length + 2);
+    const windowSet = new Set(trimmedLines.slice(start, end).filter(Boolean));
+    for (const needle of nonEmpty) {
+      if (windowSet.has(needle)) hits += 1;
+    }
+    if (hits > bestHits) {
+      bestHits = hits;
+      bestStart = start;
+    }
+  }
+  const minRequired = nonEmpty.length <= 2 ? 1 : Math.max(2, Math.ceil(nonEmpty.length * 0.4));
+  if (bestHits < minRequired) return null;
+  const from = Math.max(0, bestStart - 1);
+  const to = Math.min(lines.length - 1, Math.min(from + 13, bestStart + Math.max(searchLines.length, 4)));
+  const snippet = lines.slice(from, to + 1).map((line, idx) => `${from + idx + 1}: ${line}`).join('\n');
+  return { startLine: from + 1, endLine: to + 1, snippet };
+}
+
 export function applySearchReplace(before: string, search: string, replace: string): string {
   if (!search) throw new Error('The search text is empty.');
   const at = before.indexOf(search);
-  if (at < 0) throw new Error('That text was not found. Read the file and include a longer unique snippet.');
+  if (at < 0) {
+    const closest = findClosestBlock(before, search);
+    if (closest) {
+      throw new Error(`That text was not found. Closest match is lines ${closest.startLine}-${closest.endLine}:\n${closest.snippet}\nCopy the exact lines from above and retry apply_patch.`);
+    }
+    throw new Error('That text was not found. Read the file and include a longer unique snippet.');
+  }
   if (before.indexOf(search, at + search.length) >= 0) throw new Error('That snippet matches more than once. Include more context.');
   return `${before.slice(0, at)}${replace}${before.slice(at + search.length)}`;
 }
@@ -93,13 +143,13 @@ export function undoPlan(store: Store, sessionId: string): { id: string; title: 
   return readPlan(store, sessionId);
 }
 
-export function readPlan(store: Store, sessionId: string): { id: string; title: string; status: string; items: PlanItem[]; canUndo: boolean } | null {
-  const plan = store.db.prepare('SELECT * FROM plans WHERE session_id = ?').get(sessionId) as { id: string; title: string; status: string } | undefined;
+export function readPlan(store: Store, sessionId: string): { id: string; title: string; status: string; createdAt?: string; updatedAt?: string; items: PlanItem[]; canUndo: boolean } | null {
+  const plan = store.db.prepare('SELECT * FROM plans WHERE session_id = ?').get(sessionId) as { id: string; title: string; status: string; created_at?: string; updated_at?: string } | undefined;
   if (!plan) return null;
   const items = (store.db.prepare('SELECT * FROM plan_items WHERE plan_id = ? ORDER BY position').all(plan.id) as { id: string; text: string; status: string; note: string | null; position: number }[])
     .map((item) => ({ id: item.id, text: item.text, status: item.status, note: item.note, position: item.position }));
   const history = store.db.prepare('SELECT COUNT(*) AS count FROM plan_history WHERE session_id = ?').get(sessionId) as { count: number };
-  return { id: plan.id, title: plan.title, status: plan.status, items, canUndo: history.count > 0 };
+  return { id: plan.id, title: plan.title, status: plan.status, createdAt: plan.created_at, updatedAt: plan.updated_at, items, canUndo: history.count > 0 };
 }
 
 export function listEdits(store: Store, sessionId: string): EditBatch[] {
@@ -293,28 +343,42 @@ export const CODING_TOOLS: Tool[] = [
   },
   {
     name: 'grep',
-    description: 'Search file contents under the workspace or a granted folder.',
-    parameters: obj({ pattern: { type: 'string' }, path: { type: 'string' } }, ['pattern']),
+    description: 'Search file contents under the workspace or a granted folder (supports regex, include file globs, context lines, and filesOnly).',
+    parameters: obj({
+      pattern: { type: 'string', description: 'Regex or literal pattern to search for.' },
+      path: { type: 'string', description: 'Optional project label or subdirectory.' },
+      include: { type: 'string', description: 'Optional glob filter, e.g. "*.ts" or "src/**/*.kt".' },
+      ignoreCase: { type: 'boolean', description: 'Case-insensitive search (default true).' },
+      context: { type: 'number', description: 'Context lines around each match (0-2).' },
+      filesOnly: { type: 'boolean', description: 'Return only matching file paths.' },
+      maxResults: { type: 'number', description: 'Max match entries to return (1-80, default 40).' },
+    }, ['pattern']),
     mutates: () => false,
     approval: () => null,
     async execute(args, ctx) {
       const root = allowedRoot(ctx, String(args.path || '.'));
       if (!root) throw new Error('That folder is not in this workshop.');
-      const hits = await walkGrep(root.full, String(args.pattern), 40);
-      return hits.join('\n') || 'No matches.';
+      const limit = Math.max(1, Math.min(80, Math.floor(Number(args.maxResults) || 40)));
+      const context = Math.max(0, Math.min(2, Math.floor(Number(args.context) || 0)));
+      return runGrep(root.full, String(args.pattern), {
+        include: args.include ? String(args.include) : undefined,
+        ignoreCase: args.ignoreCase !== false,
+        context,
+        filesOnly: Boolean(args.filesOnly),
+        limit,
+      });
     },
   },
   {
     name: 'glob',
-    description: 'Find files by a substring of their path.',
+    description: 'Find files matching a glob pattern (e.g. "**/*.ts") or path substring, skipping build/vendor folders.',
     parameters: obj({ pattern: { type: 'string' }, path: { type: 'string' } }, ['pattern']),
     mutates: () => false,
     approval: () => null,
     async execute(args, ctx) {
       const root = allowedRoot(ctx, String(args.path || '.'));
       if (!root) throw new Error('That folder is not in this workshop.');
-      const needle = String(args.pattern).replace(/\*/g, '').toLowerCase();
-      const hits = await walkNames(root.full, needle, 80);
+      const hits = await walkNames(root.full, String(args.pattern), 80);
       return hits.join('\n') || 'No files.';
     },
   },
@@ -324,6 +388,7 @@ export const CODING_TOOLS: Tool[] = [
     parameters: obj({
       edits: { type: 'array', items: { type: 'object' } },
       path: { type: 'string' }, search: { type: 'string' }, replace: { type: 'string' },
+      why: { type: 'string', description: 'Optional 3-8 word intent shown in the step log.' },
     }),
     mutates: () => true,
     approval: (args, ctx) => {
@@ -532,43 +597,163 @@ function editsOf(args: Record<string, unknown>): { path: string; search: string;
 }
 
 const GREP_SKIP_EXT = /\.(?:db|sqlite3?|db-wal|db-shm|png|jpe?g|webp|gif|ico|bmp|pdf|zip|gz|tar|tgz|7z|wasm|gguf|bin|exe|dll|so|dylib|mp4|mp3|wav|ogg|woff2?|ttf|eot|pptx?|xlsx?|docx?)$/i;
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.gradle', '.next', 'target']);
 
-async function walkGrep(root: string, pattern: string, limit: number) {
-  const regex = new RegExp(pattern, 'i');
+export function globToRegex(pattern: string): RegExp {
+  const expanded = pattern.trim().replace(/\{([^{}]+)\}/g, (_m, inner: string) => `(?:${inner.split(',').map((s) => s.trim()).join('|')})`);
+  let regex = '';
+  for (let i = 0; i < expanded.length; i += 1) {
+    const ch = expanded[i]!;
+    if (ch === '*' && expanded[i + 1] === '*') {
+      regex += expanded[i + 2] === '/' ? '(?:.*/)?' : '.*';
+      i += expanded[i + 2] === '/' ? 2 : 1;
+    } else if (ch === '*') regex += '[^/]*';
+    else if (ch === '?') regex += '[^/]';
+    else if ('\\^$.|+[]'.includes(ch)) regex += `\\${ch}`;
+    else regex += ch;
+  }
+  const hasSlash = pattern.includes('/');
+  return new RegExp(hasSlash ? `^${regex}$` : `(?:^|/)${regex}$`, 'i');
+}
+
+function matchesInclude(rel: string, name: string, include?: string): boolean {
+  if (!include?.trim()) return true;
+  const rx = globToRegex(include.trim());
+  return rx.test(rel.replace(/\\/g, '/')) || rx.test(name);
+}
+
+interface GrepOpts { include?: string; ignoreCase?: boolean; context?: number; filesOnly?: boolean; limit?: number }
+
+export async function runGrep(root: string, pattern: string, opts: GrepOpts = {}): Promise<string> {
+  const limit = Math.max(1, Math.min(80, opts.limit ?? 40));
+  const ignoreCase = opts.ignoreCase !== false;
+  const context = Math.max(0, Math.min(2, opts.context ?? 0));
+  const filesOnly = Boolean(opts.filesOnly);
+  const rgOut = await tryRipgrep(root, pattern, { include: opts.include, ignoreCase, context, filesOnly, limit });
+  if (rgOut != null) return rgOut;
+  return walkGrep(root, pattern, { include: opts.include, ignoreCase, context, filesOnly, limit });
+}
+
+function tryRipgrep(root: string, pattern: string, opts: Required<Pick<GrepOpts, 'ignoreCase' | 'context' | 'filesOnly' | 'limit'>> & { include?: string }): Promise<string | null> {
+  return new Promise((resolve, reject) => {
+    const args = ['--no-heading', '--line-number', '--color=never', '--max-filesize=1M'];
+    for (const dir of SKIP_DIRS) args.push('-g', `!${dir}`);
+    if (opts.ignoreCase) args.push('-i');
+    if (opts.include?.trim()) args.push('-g', opts.include.trim());
+    if (opts.filesOnly) args.push('-l');
+    else if (opts.context > 0) args.push('-C', String(opts.context));
+    args.push('--', pattern, '.');
+    const child = spawn('rg', args, { cwd: root, timeout: 15_000 });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (chunk) => { if (out.length < 400_000) out += String(chunk); });
+    child.stderr.on('data', (chunk) => { if (err.length < 4000) err += String(chunk); });
+    child.on('error', () => resolve(null));
+    child.on('close', (code) => {
+      if (code === 1) { resolve('No matches.'); return; }
+      if (code === 2 && err) { reject(new Error(`Invalid grep pattern: ${err.split('\n')[0]}`)); return; }
+      if (code !== 0) { resolve(null); return; }
+      const lines = out.trimEnd().split('\n').filter(Boolean);
+      if (!lines.length) { resolve('No matches.'); return; }
+      if (opts.filesOnly) {
+        const sliced = lines.slice(0, opts.limit);
+        const header = lines.length > opts.limit ? `Found ${lines.length} matching files (showing first ${opts.limit}):\n` : '';
+        resolve(`${header}${sliced.join('\n')}`);
+        return;
+      }
+      const matchLines = lines.filter((ln) => ln !== '--' && /^[^:]+:\d+:/.test(ln));
+      const files = new Set(matchLines.map((ln) => ln.split(':', 1)[0]!));
+      if (matchLines.length <= opts.limit) {
+        resolve(lines.map((ln) => ln.slice(0, 200)).join('\n'));
+        return;
+      }
+      const kept: string[] = [];
+      let shownMatches = 0;
+      for (const ln of lines) {
+        if (/^[^:]+:\d+:/.test(ln)) {
+          if (shownMatches >= opts.limit) break;
+          shownMatches += 1;
+        }
+        kept.push(ln.slice(0, 200));
+      }
+      resolve(`Found ${matchLines.length} matches across ${files.size} files (showing first ${shownMatches}):\n${kept.join('\n')}`);
+    });
+  });
+}
+
+async function walkGrep(root: string, pattern: string, opts: GrepOpts = {}): Promise<string> {
+  const limit = Math.max(1, Math.min(80, opts.limit ?? 40));
+  const ignoreCase = opts.ignoreCase !== false;
+  const context = Math.max(0, Math.min(2, opts.context ?? 0));
+  const filesOnly = Boolean(opts.filesOnly);
+  const regex = new RegExp(pattern, ignoreCase ? 'i' : '');
   const hits: string[] = [];
+  const fileSet = new Set<string>();
+  let totalMatches = 0;
+  let shownMatches = 0;
+  const walk = async (dir: string) => {
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (SKIP_DIRS.has(entry.name)) continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) { await walk(full); continue; }
+      if (GREP_SKIP_EXT.test(entry.name)) continue;
+      const rel = path.relative(root, full).replace(/\\/g, '/');
+      if (!matchesInclude(rel, entry.name, opts.include)) continue;
+      const text = await fs.readFile(full, 'utf8').catch(() => '');
+      if (!text || text.includes('\u0000')) continue;
+      const lines = text.split('\n');
+      let fileMatched = false;
+      lines.forEach((line, index) => {
+        if (!regex.test(line)) return;
+        fileMatched = true;
+        fileSet.add(rel);
+        totalMatches += 1;
+        if (filesOnly || shownMatches >= limit) return;
+        shownMatches += 1;
+        if (context > 0 && hits.length > 0) hits.push('--');
+        const from = Math.max(0, index - context);
+        const to = Math.min(lines.length - 1, index + context);
+        for (let i = from; i <= to; i += 1) {
+          const sep = i === index ? ':' : '-';
+          hits.push(`${rel}${sep}${i + 1}${sep} ${lines[i]!.slice(0, 180)}`);
+        }
+      });
+      if (filesOnly && fileMatched && hits.length < limit) hits.push(rel);
+    }
+  };
+  await walk(root);
+  if (filesOnly) {
+    if (!hits.length) return 'No matches.';
+    const header = fileSet.size > limit ? `Found ${fileSet.size} matching files (showing first ${hits.length}):\n` : '';
+    return `${header}${hits.join('\n')}`;
+  }
+  if (!hits.length) return 'No matches.';
+  const header = totalMatches > shownMatches ? `Found ${totalMatches} matches across ${fileSet.size} files (showing first ${shownMatches}):\n` : '';
+  return `${header}${hits.join('\n')}`;
+}
+
+export async function walkNames(root: string, pattern: string, limit: number) {
+  const hits: string[] = [];
+  const raw = pattern.trim();
+  const isGlob = /[*?{}]/.test(raw);
+  const rx = isGlob ? globToRegex(raw) : null;
+  const needle = raw.toLowerCase();
   const walk = async (dir: string) => {
     if (hits.length >= limit) return;
     const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
       if (hits.length >= limit) return;
-      if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === 'dist') continue;
+      if (SKIP_DIRS.has(entry.name)) continue;
       const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) await walk(full);
-      else {
-        if (GREP_SKIP_EXT.test(entry.name)) continue;
-        const text = await fs.readFile(full, 'utf8').catch(() => '');
-        if (!text || text.includes('\u0000')) continue;
-        text.split('\n').forEach((line, index) => {
-          if (hits.length < limit && regex.test(line)) hits.push(`${path.relative(root, full)}:${index + 1}: ${line.slice(0, 180)}`);
-        });
+      const rel = path.relative(root, full).replace(/\\/g, '/');
+      if (entry.isDirectory()) {
+        if (!rx && (!needle || rel.toLowerCase().includes(needle))) hits.push(rel);
+        await walk(full);
+      } else {
+        const matched = rx ? rx.test(rel) : (!needle || rel.toLowerCase().includes(needle));
+        if (matched) hits.push(rel);
       }
-    }
-  };
-  await walk(root);
-  return hits;
-}
-
-async function walkNames(root: string, needle: string, limit: number) {
-  const hits: string[] = [];
-  const walk = async (dir: string) => {
-    if (hits.length >= limit) return;
-    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
-    for (const entry of entries) {
-      if (entry.name === 'node_modules' || entry.name === '.git') continue;
-      const full = path.join(dir, entry.name);
-      const rel = path.relative(root, full);
-      if (rel.toLowerCase().includes(needle)) hits.push(rel);
-      if (entry.isDirectory()) await walk(full);
     }
   };
   await walk(root);

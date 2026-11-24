@@ -2596,13 +2596,32 @@ button.state-card:hover, a.state-card:hover { background: var(--bg-3); }
 .llm-exp { height: 7px; border-radius: 2px; background: rgba(var(--text-rgb), 0.1); transition: background 250ms ease; }
 .llm-exp.hot { background: var(--brass); }
 
-/* ── Plan / Tasks card ── */
-.task-list { display: flex; flex-direction: column; gap: 8px; }
-.task-list.completed { padding-block: 10px; opacity: 0.85; }
-.task-list-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.task-list-title { display: inline-flex; align-items: center; gap: 8px; border: 0; background: transparent; padding: 0; color: var(--text); font: inherit; cursor: pointer; }
-.task-list-actions { display: inline-flex; align-items: center; gap: 4px; }
-.task-list label.row { display: flex; flex-wrap: nowrap; align-items: flex-start; gap: 10px; cursor: pointer; }
-.task-list label.row input[type="checkbox"] { flex: 0 0 auto; margin-top: 3px; }
-.task-list label.row span { flex: 1 1 auto; min-width: 0; line-height: 1.45; }
-.task-list label.row span.done-text { text-decoration: line-through; opacity: 0.65; }
+/* ── Antigravity-style Plan Progress Pill & Expandable Checklist ── */
+.plan-pill-wrap { margin: 8px 0 12px; max-width: 100%; }
+.plan-pill-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.plan-pill-head { display: inline-flex; align-items: center; gap: 8px; border: 0; background: transparent; padding: 4px 6px; margin-inline-start: -6px; color: var(--muted); font-size: calc(13px * var(--fs)); font-weight: 500; border-radius: calc(8px * var(--round)); cursor: pointer; }
+.plan-pill-head:hover { color: var(--text); background: var(--bg-2); }
+.plan-chev { flex: none; transition: transform .18s var(--ease); opacity: .75; }
+.plan-pill-wrap.open .plan-chev { transform: rotate(90deg); }
+.plan-pill-wrap.open .plan-chev:dir(rtl) { transform: rotate(90deg); }
+.plan-ring { flex: none; width: 15px; height: 15px; display: block; }
+.plan-ring-track { fill: none; stroke: rgba(var(--text-rgb), 0.16); stroke-width: 2; }
+.plan-ring-fill { fill: none; stroke: var(--text); stroke-width: 2; stroke-linecap: round; transition: stroke-dasharray .2s ease; }
+.plan-count { color: var(--text); font-variant-numeric: tabular-nums; }
+.plan-focus-inline { display: inline-flex; align-items: center; gap: 6px; font-size: calc(12px * var(--fs)); color: var(--muted); min-width: 0; max-width: 420px; }
+.work-phase-pill { display: inline-flex; align-items: center; padding: 1px 7px; border-radius: 999px; font-size: calc(11px * var(--fs)); font-weight: 600; background: rgba(var(--brass-rgb), 0.14); color: var(--brass); border: 1px solid rgba(var(--brass-rgb), 0.25); flex: none; }
+.plan-card { margin-top: 8px; padding: 12px 14px; border-radius: calc(14px * var(--round)); border: 1px solid var(--line-strong); background: var(--bg-2); animation: menu-in-down .16s var(--ease); }
+.plan-card-list { display: flex; flex-direction: column; gap: 11px; }
+.plan-item-row { display: flex; align-items: flex-start; gap: 11px; font-size: calc(14px * var(--fs)); line-height: 1.42; }
+.plan-item-icon-btn { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; margin-top: 1px; border: 0; background: transparent; color: var(--muted); cursor: pointer; border-radius: 50%; }
+.plan-item-icon-btn:hover { color: var(--text); background: rgba(var(--text-rgb), 0.08); }
+.plan-item-row.done .plan-item-icon-btn { color: var(--faint); }
+.plan-item-row.doing .plan-item-icon-btn { color: var(--text); }
+.plan-item-row.blocked .plan-item-icon-btn { color: var(--coral); }
+.plan-item-body { flex: 1 1 auto; min-width: 0; }
+.plan-item-text { color: var(--text); }
+.plan-item-row.done .plan-item-text { color: var(--faint); }
+.plan-item-row.doing .plan-item-text { font-weight: 600; color: var(--text); }
+.plan-item-row.blocked .plan-item-text { color: var(--coral); }
+.plan-item-note { margin-top: 2px; font-size: calc(12px * var(--fs)); color: var(--faint); line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plan-card-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); }

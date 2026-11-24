@@ -34,6 +34,7 @@ data class AppUiState(
     val edits: List<EditDiff> = emptyList(),
     val keptEditIds: Set<String> = emptySet(),
     val steps: List<RunStep> = emptyList(),
+    val plan: SessionPlan? = null,
     val coderMode: Boolean = false,
     val models: List<UsableModel> = emptyList(),
     val refreshingModels: Boolean = false,
@@ -41,6 +42,9 @@ data class AppUiState(
     val activeRunId: String? = null,
     val runStatus: String = "",
     val statusDetail: String = "",
+    val liveFocus: String = "",
+    val livePhase: String = "",
+    val runStartedAt: String? = null,
     /** Queue vs RAM wait, from the status event's waitInfo (or its detail text on older servers). */
     val wait: WaitState? = null,
     val streamingText: String = "",
@@ -308,12 +312,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             currentSession = detail.session,
                             messages = detail.messages,
                             edits = detail.edits,
+                            plan = detail.plan,
                             steps = emptyList(),
                             coderMode = autoCoder,
                             breakdown = detail.breakdown,
                             activeRunId = detail.activeRunId,
                             runStatus = detail.live?.status?.ifBlank { detail.activeRunStatus ?: "" } ?: (detail.activeRunStatus ?: ""),
                             statusDetail = detail.live?.detail ?: "",
+                            liveFocus = detail.live?.focus.orEmpty(),
+                            livePhase = detail.live?.phase.orEmpty(),
+                            runStartedAt = detail.live?.startedAt,
                             wait = detail.live?.takeIf { l -> l.status == "waiting" }?.let { l -> WaitState.of(l.detail, l.waitInfo) },
                             streamingText = detail.live?.text ?: "",
                             streamingThinking = detail.live?.thinking ?: "",
@@ -411,6 +419,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         val runObj = json.optJSONObject("run")
                         val status = runObj?.optString("status", "") ?: ""
                         val detail = json.optString("statusDetail", "")
+                        val focus = json.optString("focus", "").takeIf { it != "null" }.orEmpty()
+                        val phase = json.optString("phase", "").takeIf { it != "null" }.orEmpty()
+                        val startedAt = json.optString("startedAt", "").takeIf { it.isNotBlank() && it != "null" }
                         val effectiveStatus = if (status == "running" && detail.contains("Waiting for memory", true)) "waiting" else status
                         val stepsArr = json.optJSONArray("steps")
                         val parsedSteps = if (stepsArr != null) List(stepsArr.length()) { i -> client.parseStep(stepsArr.getJSONObject(i)) } else null
@@ -418,6 +429,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             s.copy(
                                 runStatus = effectiveStatus,
                                 statusDetail = detail.ifBlank { s.statusDetail },
+                                liveFocus = focus.ifBlank { s.liveFocus },
+                                livePhase = phase.ifBlank { s.livePhase },
+                                runStartedAt = startedAt ?: s.runStartedAt,
                                 streamingText = json.optString("streaming", "").ifBlank { s.streamingText },
                                 streamingThinking = json.optString("thinking", "").ifBlank { s.streamingThinking },
                                 steps = parsedSteps ?: s.steps,
@@ -435,6 +449,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         if (stepObj != null) {
                             val parsed = client.parseStep(stepObj)
                             _ui.update { s -> s.copy(steps = s.steps.filterNot { it.id == parsed.id } + parsed) }
+                            if (parsed.status == "completed" && parsed.name in setOf("plan", "tasks", "enter_plan_mode", "exit_plan_mode")) {
+                                refreshPlan()
+                            }
                         }
                     }
                     "token" -> {
@@ -465,8 +482,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     "status" -> {
                         val st = json.optString("status", "")
                         val detail = json.optString("detail", "")
+                        val focus = json.optString("focus", "").takeIf { it != "null" }
+                        val phase = json.optString("phase", "").takeIf { it != "null" }
+                        val startedAt = json.optString("startedAt", "").takeIf { it.isNotBlank() && it != "null" }
                         val wait = if (st == "waiting") WaitState.of(detail, json.optJSONObject("waitInfo")) else null
-                        _ui.update { it.copy(runStatus = st, statusDetail = detail, wait = wait) }
+                        _ui.update {
+                            it.copy(
+                                runStatus = st,
+                                statusDetail = detail,
+                                wait = wait,
+                                liveFocus = focus ?: it.liveFocus,
+                                livePhase = phase ?: it.livePhase,
+                                runStartedAt = startedAt ?: it.runStartedAt,
+                            )
+                        }
                         // Re-checking RAM only helps the memory wait, not the large-model queue.
                         if (st == "waiting" && wait?.queue != true) startMemoryRecheckLoop() else stopMemoryRecheckLoop()
                         if (st == "awaiting_approval") refreshApprovals(runId)
@@ -481,6 +510,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             it.copy(
                                 runStatus = finalStatus,
                                 statusDetail = "",
+                                liveFocus = "",
+                                livePhase = "",
+                                runStartedAt = null,
                                 runError = if (finalStatus == "failed") runObj?.optString("error", "Failed") else it.runError,
                             )
                         }
@@ -753,6 +785,46 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             runCatching { client.patchSessionEffort(sessionId, effort) }
                 .onSuccess { _ui.update { s -> s.copy(currentSession = s.currentSession?.copy(effort = effort)) } }
+                .onFailure { e -> _ui.update { it.copy(snackbar = e.message) } }
+        }
+    }
+
+    fun refreshPlan() {
+        val sid = _ui.value.currentSession?.id ?: return
+        viewModelScope.launch {
+            runCatching { client.getSession(sid).plan }
+                .onSuccess { p -> _ui.update { it.copy(plan = p) } }
+        }
+    }
+
+    fun togglePlanItem(itemId: String, done: Boolean) {
+        val status = if (done) "done" else "pending"
+        viewModelScope.launch {
+            runCatching { client.patchPlanItem(itemId, status) }
+                .onSuccess {
+                    _ui.update { s ->
+                        val p = s.plan ?: return@update s
+                        s.copy(plan = p.copy(items = p.items.map { item -> if (item.id == itemId) item.copy(status = status) else item }))
+                    }
+                }
+                .onFailure { e -> _ui.update { it.copy(snackbar = e.message) } }
+        }
+    }
+
+    fun undoPlan() {
+        val sid = _ui.value.currentSession?.id ?: return
+        viewModelScope.launch {
+            runCatching { client.undoPlan(sid) }
+                .onSuccess { p -> _ui.update { it.copy(plan = p, snackbar = "Plan change undone") } }
+                .onFailure { e -> _ui.update { it.copy(snackbar = e.message) } }
+        }
+    }
+
+    fun clearPlan() {
+        val sid = _ui.value.currentSession?.id ?: return
+        viewModelScope.launch {
+            runCatching { client.clearPlan(sid) }
+                .onSuccess { _ui.update { it.copy(plan = null) } }
                 .onFailure { e -> _ui.update { it.copy(snackbar = e.message) } }
         }
     }

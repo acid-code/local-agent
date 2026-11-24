@@ -23,6 +23,7 @@ import {
   type RouteDecision,
   type RunCursor,
   type ToolCall,
+  type WorkPhase,
   isHebrewText,
   riskOf,
   needsApproval,
@@ -38,7 +39,7 @@ import { countGeminiTokens, maxTokensFor, ollamaNumCtx, providerFor, samplingFor
 import type { Settings } from './settings.js';
 import { CODING_TOOLS } from './coding.js';
 import { formatCitations, searchKnowledge } from './kb.js';
-import { kbSearchTool, loadSkillTool, toolsFor, type Tool, type ToolContext } from './tools.js';
+import { kbSearchTool, loadSkillTool, setFocusTool, toolsFor, type Tool, type ToolContext } from './tools.js';
 import { CORE_TOOLS, LEAN_MIN_TOOLS, SEED_TOOLS, findToolsTool, leanMenuEnabled, rankTools } from './toolsearch.js';
 import { listSkills, runSkillScript, skillCatalog } from './skills.js';
 import { getWorkshop, workshopBrief } from './workshops.js';
@@ -78,7 +79,7 @@ const ACTIVE_RUN_STATUSES = new Set(['queued', 'running', 'loading', 'waiting', 
 
 export class Engine {
   private readonly inflight = new Map<string, { abort: AbortController; paused: boolean; resumePause: () => void }>();
-  private readonly liveStreams = new Map<string, { text: string; thinking: string; status: string; detail?: string; waitInfo?: unknown }>();
+  private readonly liveStreams = new Map<string, { text: string; thinking: string; status: string; detail?: string; waitInfo?: unknown; focus?: string; phase?: WorkPhase; startedAt?: string }>();
   private readonly lastContext = new Map<string, ContextBreakdown>();
   private readonly compacting = new Set<string>();
   private readonly approvalWaiters = new Map<string, (status: 'approved' | 'denied') => void>();
@@ -150,7 +151,32 @@ export class Engine {
     this.llamaLeases.set(runId, kind);
     const live = this.liveStreams.get(runId);
     if (live) { live.status = 'running'; live.detail = undefined; live.waitInfo = undefined; }
-    if (queued) this.bus.publish({ type: 'status', runId, status: 'running', detail: undefined } as never);
+    if (queued) this.bus.publish({ type: 'status', runId, status: 'running', detail: undefined, focus: live?.focus, phase: live?.phase, startedAt: live?.startedAt } as never);
+  }
+
+  private publishFocus(runId: string, focus?: string, phase?: WorkPhase) {
+    const cleanFocus = focus?.trim();
+    const run = this.store.getRun(runId);
+    const prev = this.liveStreams.get(runId) ?? {
+      text: '', thinking: '', status: run?.status || 'running',
+      startedAt: run?.startedAt || now(),
+    };
+    const next = {
+      ...prev,
+      focus: cleanFocus || prev.focus,
+      phase: phase || prev.phase,
+      startedAt: prev.startedAt || run?.startedAt || now(),
+    };
+    this.liveStreams.set(runId, next);
+    if (run) {
+      this.store.updateRun(runId, {
+        cursor: { ...run.cursor, ...(next.focus ? { focus: next.focus } : {}), ...(next.phase ? { workPhase: next.phase } : {}) },
+      });
+    }
+    this.bus.publish({
+      type: 'status', runId, status: next.status, detail: next.detail, waitInfo: next.waitInfo,
+      focus: next.focus, phase: next.phase, startedAt: next.startedAt,
+    } as never);
   }
   /** llama-server ↔ Ollama GPU coexistence (see coexist.ts). */
   readonly llama: LlamaWatch;
@@ -1005,7 +1031,16 @@ export class Engine {
     const started = Date.now();
     let text = '';
     let reasoningText = '';
-    this.liveStreams.set(run.id, { text: '', thinking: '', status: 'running' });
+    const prevLive = this.liveStreams.get(run.id);
+    const livePhase: WorkPhase | undefined = current.cursor.stage === 'plan'
+      ? 'planning'
+      : prevLive?.phase ?? current.cursor.workPhase;
+    this.liveStreams.set(run.id, {
+      text: '', thinking: '', status: 'running',
+      focus: prevLive?.focus ?? current.cursor.focus,
+      phase: livePhase,
+      startedAt: prevLive?.startedAt || current.startedAt || now(),
+    });
     let toolCalls: ToolCall[] | undefined;
     let usage = { inputTokens: built.plan.estimatedTokens, outputTokens: 0 };
     let telemetry: import('./providers.js').Telemetry | undefined;
@@ -1505,6 +1540,12 @@ export class Engine {
         runId: run.id, kind: 'tool', name: call.name, status: 'running', input: args, output: null, toolCallId: call.id,
         turn: run.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now(),
       });
+      if (call.name !== 'set_focus' && !run.cursor.helperId) {
+        const whyText = typeof args.why === 'string' && args.why.trim() ? args.why.trim() : typeof args.summary === 'string' && args.summary.trim() ? args.summary.trim() : undefined;
+        const autoFocus = whyText || deriveStepFocus(call.name, args);
+        const autoPhase = deriveStepPhase(call.name, args, run.cursor.stage);
+        this.publishFocus(run.id, autoFocus, autoPhase);
+      }
       const started = Date.now();
       try {
         const output = this.vault.redact(clampText(await tool.execute(args, { ...this.contextFor(run, signal), toolCallId: call.id }), 200_000));
@@ -2404,7 +2445,7 @@ export class Engine {
     }
     if (this.ocrReader) names.add('read_image_text');
     if (this.imageAnalyzer) names.add('understand_image');
-    for (const name of ['tasks', 'manage_timer', 'manage_trigger', 'spawn_agent', 'helpers', 'memory_file', 'search_chats', 'propose_skill', 'run_tool_script', 'time_now', 'think']) names.add(name);
+    for (const name of ['tasks', 'manage_timer', 'manage_trigger', 'spawn_agent', 'helpers', 'memory_file', 'search_chats', 'propose_skill', 'run_tool_script', 'time_now', 'think', 'set_focus']) names.add(name);
     if (this.store.getSettings().imageGen.mode !== 'off') names.add('generate_image');
     if (stage === 'plan') {
       for (const name of ['web_search', 'web_fetch', 'read_file', 'list_dir', 'grep', 'glob', 'plan', 'recall', 'consult_agent']) names.add(name);
@@ -2423,7 +2464,7 @@ export class Engine {
     if (helper) for (const name of HELPER_DENIED) names.delete(name);
     // Built-in connectors the owner switched off take their tools with them.
     for (const name of disabledConnectorTools(this.store)) names.delete(name);
-    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), fetchImageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl }),     ...slidesTools({ dataDir: this.libraryDir, photo: async (query, ctx) => ({ fileId: (await fetchWebImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, searxngUrl: this.store.getSettings().searxngUrl || process.env.SEARXNG_URL || '' }, { query, ownerId: ctx.ownerId, sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal, primaryOnly: true })).file.id }), image: async (prompt, ctx) => { try { return { fileId: (await generateImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }, { prompt, ownerId: ctx.ownerId, shape: 'landscape', sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal })).file.id }; } catch { const searxngUrl = this.store.getSettings().searxngUrl || process.env.SEARXNG_URL || ''; return { fileId: (await fetchWebImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, searxngUrl }, { query: prompt, ownerId: ctx.ownerId, sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal, primaryOnly: true })).file.id }; } } }), ...this.autonomy.tools(), tasksTool(), memoryFileTool(), searchChatsTool(), proposeSkillTool(), ...CONNECTOR_TOOLS(), ...vercelTools(), ...(this.ocrReader ? [ocrTool(this.ocrReader)] : []), ...(this.imageAnalyzer ? [understandImageTool(this.imageAnalyzer)] : []), ...this.extraTools, ...mcp.map((row) => row.tool)];
+    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), setFocusTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), fetchImageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl }),     ...slidesTools({ dataDir: this.libraryDir, photo: async (query, ctx) => ({ fileId: (await fetchWebImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, searxngUrl: this.store.getSettings().searxngUrl || process.env.SEARXNG_URL || '' }, { query, ownerId: ctx.ownerId, sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal, primaryOnly: true })).file.id }), image: async (prompt, ctx) => { try { return { fileId: (await generateImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }, { prompt, ownerId: ctx.ownerId, shape: 'landscape', sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal })).file.id }; } catch { const searxngUrl = this.store.getSettings().searxngUrl || process.env.SEARXNG_URL || ''; return { fileId: (await fetchWebImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, searxngUrl }, { query: prompt, ownerId: ctx.ownerId, sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal, primaryOnly: true })).file.id }; } } }), ...this.autonomy.tools(), tasksTool(), memoryFileTool(), searchChatsTool(), proposeSkillTool(), ...CONNECTOR_TOOLS(), ...vercelTools(), ...(this.ocrReader ? [ocrTool(this.ocrReader)] : []), ...(this.imageAnalyzer ? [understandImageTool(this.imageAnalyzer)] : []), ...this.extraTools, ...mcp.map((row) => row.tool)];
     const seen = new Set<string>();
     const chosen = catalog.filter((tool) => {
       if (!names.has(tool.name) || seen.has(tool.name)) return false;
@@ -2445,6 +2486,7 @@ export class Engine {
       secretEnv: () => (member ? {} : this.vault.envFor(agent.id, `run:${run.id}`)),
       libraryDir: this.libraryDir,
       roots: turnRoots(this.store, run, this.libraryDir),
+      setFocus: (focus, phase) => this.publishFocus(run.id, focus, phase),
       // The owner's GitHub token, SSH key and vault never reach a member's persona.
       gitIdentity: member ? { name: agent.name, email: 'agent@local-agent.invalid' } : { ...gitIdentity(this.store.getSettings()), token: this.vault.valueByName('GITHUB_TOKEN') },
       consult: (name, question) => this.consult(run, name, question),
@@ -3222,4 +3264,29 @@ export function detectDegenerateRepeat(buf: string): string | null {
   const multi = tail.match(/(.{2,8})\1{19,}$/);
   if (multi && /[^\s\-=_*#|.─═~`]/.test(multi[1])) return multi[0];
   return null;
+}
+
+export function deriveStepPhase(toolName: string, _args: Record<string, unknown>, stage?: 'plan' | 'implement'): WorkPhase | undefined {
+  if (stage === 'plan' || ['plan', 'tasks', 'enter_plan_mode'].includes(toolName)) return 'planning';
+  if (['apply_patch', 'write_file', 'create_file'].includes(toolName)) return 'editing';
+  if (['shell'].includes(toolName)) return 'verifying';
+  if (['read_file', 'list_dir', 'grep', 'glob', 'web_search', 'web_fetch', 'kb_search', 'search_chats', 'find_context'].includes(toolName)) return 'investigating';
+  return undefined;
+}
+
+export function deriveStepFocus(toolName: string, args: Record<string, unknown>): string {
+  const base = (p: unknown) => String(p || '').replace(/\/+$/, '').split('/').pop() || String(p || '');
+  switch (toolName) {
+    case 'read_file': return `Reading ${base(args.path) || 'file'}`;
+    case 'list_dir': return `Listing ${base(args.path) || 'workspace'}`;
+    case 'grep': return `Searching for ${String(args.pattern || 'matches').slice(0, 32)}`;
+    case 'glob': return `Finding files matching ${String(args.pattern || '*').slice(0, 32)}`;
+    case 'apply_patch': case 'write_file': case 'create_file': return `Editing ${base(args.path) || 'file'}`;
+    case 'shell': return `Running ${String(args.command || 'command').split('\n')[0]!.slice(0, 36)}`;
+    case 'web_search': return `Searching web: ${String(args.query || '').slice(0, 32)}`;
+    case 'web_fetch': return `Fetching ${String(args.url || 'page').replace(/^https?:\/\//, '').slice(0, 36)}`;
+    case 'plan': case 'tasks': return 'Updating plan steps';
+    case 'spawn_agent': return `Spawning helper${args.role ? ` (${String(args.role)})` : ''}`;
+    default: return `Running ${toolName.replace(/_/g, ' ')}`;
+  }
 }

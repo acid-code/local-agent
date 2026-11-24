@@ -299,6 +299,8 @@ private fun ChatScreen(state: AppUiState, vm: ChatViewModel, onVoiceDictation: (
                                 group = item.group,
                                 live = live,
                                 liveThought = if (live) state.streamingThinking.takeIf { it.isNotBlank() } else null,
+                                liveFocus = if (live) state.liveFocus.takeIf { it.isNotBlank() } else null,
+                                livePhase = if (live) state.livePhase.takeIf { it.isNotBlank() } else null,
                                 diffs = if (live || item.group.id == lastWork?.id) state.edits.map { it.diff } else emptyList(),
                                 approvals = if (live) state.approvals else emptyList(),
                                 focusApprovalId = state.focusApprovalId,
@@ -314,6 +316,8 @@ private fun ChatScreen(state: AppUiState, vm: ChatViewModel, onVoiceDictation: (
                             group = livePlaceholderGroup(),
                             live = true,
                             liveThought = state.streamingThinking.takeIf { it.isNotBlank() },
+                            liveFocus = state.liveFocus.takeIf { it.isNotBlank() },
+                            livePhase = state.livePhase.takeIf { it.isNotBlank() },
                             approvals = state.approvals,
                             focusApprovalId = state.focusApprovalId,
                             onApprove = { vm.decideApproval(it, "approve") },
@@ -358,6 +362,20 @@ private fun ChatScreen(state: AppUiState, vm: ChatViewModel, onVoiceDictation: (
                         Surface(color = MaterialTheme.colorScheme.error.copy(alpha = 0.12f), shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
                             Text(state.runError, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(14.dp), style = MaterialTheme.typography.bodyMedium)
                         }
+                    }
+                }
+                state.plan?.takeIf { it.items.isNotEmpty() }?.let { plan ->
+                    item(key = "plan_pill") {
+                        PlanProgressPill(
+                            plan = plan,
+                            active = state.isStreaming,
+                            liveFocus = state.liveFocus,
+                            livePhase = state.livePhase,
+                            runStartedAt = state.runStartedAt,
+                            onToggleItem = vm::togglePlanItem,
+                            onUndo = vm::undoPlan,
+                            onDismiss = vm::clearPlan,
+                        )
                     }
                 }
             }

@@ -60,6 +60,8 @@ fun WorkGroupCard(
     group: WorkSteps.Group,
     live: Boolean,
     liveThought: String? = null,
+    liveFocus: String? = null,
+    livePhase: String? = null,
     diffs: List<String> = emptyList(),
     approvals: List<ApprovalItem> = emptyList(),
     focusApprovalId: String? = null,
@@ -69,7 +71,8 @@ fun WorkGroupCard(
     var open by remember(group.id) { mutableStateOf(live) }
     LaunchedEffect(live) { open = live }
     val chevron by animateFloatAsState(if (open) 90f else 0f, label = "work-chevron")
-    val title = remember(group.stepCount, group.durationMs, live) { WorkSteps.headerTitle(group, live) }
+    val baseTitle = remember(group.stepCount, group.durationMs, live) { WorkSteps.headerTitle(group, live) }
+    val title = if (live && !liveFocus.isNullOrBlank()) liveFocus else baseTitle
     val stats = remember(diffs) { if (diffs.isEmpty()) null else WorkSteps.diffStats(diffs) }
     val stepApprovals = remember(group.rows, approvals) {
         val used = mutableSetOf<String>()
@@ -108,6 +111,19 @@ fun WorkGroupCard(
                         .clip(CircleShape)
                         .background(AccentMint),
                 )
+            }
+            if (live && !livePhase.isNullOrBlank()) {
+                Surface(
+                    color = AccentGold.copy(alpha = 0.16f),
+                    shape = RoundedCornerShape(999.dp),
+                ) {
+                    Text(
+                        livePhase.replaceFirstChar { it.uppercase() },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = AccentGold,
+                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                    )
+                }
             }
             Text(
                 title,

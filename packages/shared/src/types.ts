@@ -43,6 +43,8 @@ export interface ToolDefinition {
 
 export type RunPhase = 'route' | 'context' | 'model' | 'tools' | 'summarize' | 'done';
 
+export type WorkPhase = 'planning' | 'investigating' | 'editing' | 'verifying' | 'fixing' | 'summarizing';
+
 export type RunStatus =
   | 'running'
   | 'paused'
@@ -55,6 +57,9 @@ export type RunStatus =
 
 export interface RunCursor {
   phase: RunPhase;
+  /** Human-readable live focus phrase and workflow phase surfaced to UI pills. */
+  focus?: string;
+  workPhase?: WorkPhase;
   /** User steering queued while the run is active. It changes the next model step without restarting or stopping work. */
   steering?: { id: string; content: string };
   /** Recovery rounds after a reply claimed success over a failed tool call, and the note sent back to the model. */
