@@ -236,4 +236,138 @@ describe('llama-server and Ollama coexistence', () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('swaps between llama-server and heavy Ollama models, respects cancellation before swap, and keeps <=4 GiB sidecars', async () => {
+    const prevUrl = process.env.LLAMA_FALLBACK_CONTROL_URL;
+    process.env.LLAMA_FALLBACK_CONTROL_URL = 'http://127.0.0.1:8082';
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'la-swap-'));
+    try {
+      const store = new Store(path.join(dir, 'local-agent.db'));
+      store.upsertProvider({ id: 'prov_ollama', kind: 'openai_compat', name: 'Ollama', baseUrl: 'http://127.0.0.1:11434/v1', enabled: true });
+      store.upsertProvider({ id: 'prov_llama', kind: 'openai_compat', name: 'llama-server', baseUrl: 'http://127.0.0.1:8080/v1', enabled: true });
+      store.upsertModel(model('ollama_gpt_oss_20b', 'prov_ollama', 'gpt-oss:20b', 13.8, 'large') as never);
+      store.upsertModel(model('ollama_qwen35_4b', 'prov_ollama', 'qwen3.5:4b', 3.4, 'small') as never);
+      store.upsertModel({ ...model('ollama_nomic_embed', 'prov_ollama', 'nomic-embed-text', 0.3, 'small'), embedding: true } as never);
+      store.upsertModel(model('llama_qwen3_6', 'prov_llama', 'qwen3.6-35b-a3b', 23, 'large') as never);
+
+      let llamaUp = true;
+      let stopShouldFail = false;
+      const controlCalls: string[] = [];
+      const unloaded: string[] = [];
+      const ollamaPs = new Map<string, number>([
+        ['gpt-oss:20b', Math.round(13.8 * 1024 ** 3)],
+        ['qwen3.5:4b', Math.round(3.4 * 1024 ** 3)],
+        ['nomic-embed-text', Math.round(0.3 * 1024 ** 3)],
+      ]);
+      const fetchImpl: typeof fetch = async (input, init) => {
+        const url = String(input);
+        if (url.includes(':8080/health')) return new Response('{}', { status: llamaUp ? 200 : 503 });
+        if (url.includes('/stop-llama')) {
+          controlCalls.push('/stop-llama');
+          if (stopShouldFail) return new Response('not found', { status: 404 });
+          llamaUp = false;
+          return new Response(JSON.stringify({ ok: true, stopped: true }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        if (url.includes('/switch-qwen')) {
+          controlCalls.push('/switch-qwen');
+          llamaUp = true;
+          return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        if (url.includes('/api/ps')) {
+          return new Response(JSON.stringify({
+            models: [...ollamaPs.entries()].map(([model, size_vram]) => ({ model, size_vram })),
+          }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        if (url.includes('/api/generate')) {
+          const body = JSON.parse(String(init?.body || '{}')) as { model?: string; keep_alive?: number };
+          if (body.keep_alive === 0 && body.model) {
+            unloaded.push(body.model);
+            ollamaPs.delete(body.model);
+          }
+          return new Response('{}', { status: 200 });
+        }
+        return new Response('{}', { status: 200 });
+      };
+
+      const used: string[] = [];
+      let releaseGate: (() => void) | null = null;
+      const engine = new Engine(store, new Bus(), new DockerCtl('/nonexistent.sock'), new VectorIndex(store.db), new Vault(store, Buffer.alloc(32, 7)), 'inst_swap', fetchImpl, (m) => ({
+        async *complete(req) {
+          used.push(m.apiName);
+          if (req.messages.some((msg) => String(msg.content).includes('HOLD_LLAMA')) && releaseGate) {
+            await new Promise<void>((resolve) => {
+              const done = releaseGate!;
+              releaseGate = () => { done(); resolve(); };
+            });
+          }
+          yield { type: 'token' as const, text: `Answered by ${m.apiName}` };
+          yield { type: 'done' as const, finishReason: 'stop', usage: { inputTokens: 5, outputTokens: 5 } };
+        },
+      }));
+
+      await engine.llama.refresh();
+      const agent = store.createAgent({ name: 'House', systemPrompt: 'Be concise.', toolAllowlist: [], workspacePath: dir });
+
+      // (a) Pinned gpt-oss:20b triggers /stop-llama and runs on gpt-oss:20b
+      const s1 = store.createSession({ agentId: agent.id, title: 'pinned-20b' });
+      store.updateSession(s1.id, { modelPin: 'ollama_gpt_oss_20b' });
+      const run1 = await engine.startTurn({ sessionId: s1.id, agentId: agent.id, content: 'Hello from pinned 20b', wait: true });
+      expect(run1.status).toBe('completed');
+      expect(controlCalls).toContain('/stop-llama');
+      expect(used).toContain('gpt-oss:20b');
+
+      // (c) Switching back to llama-server unloads heavy gpt-oss:20b ONLY (keeps qwen3.5:4b & nomic-embed-text)
+      store.updateSession(s1.id, { modelPin: 'llama_qwen3_6' });
+      const run2 = await engine.startTurn({ sessionId: s1.id, agentId: agent.id, content: 'Back to Qwen3.6', wait: true });
+      expect(run2.status).toBe('completed');
+      expect(controlCalls).toContain('/switch-qwen');
+      expect(unloaded).toEqual(['gpt-oss:20b']);
+
+      // (b) Aborting while queued behind an active :8080 run stops BEFORE calling /stop-llama
+      const beforeAbortControls = controlCalls.length;
+      const sHold = store.createSession({ agentId: agent.id, title: 'hold-8080' });
+      store.updateSession(sHold.id, { modelPin: 'llama_qwen3_6' });
+      let gateResolve!: () => void;
+      releaseGate = () => gateResolve();
+      const holdPromise = new Promise<void>((resolve) => { gateResolve = resolve; });
+      const holdEngine = new Engine(store, new Bus(), new DockerCtl('/nonexistent.sock'), new VectorIndex(store.db), new Vault(store, Buffer.alloc(32, 7)), 'inst_swap2', fetchImpl, (m) => ({
+        async *complete() {
+          used.push(`hold:${m.apiName}`);
+          await holdPromise;
+          yield { type: 'token' as const, text: 'held done' };
+          yield { type: 'done' as const, finishReason: 'stop', usage: { inputTokens: 5, outputTokens: 5 } };
+        },
+      }));
+      await holdEngine.llama.refresh();
+      const activeRunPromise = holdEngine.startTurn({ sessionId: sHold.id, agentId: agent.id, content: 'HOLD_LLAMA', wait: true });
+      await new Promise((r) => setTimeout(r, 80));
+      const sQueued = store.createSession({ agentId: agent.id, title: 'queued-20b' });
+      store.updateSession(sQueued.id, { modelPin: 'ollama_gpt_oss_20b' });
+      const queuedRun = await holdEngine.startTurn({ sessionId: sQueued.id, agentId: agent.id, content: 'Please swap to 20b', wait: false });
+      await new Promise((r) => setTimeout(r, 120));
+      holdEngine.stop(queuedRun.id);
+      gateResolve();
+      await activeRunPromise;
+      await new Promise((r) => setTimeout(r, 80));
+      expect(controlCalls.slice(beforeAbortControls)).not.toContain('/stop-llama');
+      expect(store.getRun(queuedRun.id)?.status).toBe('stopped');
+
+      // (d) Failed /stop-llama falls back cleanly to llama-server with coexistence warning
+      stopShouldFail = true;
+      llamaUp = true;
+      await engine.llama.refresh();
+      const sFail = store.createSession({ agentId: agent.id, title: 'swap-fail' });
+      store.updateSession(sFail.id, { modelPin: 'ollama_gpt_oss_20b' });
+      const failSwapRun = await engine.startTurn({ sessionId: sFail.id, agentId: agent.id, content: 'Try 20b when stop-llama fails', wait: true });
+      expect(failSwapRun.status).toBe('completed');
+      expect(failSwapRun.switched).toBe(true);
+      expect(failSwapRun.routingNote).toMatch(/gpt-oss:20b is too big to load in Ollama while llama-server holds the GPU/i);
+
+      store.close();
+    } finally {
+      if (prevUrl === undefined) delete process.env.LLAMA_FALLBACK_CONTROL_URL;
+      else process.env.LLAMA_FALLBACK_CONTROL_URL = prevUrl;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

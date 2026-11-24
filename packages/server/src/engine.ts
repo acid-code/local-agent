@@ -68,7 +68,7 @@ import { disabledRules } from './rules.js';
 import { CONNECTOR_TOOLS, disabledConnectorTools } from './connectors.js';
 import { memoryBrief, memoryFileTool, projectRules, proposeSkillTool, searchChatsTool, skillNudge } from './learning.js';
 import { cleanText, fallbackTitle, isNotice, needsTitle, parseTitle, titlePrompt } from './chat-titles.js';
-import { LlamaWatch, isLlamaServerProvider, isNonChatModel, isOllamaProvider, isUncensoredProvider } from './coexist.js';
+import { LlamaWatch, OLLAMA_SIDE_MAX_GIB, isLlamaServerProvider, isNonChatModel, isOllamaProvider, isUncensoredProvider, modelGiB } from './coexist.js';
 
 /** A run in one of these states can still use the answer to a secret request or approval. */
 const WAITING_RUN_STATUSES = new Set(['running', 'paused', 'awaiting_approval', 'awaiting_secret']);
@@ -89,8 +89,8 @@ export class Engine {
   private readonly heldLarge = new Map<string, string>();
   private readonly dwell = new Map<string, { modelId: string; previousId: string | null; until: number; explicit: boolean }>();
   residentLarge: string[] = [];
-  /** runId → which llama-server model that run is using. */
-  private readonly llamaLeases = new Map<string, 'qwen' | 'uncensored'>();
+  /** runId → which big GPU slot that run holds (llama-server or heavy Ollama). */
+  private readonly llamaLeases = new Map<string, 'qwen' | 'uncensored' | 'ollama-large'>();
   extraTools: Tool[] = [];
   /** Set by the routes once OCR is wired: reads an image file for the read_image_text tool. */
   ocrReader: ((fileId: string, mode: OcrMode, ownerId: string) => Promise<OcrResult>) | null = null;
@@ -126,14 +126,19 @@ export class Engine {
    * Runs on the same server share it (llama-server queues requests itself); a run that needs the other
    * server waits in line, visibly, instead of switching the GPU out from under a running chat.
    */
-  private async acquireLlamaLease(runId: string, kind: 'qwen' | 'uncensored', signal: AbortSignal): Promise<void> {
+  private async acquireLlamaLease(runId: string, kind: 'qwen' | 'uncensored' | 'ollama-large', signal: AbortSignal): Promise<void> {
     const mine = this.llamaLeases.get(runId);
     if (mine === kind) return;
     const others = () => [...this.llamaLeases.entries()].filter(([id, held]) => id !== runId && held !== kind);
     const queued = others().length > 0;
     if (queued) {
       const started = Date.now();
-      const label = kind === 'uncensored' ? 'the Qwen llama-server model' : 'the uncensored llama-server model';
+      const held = others()[0]?.[1];
+      const label = held === 'ollama-large'
+        ? 'a large Ollama model'
+        : held === 'uncensored'
+          ? 'the uncensored llama-server model'
+          : 'the Qwen llama-server model';
       const detail = `Waiting for ${label} to finish in another chat (queued).`;
       const waitInfo = { kind: 'queue', behind: label.replace(/^the /, ''), ahead: others().length, since: new Date(started).toISOString() };
       const live = this.liveStreams.get(runId) ?? { text: '', thinking: '', status: 'waiting' };
@@ -815,7 +820,11 @@ export class Engine {
     });
     this.checkpoint(run.id, cursor, 'Routed');
     this.rememberLarge(run.id, decision.modelId);
-    if (decision.unload.length) await this.unload(decision.unload);
+    const otherOllamaLarge = [...this.llamaLeases.entries()].some(([id, held]) => id !== run.id && held === 'ollama-large');
+    if (decision.unload.length && !otherOllamaLarge) {
+      await this.unload(decision.unload);
+      this.residentLarge = this.residentLarge.filter((n) => !decision.unload.includes(n));
+    }
     this.bus.publish({ type: 'step', runId: run.id, routing: decision });
   }
 
@@ -927,7 +936,11 @@ export class Engine {
       await this.ensureSomeModel(agent.id);
       const decision = this.choose(agent, current);
       current = this.store.updateRun(run.id, { cursor: { ...current.cursor, modelId: decision.modelId, routingReason: decision.reason, switched: decision.switched, reasoning: Boolean(decision.reasoning) }, modelId: decision.modelId, routingNote: decision.reason, switched: decision.switched })!;
-      if (decision.unload.length) await this.unload(decision.unload);
+      const otherOllamaLarge = [...this.llamaLeases.entries()].some(([id, held]) => id !== run.id && held === 'ollama-large');
+      if (decision.unload.length && !otherOllamaLarge) {
+        await this.unload(decision.unload);
+        this.residentLarge = this.residentLarge.filter((n) => !decision.unload.includes(n));
+      }
     }
     let model = this.store.getModel(current.cursor.modelId!);
     if (!model) throw new Error('Selected model is gone.');
@@ -957,13 +970,6 @@ export class Engine {
       built = await this.buildMessages(current, agent, model);
       this.bus.publish({ type: 'quota', runId: run.id, exhausted: true });
     }
-    const coexist = this.llama.blocks(model, this.store.getProvider(model.providerId) ?? undefined) ? this.llama.model() : undefined;
-    if (coexist) {
-      const reason = `Using ${coexist.name} on llama-server: ${model.name} is too big to load in Ollama while llama-server holds the GPU.`;
-      this.store.addLog('warn', reason, undefined, 'router');
-      this.store.updateRun(run.id, { cursor: { ...current.cursor, modelId: coexist.id, phase: 'model', switched: true, routingReason: reason }, modelId: coexist.id, switched: true, routingNote: reason });
-      return;
-    }
     const provider = this.provider(model);
     const providerRow = this.store.getProvider(model.providerId);
     // Big-model queue first (before the RAM lease and before any llama-server switch), so a waiting chat holds nothing.
@@ -979,13 +985,53 @@ export class Engine {
         return;
       }
     }
-    if (big) {
+    const viaOllama = this.viaOllama(model);
+    let swappedFromLlama = false;
+    if (this.llama.blocks(model, providerRow ?? undefined)) {
+      if (!this.llama.hasSwapControl()) {
+        const coexist = this.llama.model();
+        if (coexist) {
+          const reason = `Using ${coexist.name} on llama-server: ${model.name} is too big to load in Ollama while llama-server holds the GPU.`;
+          this.store.addLog('warn', reason, undefined, 'router');
+          this.store.updateRun(run.id, { cursor: { ...current.cursor, modelId: coexist.id, phase: 'model', switched: true, routingReason: reason }, modelId: coexist.id, switched: true, routingNote: reason });
+          return;
+        }
+      } else {
+        if (signal.aborted) throw new StopError();
+        this.rememberLarge(run.id, model.id);
+        await this.waitForLarge(run.id, model.name, signal);
+        await this.acquireLlamaLease(run.id, 'ollama-large', signal);
+        if (signal.aborted) throw new StopError();
+        const liveSwap = this.liveStreams.get(run.id) ?? { text: '', thinking: '', status: 'loading' };
+        liveSwap.status = 'loading';
+        liveSwap.detail = `Stopping llama-server to load ${model.name}…`;
+        this.liveStreams.set(run.id, liveSwap);
+        this.bus.publish({ type: 'status', runId: run.id, status: 'loading', detail: liveSwap.detail });
+        const stopped = await this.llama.stopAll();
+        if (!stopped) {
+          this.llamaLeases.delete(run.id);
+          const coexist = this.llama.model();
+          if (coexist) {
+            const reason = `Using ${coexist.name} on llama-server: ${model.name} is too big to load in Ollama while llama-server holds the GPU.`;
+            this.store.addLog('warn', reason, undefined, 'router');
+            this.store.updateRun(run.id, { cursor: { ...current.cursor, modelId: coexist.id, phase: 'model', switched: true, routingReason: reason }, modelId: coexist.id, switched: true, routingNote: reason });
+            return;
+          }
+        } else {
+          swappedFromLlama = true;
+        }
+      }
+    }
+    if (!swappedFromLlama && big) {
       this.rememberLarge(run.id, model.id);
       await this.waitForLarge(run.id, model.name, signal);
+      if (viaOllama) await this.acquireLlamaLease(run.id, 'ollama-large', signal);
     }
     if (providerRow && (isLlamaServerProvider(providerRow) || isUncensoredProvider(providerRow))) {
       const kind = isUncensoredProvider(providerRow) ? 'uncensored' : 'qwen';
       await this.acquireLlamaLease(run.id, kind, signal);
+      if (signal.aborted) throw new StopError();
+      await this.unloadHeavyOllama();
       if (kind === 'uncensored') await this.llama.switchToUncensored();
       else await this.llama.switchToQwen();
     }
@@ -1018,7 +1064,6 @@ export class Engine {
     const roleBudget = roleContextBudget(roleForCtx, model, { repoTask });
     let numCtx = model.local ? ollamaNumCtx(current.cursor.budgetOverride || roleBudget, settings.outputReserveTokens, model.contextWindow) : undefined;
     // llama-server and other external servers keep their model loaded themselves: no RAM admission, no Ollama load.
-    const viaOllama = this.viaOllama(model);
     const admitted = model.local && numCtx && viaOllama ? await this.admitLocal(current, model, numCtx, signal) : { lease: null, numCtx };
     if ('switchTo' in admitted) {
       this.store.addLog('warn', admitted.reason, undefined, 'router');
@@ -1725,14 +1770,24 @@ export class Engine {
       this.store.updateSession(session.id, { modelPin: null });
       picked = { ...picked, switched: true, reason: `The pinned model is gone. ${picked.reason}` };
     }
-    const pinnedId = session?.modelPin || run.cursor.messageModelId || null;
+    const pinnedId = session?.modelPin || run.cursor.messageModelId || (agent.routing === 'pinned' ? agent.modelId : null);
     if (pinnedId && picked.modelId !== pinnedId) {
       const pinnedModel = this.store.getModel(pinnedId);
       const pinnedProvider = pinnedModel ? this.store.getProvider(pinnedModel.providerId) ?? undefined : undefined;
       if (pinnedModel?.enabled && this.llama.blocks(pinnedModel, pinnedProvider)) {
-        const reason = `Using ${picked.modelName}: ${pinnedModel.name} is too big to load in Ollama while llama-server holds the GPU.`;
-        this.store.addLog('warn', reason, run.id, 'router');
-        picked = { ...picked, switched: true, reason };
+        if (this.llama.hasSwapControl()) {
+          picked = {
+            ...picked,
+            modelId: pinnedModel.id,
+            modelName: pinnedModel.name,
+            switched: false,
+            reason: `Pinned to ${pinnedModel.name} — swapping GPU from llama-server.`,
+          };
+        } else {
+          const reason = `Using ${picked.modelName}: ${pinnedModel.name} is too big to load in Ollama while llama-server holds the GPU.`;
+          this.store.addLog('warn', reason, run.id, 'router');
+          picked = { ...picked, switched: true, reason };
+        }
       }
     }
     const explicit = Boolean(session?.modelPin || run.cursor.messageModelId || /^\/(auto|model|smart)\b/i.test(text));
@@ -2868,6 +2923,37 @@ export class Engine {
         memory.calibrate(key, lease.bytes / memory.factor(key), loaded.sizeBytes);
       }
     } catch { /* calibration is best effort */ }
+  }
+
+  /** Unload heavy (> 4 GiB) Ollama models while preserving resident small sidecars (e.g. qwen3.5:4b, nomic-embed-text). */
+  private async unloadHeavyOllama(keepApiName?: string) {
+    const base = ollamaRoot();
+    const byName = new Map(this.store.listModels().map((m) => [m.apiName, m]));
+    const heavy = new Set<string>();
+    try {
+      const res = await this.fetchImpl(`${base}/api/ps`, { signal: AbortSignal.timeout(3000) });
+      if (res.ok) {
+        const body = await res.json() as { models?: Array<{ name?: string; model?: string; size?: number; size_vram?: number }> };
+        for (const item of body.models ?? []) {
+          const name = String(item.model || item.name || '').trim();
+          if (!name || name === keepApiName) continue;
+          const bytes = Number(item.size_vram || item.size || 0);
+          const row = byName.get(name);
+          const gib = row ? modelGiB(row) : (bytes > 0 ? bytes / 1024 ** 3 : modelGiB({ apiName: name, typicalQ4GiB: null }));
+          if (gib > OLLAMA_SIDE_MAX_GIB) heavy.add(name);
+        }
+      }
+    } catch { /* best-effort /api/ps lookup */ }
+    for (const name of this.residentLarge) {
+      if (!name || name === keepApiName) continue;
+      const row = byName.get(name);
+      if (!row || modelGiB(row) > OLLAMA_SIDE_MAX_GIB) heavy.add(name);
+    }
+    if (heavy.size) {
+      const names = [...heavy];
+      await this.unload(names);
+      this.residentLarge = this.residentLarge.filter((n) => !heavy.has(n));
+    }
   }
 
   private async unload(names: string[]) {

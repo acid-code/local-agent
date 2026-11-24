@@ -56,7 +56,21 @@ export class LlamaWatch {
   private checkedAt = 0;
   private pending: Promise<void> | null = null;
 
-  constructor(private readonly store: Store, private readonly fetchImpl: typeof fetch, private readonly ttlMs = 15_000) {}
+  constructor(
+    private readonly store: Store,
+    private readonly fetchImpl: typeof fetch,
+    private readonly ttlMs = 15_000,
+    private readonly swapControlEnabled?: boolean,
+  ) {}
+
+  hasSwapControl(): boolean {
+    return this.swapControlEnabled ?? Boolean(process.env.LLAMA_FALLBACK_CONTROL_URL?.trim());
+  }
+
+  markActive(active: boolean): void {
+    this.active = active;
+    this.checkedAt = Date.now();
+  }
 
   /** The enabled llama-server provider that has at least one enabled chat model. */
   provider(): ProviderRow | undefined {
@@ -82,15 +96,25 @@ export class LlamaWatch {
   }
 
   async switchToUncensored(): Promise<boolean> {
-    return this.callFallbackControl('/switch-uncensored');
+    const ok = await this.callFallbackControl('/switch-uncensored');
+    if (ok) this.markActive(true);
+    return ok;
   }
 
   async switchToQwen(): Promise<boolean> {
-    return this.callFallbackControl('/switch-qwen');
+    const ok = await this.callFallbackControl('/switch-qwen');
+    if (ok) this.markActive(true);
+    return ok;
+  }
+
+  async stopAll(): Promise<boolean> {
+    const ok = await this.callFallbackControl('/stop-llama', (body) => body?.ok === true && body?.stopped === true);
+    if (ok) this.markActive(false);
+    return ok;
   }
 
   /** POST to the host's llama fallback-control service, sending the shared token when one is configured. */
-  private async callFallbackControl(path: string): Promise<boolean> {
+  private async callFallbackControl(path: string, validate?: (body: Record<string, unknown> | null) => boolean): Promise<boolean> {
     const configured = process.env.LLAMA_FALLBACK_CONTROL_URL?.trim();
     const url = (configured || 'http://host.docker.internal:8082').replace(/\/$/, '');
     const token = process.env.LLAMA_FALLBACK_TOKEN?.trim();
@@ -100,7 +124,10 @@ export class LlamaWatch {
         headers: token ? { 'X-Fallback-Token': token } : undefined,
         signal: AbortSignal.timeout(180_000),
       });
-      return response.ok;
+      if (!response.ok) return false;
+      if (!validate) return true;
+      const body = await response.json().catch(() => null) as Record<string, unknown> | null;
+      return validate(body);
     } catch {
       return false;
     }
