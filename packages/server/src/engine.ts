@@ -1614,6 +1614,16 @@ export class Engine {
       this.store.updateSession(session.id, { modelPin: null });
       picked = { ...picked, switched: true, reason: `The pinned model is gone. ${picked.reason}` };
     }
+    const pinnedId = session?.modelPin || run.cursor.messageModelId || null;
+    if (pinnedId && picked.modelId !== pinnedId) {
+      const pinnedModel = this.store.getModel(pinnedId);
+      const pinnedProvider = pinnedModel ? this.store.getProvider(pinnedModel.providerId) ?? undefined : undefined;
+      if (pinnedModel?.enabled && this.llama.blocks(pinnedModel, pinnedProvider)) {
+        const reason = `Using ${picked.modelName}: ${pinnedModel.name} is too big to load in Ollama while llama-server holds the GPU.`;
+        this.store.addLog('warn', reason, run.id, 'router');
+        picked = { ...picked, switched: true, reason };
+      }
+    }
     const explicit = Boolean(session?.modelPin || run.cursor.messageModelId || /^\/(auto|model|smart)\b/i.test(text));
     const held = session ? this.dwell.get(session.id) : undefined;
     if (session && held && !held.explicit && !explicit && !picked.escalated && held.until > Date.now() && held.previousId === picked.modelId && held.modelId !== picked.modelId) {

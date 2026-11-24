@@ -90,6 +90,46 @@ describe('llama-server and Ollama coexistence', () => {
     }
   });
 
+  it('surfaces a clear coexistence warning when a pinned Ollama model is blocked by llama-server', async () => {
+    const { dir, store, health } = setup(true);
+    try {
+      const used: string[] = [];
+      const engine = new Engine(store, new Bus(), new DockerCtl('/nonexistent.sock'), new VectorIndex(store.db), new Vault(store, Buffer.alloc(32, 7)), 'inst_test', health, (m) => {
+        used.push(m.apiName);
+        return new ScriptedProvider([{ text: 'Running on llama-server.' }]);
+      });
+      await engine.llama.refresh();
+      const agent = store.createAgent({
+        name: 'Researcher', description: 'Researches', systemPrompt: 'You are Researcher.', modelId: null,
+        routing: 'auto', strategy: 'rolling', toolAllowlist: [], memoryEnabled: false, workspacePath: dir,
+      });
+      const session = store.createSession({ agentId: agent.id, title: 'pinned-blocked' });
+      store.updateSession(session.id, { modelPin: 'ollama_gpt_oss_20b', activeModelId: 'llama_qwen3_6' });
+      const run = await engine.startTurn({ sessionId: session.id, agentId: agent.id, content: 'Explain in detail how the memory subsystem, scheduling pipeline, and caching interact across all modules', wait: true });
+      expect(used).toContain('qwen3.6-35b-a3b');
+      expect(used).not.toContain('gpt-oss:20b');
+      expect(run.switched).toBe(true);
+      expect(run.routingNote).toMatch(/gpt-oss:20b is too big to load in Ollama while llama-server holds the GPU/i);
+    } finally {
+      store.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('skips non-tool light models in pickHelperModel and falls back to the parent model', async () => {
+    const { dir, store, health } = setup(true);
+    try {
+      const engine = new Engine(store, new Bus(), new DockerCtl('/nonexistent.sock'), new VectorIndex(store.db), new Vault(store, Buffer.alloc(32, 7)), 'inst_test', health, () => new ScriptedProvider([{ text: 'ok' }]));
+      const cur = store.getSettings();
+      store.saveSettings({ ...cur, toolSupport: { ...cur.toolSupport, 'qwen3:1.7b': false } }, 'test', cur);
+      expect(engine.autonomy.pickHelperModel('fast', undefined, 'llama_qwen3_6')?.id).toBe('llama_qwen3_6');
+      expect(engine.autonomy.pickHelperModel('fast')).toBeUndefined();
+    } finally {
+      store.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('keeps the llama-server prompt cache on', async () => {
     let body: Record<string, unknown> = {};
     const fakeFetch: typeof fetch = async (_url, init) => {

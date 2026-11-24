@@ -79,14 +79,14 @@ describe('persistence, networking, models, memory, and agent fixes', () => {
     void available;
   });
 
-  it('uses per-role context lengths (16-32K default, 64-128K for coder on repo tasks) and non-Qwen coder default', () => {
+  it('uses per-role context lengths (24-32K default, 64-128K for coder on repo tasks) and non-Qwen coder default', () => {
     expect(DEFAULT_AUTO_MAP.coder).toBe('gpt-oss:20b');
     const ryzen = MACHINE_PROFILES.find((p) => p.id === 'ryzen-780m-48g')!;
     expect(ryzen.roles.find((r) => r.role === 'coder')?.model).toBe('gpt-oss:20b');
     expect(ryzen.runtime.host.join('\n')).toContain('Ubuntu Server 26.04 LTS');
 
     const model = { local: true, contextWindow: 131_072, practicalBudget: 32_768, sizeClass: 'large' as const };
-    expect(roleContextBudget('fast', model)).toBe(16_384);
+    expect(roleContextBudget('fast', model)).toBe(24_576);
     expect(roleContextBudget('main', model)).toBe(32_768);
     expect(roleContextBudget('coder', model, { repoTask: false })).toBe(32_768);
     expect(roleContextBudget('coder', model, { repoTask: true })).toBe(65_536);

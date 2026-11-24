@@ -152,14 +152,16 @@ export class Autonomy {
     if (tier !== 'fast') return parentModel && isBig(parentModel) ? parentModel : undefined;
     const settings = this.store.getSettings();
     const fastWanted = (settings.autoModels?.fast || '').trim().toLowerCase();
+    const unsupported = new Set(Object.entries(settings.toolSupport || {}).filter(([, ok]) => ok === false).map(([name]) => name.toLowerCase()));
     const isLightLocal = (m: ModelRow) => {
       if (!m.local) return false;
+      if (unsupported.has(m.apiName.toLowerCase()) || unsupported.has(m.name.toLowerCase())) return false;
       const p = providers.get(m.providerId);
       if (p && isOllamaProvider(p)) return modelGiB(m) <= OLLAMA_SIDE_MAX_GIB;
       return m.sizeClass === 'small' && modelGiB(m) <= OLLAMA_SIDE_MAX_GIB;
     };
     const light = usable.filter(isLightLocal);
-    if (!light.length) return undefined;
+    if (!light.length) return parentModel && isBig(parentModel) ? parentModel : undefined;
     if (fastWanted) {
       const named = light.find((m) => m.apiName.toLowerCase() === fastWanted || m.name.toLowerCase() === fastWanted || m.apiName.toLowerCase().startsWith(fastWanted));
       if (named) return named;
