@@ -191,7 +191,7 @@ export class Engine {
   /** Timers/triggers an agent manages itself, and background helpers. */
   readonly autonomy: Autonomy;
 
-  async startTurn(input: { sessionId: string; agentId: string; content?: string; imageUrl?: string; modelId?: string; parentRunId?: string | null; depth?: number; wait?: boolean; background?: boolean; cursorExtras?: Partial<RunCursor>; onDone?: (run: RunRow) => void }) {
+  async startTurn(input: { sessionId: string; agentId: string; content?: string; imageUrl?: string; modelId?: string; parentRunId?: string | null; depth?: number; wait?: boolean; background?: boolean; planFirst?: boolean; cursorExtras?: Partial<RunCursor>; onDone?: (run: RunRow) => void }) {
     const session = this.store.getSession(input.sessionId);
     const agent = this.store.getAgent(input.agentId);
     if (!session || !agent) throw new Error('Chat or persona is missing.');
@@ -219,6 +219,7 @@ export class Engine {
     if (command?.unpin && !command.rest) commandAck = 'Back on Auto.';
     const imageCommand = input.content ? /^\/(?:image|img|draw)\s+([\s\S]+)/i.exec(input.content.trim()) : null;
     if (command?.smart && !command.rest && !command.pinName) commandAck = 'Add the question after /smart. The next ordinary message goes back to the main model.';
+    if (command?.plan && !command.rest && !command.pinName && !commandAck) commandAck = 'Add your task after /plan (or toggle Plan first in the composer) to start in read-only Plan mode.';
     let userMessageId: string | undefined;
     if (input.content) {
       const message = this.store.insertMessage({
@@ -230,7 +231,22 @@ export class Engine {
       }
       userMessageId = message.id;
     }
-    const cursor: RunCursor = { phase: 'route', turn: 0, userMessageId, messageModelId: input.modelId, depth: input.depth ?? 0, configVersion: this.store.getSettings().version, agentUpdatedAt: agent.updatedAt, commandAck, pinMiss, imagePrompt: imageCommand?.[1]?.trim() || undefined, background: input.background || undefined, ...input.cursorExtras };
+    const startInPlan = Boolean((input.planFirst || command?.plan) && !commandAck && !input.parentRunId && !input.cursorExtras?.stage);
+    const cursor: RunCursor = {
+      phase: 'route',
+      turn: 0,
+      userMessageId,
+      messageModelId: input.modelId,
+      depth: input.depth ?? 0,
+      configVersion: this.store.getSettings().version,
+      agentUpdatedAt: agent.updatedAt,
+      commandAck,
+      pinMiss,
+      imagePrompt: imageCommand?.[1]?.trim() || undefined,
+      background: input.background || undefined,
+      ...(startInPlan ? { stage: 'plan' as const, workPhase: 'planning' as const, focus: 'Investigating in plan mode', enteredPlanViaTool: true } : {}),
+      ...input.cursorExtras,
+    };
     const run = this.store.createRun({ sessionId: session.id, agentId: agent.id, parentRunId: input.parentRunId, configVersion: cursor.configVersion ?? 1, cursor });
     const task = this.execute(run.id);
     if (input.onDone) void task.then(() => { const done = this.store.getRun(run.id); if (done) input.onDone!(done); }, () => { const done = this.store.getRun(run.id); if (done) input.onDone!(done); });
@@ -2013,7 +2029,7 @@ export class Engine {
         ? '\n\nPLAN MODE (read-only): investigate with read_file, grep, glob, list_dir, web_search, or read-only research helpers. File edits and mutating commands are locked. Once you know the exact files and steps, call exit_plan_mode with your plan and acceptance checks.'
         : '\n\nYou are planning a change to a shared repo. Pull it with repo_sync, summarize what changed, and consult the coder persona with that summary if one exists. Search the web when the task depends on current facts. Save the plan with the plan tool. Do not edit files yet.'
       : run.cursor.stage === 'implement'
-        ? '\n\nEXECUTE STAGE: the plan is saved and editing tools are unlocked. Work through the plan steps methodically, verify with tests or checks (or verify helpers), then summarize what changed, what was verified, and main points to keep in mind for the future.'
+        ? '\n\nEXECUTE STAGE: the plan is saved and editing tools are unlocked. Work through the plan steps methodically (marking each step doing and done with evidence via plan({ itemId: "1", status: "done", evidence: "..." })), spawn research/verify/coder helpers when helpful, verify your checks, then summarize what changed, what was verified, and main points to keep in mind for the future.'
         : '';
     const skillNote = skillCatalog(this.store, agent.id, user?.content ?? '');
     const hasKb = this.hasKnowledge(agent.id);
@@ -3141,7 +3157,7 @@ function senderFor(store: Store, fallback: string, call: ToolCall) {
 
 function stageFor(store: Store, run: RunRow): 'plan' | 'implement' | undefined {
   if ((run.cursor.depth ?? 0) > 0) return undefined;
-  if (run.cursor.stage === 'implement') return 'implement';
+  if (run.cursor.stage === 'plan' || run.cursor.stage === 'implement') return run.cursor.stage;
   const session = store.getSession(run.sessionId);
   const text = [...store.listMessages(run.sessionId)].reverse().find((message) => message.role === 'user')?.content ?? '';
   const match = matchRepos(text, listSharedRepos(store));

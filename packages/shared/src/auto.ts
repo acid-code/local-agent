@@ -56,6 +56,7 @@ export interface ChatCommand {
   pinName?: string;
   unpin: boolean;
   smart: boolean;
+  plan?: boolean;
 }
 
 export interface AutoDecision {
@@ -75,6 +76,7 @@ export function readChatCommand(text: string): ChatCommand {
   let pinName: string | undefined;
   let unpin = false;
   let smart = false;
+  let plan = false;
   const pin = rest.match(/^\/model\s+(\S+)\s*/i);
   if (pin) {
     pinName = pin[1];
@@ -83,12 +85,21 @@ export function readChatCommand(text: string): ChatCommand {
     unpin = true;
     rest = rest.replace(/^\/auto\b\s*/i, '').trim();
   }
-  if (/^\/smart\b/i.test(rest)) {
-    smart = true;
-    rest = rest.replace(/^\/smart\b\s*/i, '').trim();
+  while (true) {
+    if (/^\/smart\b/i.test(rest)) {
+      smart = true;
+      rest = rest.replace(/^\/smart\b\s*/i, '').trim();
+      continue;
+    }
+    if (/^\/plan\b/i.test(rest)) {
+      plan = true;
+      rest = rest.replace(/^\/plan\b\s*/i, '').trim();
+      continue;
+    }
+    break;
   }
   if (/use the smart model/i.test(text)) smart = true;
-  return { rest, pinName, unpin, smart };
+  return { rest, pinName, unpin, smart, plan };
 }
 
 export function matchAutoModel(models: AutoCandidate[], wanted: string): AutoCandidate | undefined {

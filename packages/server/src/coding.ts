@@ -333,10 +333,22 @@ export const CODING_TOOLS: Tool[] = [
         const listed = (plan?.items ?? []).map((item, index) => `${index + 1}. [${item.status}] ${item.text}`).join('\n') || 'Plan cleared.';
         return checks.length ? `${listed}\nAcceptance checks (verified before you finish):\n${checks.map((item) => `- ${item}`).join('\n')}` : listed;
       }
-      if (args.itemId) {
+      if (args.itemId !== undefined && args.itemId !== null && String(args.itemId).trim()) {
+        const key = String(args.itemId).trim();
+        const current = readPlan(ctx.store, sessionId);
+        if (!current?.items.length) throw new Error('No plan yet. Save steps with items first (or call exit_plan_mode).');
+        const index = /^\d+$/.test(key) ? Number(key) - 1 : -1;
+        const target = current.items.find((item) => item.id === key) ?? (index >= 0 ? current.items[index] : undefined);
+        if (!target) {
+          const listed = current.items.map((item, i) => `${i + 1}. [${item.status}] ${item.text}`).join('\n');
+          throw new Error(`No plan item "${key}". Current plan:\n${listed}`);
+        }
         const note = args.evidence !== undefined ? String(args.evidence) : args.note !== undefined ? String(args.note) : undefined;
-        updatePlanItem(ctx.store, String(args.itemId), { status: args.status ? String(args.status) : undefined, text: args.text ? String(args.text) : undefined, note });
-        return 'Plan item updated.';
+        updatePlanItem(ctx.store, target.id, { status: args.status ? String(args.status) : undefined, text: args.text ? String(args.text) : undefined, note });
+        const updated = readPlan(ctx.store, sessionId);
+        return updated?.items.length
+          ? updated.items.map((item, i) => `${i + 1}. [${item.status}] ${item.text}${item.note ? ` (${item.note})` : ''}`).join('\n')
+          : 'Plan item updated.';
       }
       const plan = readPlan(ctx.store, sessionId);
       return plan ? plan.items.map((item) => `- [${item.status}] ${item.text}`).join('\n') : 'No plan yet.';

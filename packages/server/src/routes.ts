@@ -1220,7 +1220,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const session = store.getSession(id);
     if (!session) throw http(404, 'Chat not found.');
     const body = parse(z.object({
-      content: z.string().min(1), agentId: z.string().optional(), modelId: z.string().optional(), imageUrl: z.string().optional(),
+      content: z.string().min(1), agentId: z.string().optional(), modelId: z.string().optional(), imageUrl: z.string().optional(), planFirst: z.boolean().optional(),
       mentions: z.array(z.union([
         z.object({ kind: z.literal('path'), root: z.string().min(1), path: z.string(), start: z.number().int().positive().optional(), end: z.number().int().positive().optional() }),
         z.object({ kind: z.literal('file'), id: z.string().min(1), ocr: z.enum(['auto', 'printed', 'handwriting']).optional() }),
@@ -1253,7 +1253,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       }
     }
     const content = context ? `${body.content}${CONTEXT_MARK}${context}` : body.content;
-    const run = await engine.startTurn({ sessionId: id, agentId, content: vault.redact(content), imageUrl: body.imageUrl, modelId });
+    const run = await engine.startTurn({ sessionId: id, agentId, content: vault.redact(content), imageUrl: body.imageUrl, modelId, planFirst: body.planFirst });
     return { run, offers };
   });
   app.get('/api/sessions/:id/plan', async (req) => { mustOwn(store, req, 'session', (req.params as { id: string }).id, 'Chat not found.'); return { plan: readPlan(store, (req.params as { id: string }).id) }; });

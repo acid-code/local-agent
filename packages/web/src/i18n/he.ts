@@ -1625,4 +1625,9 @@ export const he: Record<string, string> = {
   "No recent browse steps yet.": "עדיין אין שלבי גלישה אחרונים.",
   "Done": "הושלם",
   "Failed": "נכשל",
+  "Plan first": "תכנון תחילה",
+  "Plan first on": "מצב תכנון תחילה פעיל",
+  "Plan first ON — next message starts locked in read-only Plan mode before editing": "תכנון תחילה פעיל — ההודעה הבאה תתחיל במצב תכנון לקריאה בלבד לפני עריכות",
+  "Plan first — investigate read-only and save a plan before editing (or prefix with /plan)": "תכנון תחילה — חקירה לקריאה בלבד ושמירת תוכנית לפני עריכה (או התחל ב-/plan)",
+  "Describe the task to plan first (read-only research before edits)…": "תאר את המשימה לתכנון תחילה (חקירה לקריאה בלבד לפני עריכות)…",
 };

@@ -5,7 +5,7 @@ import { createPortal } from 'react-dom';
 import { Menu as DropMenu } from '../components/ui';
 import { ModelPicker, useUsableModels } from '../lib/models';
 import { browserDictationSupported, startDictation } from '../lib/dictation';
-import { Archive, ArrowLeft, ScanText, AtSign, Info, Layers, Brain, Check, ChevronDown, Code2, Copy, Download, Eye, FileText, Folder, FolderGit2, GitBranch, Headphones, ListTree, Menu, MessageSquare, MessageSquarePlus, Pin, PinOff, Plus, Search, Mic, PanelRight, Paperclip, Pencil, Quote, RotateCcw, Send, Share, Square, Trash2, Volume2, Wrench, X } from 'lucide-react';
+import { Archive, ArrowLeft, ScanText, AtSign, Info, Layers, ListChecks, Brain, Check, ChevronDown, Code2, Copy, Download, Eye, FileText, Folder, FolderGit2, GitBranch, Headphones, ListTree, Menu, MessageSquare, MessageSquarePlus, Pin, PinOff, Plus, Search, Mic, PanelRight, Paperclip, Pencil, Quote, RotateCcw, Send, Share, Square, Trash2, Volume2, Wrench, X } from 'lucide-react';
 import { CiteContext, type CiteHandlers } from '../components/Markdown';
 import { FileViewer, type QuotePick, type ViewerSource } from '../components/FileViewer';
 import { MentionPicker, type MentionPick } from '../components/MentionPicker';
@@ -95,6 +95,7 @@ export function Chat() {
   const { models: usable, all: models, loaded: modelsLoaded } = modelState;
   const [modelPin, setModelPin] = useState<string | null>(null);
   const [effort, setEffort] = useState<ReasoningEffort>('auto');
+  const [planFirst, setPlanFirst] = useState(false);
   const [loadingNote, setLoadingNote] = useState('');
   // What a waiting run waits for: the large-model queue or RAM (see waitStateOf).
   const [waitInfo, setWaitInfo] = useState<unknown>(null);
@@ -723,9 +724,10 @@ export function Chat() {
       }
       return;
     }
+    const sendPlanFirst = planFirst;
     const payloadMentions = sentMentions.map((m) => m.kind === 'file' ? { kind: 'file' as const, id: m.id, ocr: ocrMode !== 'off' && IMAGE_NAME.test(m.label) ? ocrMode : undefined } : { kind: 'path' as const, root: m.root, path: m.path, start: m.start, end: m.end });
     if (payloadMentions.some((m) => m.kind === 'file' && m.ocr)) setLoadingNote(t('Reading the text in the photo…'));
-    if (override === undefined) { setDraft(''); setQuotes([]); setMentions([]); }
+    if (override === undefined) { setDraft(''); setQuotes([]); setMentions([]); setPlanFirst(false); }
     setRunError(null);
     setThinking('');
     resetLiveMetrics();
@@ -733,11 +735,11 @@ export function Chat() {
     const agentId = sessions.find((session) => session.id === target)?.agentId || agents[0]?.id;
     let result: { run: { id: string }; offers: Offer[] };
     try {
-      result = await post<{ run: { id: string }; offers: Offer[] }>(`/api/sessions/${target}/messages`, { content, agentId, mentions: payloadMentions.length ? payloadMentions : undefined });
+      result = await post<{ run: { id: string }; offers: Offer[] }>(`/api/sessions/${target}/messages`, { content, agentId, planFirst: sendPlanFirst || undefined, mentions: payloadMentions.length ? payloadMentions : undefined });
     } catch (error) {
       // A reply is still running (409) or the model choice was refused (400). Keep the draft.
       setMessages((value) => value.filter((message) => message.id !== 'local'));
-      if (override === undefined) { setDraft(typed); setQuotes(sentQuotes); setMentions(sentMentions); }
+      if (override === undefined) { setDraft(typed); setQuotes(sentQuotes); setMentions(sentMentions); setPlanFirst(sendPlanFirst); }
       toast(t('Not sent: {0} Your text is still in the box.', [errorText(error, 'Could not send.')]), 'error');
       return;
     }
@@ -1407,7 +1409,7 @@ export function Chat() {
                 )}
               </div>
             )}
-            <textarea ref={input} dir="auto" rows={1} spellCheck={true} autoCorrect="on" autoCapitalize="sentences" value={draft} aria-label={t('Message')} placeholder={active ? t('Steer the active agent without stopping it…') : mode === 'code' ? t('Ask for a plan, then an edit…') : t('Message')} onChange={(event) => {
+            <textarea ref={input} dir="auto" rows={1} spellCheck={true} autoCorrect="on" autoCapitalize="sentences" value={draft} aria-label={t('Message')} placeholder={active ? t('Steer the active agent without stopping it…') : planFirst ? t('Describe the task to plan first (read-only research before edits)…') : mode === 'code' ? t('Ask for a plan, then an edit…') : t('Message')} onChange={(event) => {
               const value = event.target.value;
               setDraft(value);
               const upto = value.slice(0, event.target.selectionStart ?? value.length);
@@ -1459,6 +1461,17 @@ export function Chat() {
                   />
                 );
               })()}
+              <button
+                type="button"
+                className={planFirst ? 'pill plan-toggle on' : 'pill plan-toggle'}
+                aria-pressed={planFirst}
+                aria-label={planFirst ? t('Plan first on') : t('Plan first')}
+                title={planFirst ? t('Plan first ON — next message starts locked in read-only Plan mode before editing') : t('Plan first — investigate read-only and save a plan before editing (or prefix with /plan)')}
+                onClick={() => setPlanFirst((v) => !v)}
+              >
+                <ListChecks size={14} aria-hidden />
+                <span className="menu-trigger-text">{t('Plan first')}</span>
+              </button>
               <ContextRing
                 breakdown={breakdown}
                 busy={Boolean(active)}

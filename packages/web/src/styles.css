@@ -2374,7 +2374,8 @@ button.state-card:hover, a.state-card:hover { background: var(--bg-3); }
 :root[data-scheme="dark"] .chat.v2 .composer-bar .icon-btn.primary-fill { color: #0e0f11; }
 .chat.v2 .composer-bar .icon-btn.primary-fill:disabled { background: var(--bg-3); color: var(--faint); opacity: 1; }
 /* "On" is a selected state, not an error: tint with the accent, not coral. */
-.icon-btn.on, .chat.v2 .thread-head .icon-btn.on, .chat.v2 .composer-bar .icon-btn[aria-pressed="true"] {
+.icon-btn.on, .chat.v2 .thread-head .icon-btn.on, .chat.v2 .composer-bar .icon-btn[aria-pressed="true"],
+.chat.v2 .composer-bar .pill.on, .chat.v2 .composer-bar .pill[aria-pressed="true"] {
   color: var(--brass); background: rgba(var(--brass-rgb), 0.14); border-color: rgba(var(--brass-rgb), 0.35);
 }
 .chat.v2 .composer-bar .pill,

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { ChatMessage, ToolCall } from '@local-agent/shared';
+import { readChatCommand, type ChatMessage, type ToolCall } from '@local-agent/shared';
 import { buildApp } from '../src/app.js';
 import { readPlan } from '../src/coding.js';
 import type { CompletionRequest, ModelProvider } from '../src/providers.js';
@@ -197,6 +197,109 @@ describe('wave 2 plan-execute guardrails & auto-effort', () => {
       const msgs2 = built.store.listMessages(built.session.id).filter((m) => m.role === 'tool' && m.runId === run2.id);
       // s3 is count 1 again (not count 2), so no [thrash] nudge
       expect(msgs2.find((m) => m.toolCallId === 's3')?.content).not.toMatch(/\[thrash\]/);
+    } finally {
+      await built.app.close();
+    }
+  });
+
+  it('parses /plan commands and rejects bare /plan without calling the model', async () => {
+    expect(readChatCommand('/plan audit routing')).toEqual({
+      rest: 'audit routing',
+      pinName: undefined,
+      unpin: false,
+      smart: false,
+      plan: true,
+    });
+    expect(readChatCommand('/smart /plan check engine')).toMatchObject({ smart: true, plan: true, rest: 'check engine' });
+    expect(readChatCommand('/plan')).toMatchObject({ plan: true, rest: '' });
+
+    const built = await setup();
+    try {
+      const before = built.provider.requests.length;
+      const run = await built.engine.startTurn({
+        sessionId: built.session.id,
+        agentId: built.agent.id,
+        content: '/plan',
+        wait: true,
+      });
+      expect(run.status).toBe('completed');
+      expect(built.provider.requests.length).toBe(before);
+      expect(built.store.listMessages(built.session.id).at(-1)?.content).toMatch(/Add your task after \/plan/i);
+    } finally {
+      await built.app.close();
+    }
+  });
+
+  it('starts locked in read-only Plan mode from Turn 0 with planFirst HTTP flag, unlocks on exit_plan_mode, and updates 1-based plan items', async () => {
+    const built = await setup();
+    const chatSession = built.store.createSession({ agentId: built.agent.id, ownerId: built.agent.ownerId });
+    try {
+      built.provider.steps = [
+        { toolCalls: [call('b1', 'write_file', { path: 'target.txt', content: 'early write' })] },
+        { toolCalls: [call('ex1', 'exit_plan_mode', { steps: ['Inspect target', 'Apply patch'], checks: ['`npm test` passes'], summary: 'Safe change' })] },
+        { toolCalls: [call('p1', 'plan', { itemId: '1', status: 'done', evidence: 'Inspected target.txt' })] },
+        { toolCalls: [call('p_bad', 'plan', { itemId: '99', status: 'done', evidence: 'Invalid index' })] },
+        { toolCalls: [call('p2', 'plan', { itemId: '2', status: 'done', evidence: 'Applied patch cleanly' })] },
+        { text: 'Plan executed and verified.' },
+      ];
+
+      const postRes = await built.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${chatSession.id}/messages`,
+        cookies: built.cookies,
+        payload: { content: 'Audit target.txt and plan the fix', planFirst: true },
+      });
+      expect(postRes.statusCode).toBe(200);
+      const postedRun = (postRes.json() as { run: { id: string } }).run;
+
+      const until = Date.now() + 8000;
+      while (Date.now() < until) {
+        const cur = built.store.getRun(postedRun.id);
+        if (cur && ['completed', 'failed'].includes(cur.status)) break;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+
+      // Turn 0 ran in read-only Plan mode at high effort, with exit_plan_mode offered and write_file blocked.
+      expect(built.provider.requests[0]!.effort).toBe('high');
+      expect(built.provider.requests[0]!.think).toBe(true);
+      expect(built.provider.requests[0]!.toolNames).toContain('exit_plan_mode');
+      expect(built.provider.requests[0]!.toolNames).not.toContain('write_file');
+
+      const toolMsgs = built.store.listMessages(chatSession.id).filter((m) => m.role === 'tool' && m.runId === postedRun.id);
+      expect(toolMsgs.find((m) => m.toolCallId === 'b1')?.content).toMatch(/Blocked by plan mode \(read-only\)/);
+      expect(toolMsgs.find((m) => m.toolCallId === 'p1')?.content).toMatch(/1\. \[done\] Inspect target \(Inspected target\.txt\)/);
+      expect(toolMsgs.find((m) => m.toolCallId === 'p_bad')?.content).toMatch(/No plan item "99"/);
+
+      const finalPlan = readPlan(built.store, chatSession.id);
+      expect(finalPlan?.items.map((i) => i.status)).toEqual(['done', 'done']);
+      expect(finalPlan?.items[0]?.note).toBe('Inspected target.txt');
+    } finally {
+      await built.app.close();
+    }
+  });
+
+  it('starts locked in read-only Plan mode on Turn 0 when prefixed with /plan', async () => {
+    const built = await setup();
+    const chatSession = built.store.createSession({ agentId: built.agent.id, ownerId: built.agent.ownerId });
+    try {
+      built.provider.steps = [
+        { toolCalls: [call('b2', 'apply_patch', { path: 'target.txt', search: 'alpha', replace: 'ALPHA' })] },
+        { toolCalls: [call('ex2', 'exit_plan_mode', { steps: ['Patch target.txt'], summary: 'Patch safely' })] },
+        { toolCalls: [call('ok2', 'apply_patch', { path: 'target.txt', search: 'alpha', replace: 'ALPHA' }), call('pd2', 'plan', { itemId: '1', status: 'done', evidence: 'Patched alpha -> ALPHA' })] },
+        { text: 'Patched after /plan.' },
+      ];
+      const run = await built.engine.startTurn({
+        sessionId: chatSession.id,
+        agentId: built.agent.id,
+        content: '/plan Refactor target.txt carefully',
+        wait: true,
+      });
+      expect(run.status).toBe('completed');
+      expect(built.provider.requests[0]!.toolNames).toContain('exit_plan_mode');
+      expect(built.provider.requests[0]!.toolNames).not.toContain('apply_patch');
+      const toolMsgs = built.store.listMessages(chatSession.id).filter((m) => m.role === 'tool' && m.runId === run.id);
+      expect(toolMsgs.find((m) => m.toolCallId === 'b2')?.content).toMatch(/Blocked by plan mode \(read-only\)/);
+      expect(fs.readFileSync(path.join(built.agent.workspacePath, 'target.txt'), 'utf8')).toContain('ALPHA');
     } finally {
       await built.app.close();
     }
