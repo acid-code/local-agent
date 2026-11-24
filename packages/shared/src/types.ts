@@ -64,6 +64,8 @@ export interface RunCursor {
   failStreak?: { key: string; count: number };
   /** True when the model entered plan mode via enter_plan_mode rather than workshop stage transitions. */
   enteredPlanViaTool?: boolean;
+  /** Isolated git worktree path assigned to a coder helper run. */
+  worktreePath?: string;
   /** User steering queued while the run is active. It changes the next model step without restarting or stopping work. */
   steering?: { id: string; content: string };
   /** Recovery rounds after a reply claimed success over a failed tool call, and the note sent back to the model. */

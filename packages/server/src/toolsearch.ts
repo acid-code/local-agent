@@ -9,7 +9,7 @@ import type { Tool } from './tools.js';
 /** Essentials every persona keeps on its menu when they are allowed at all. */
 export const CORE_TOOLS = [
   'read_file', 'write_file', 'create_file', 'list_dir', 'grep', 'glob', 'shell', 'git', 'web_search', 'web_fetch',
-  'request_secret', 'read_output', 'kb_search', 'load_skill', 'tasks', 'enter_plan_mode', 'exit_plan_mode', 'think', 'set_focus', 'time_now', 'memory_file',
+  'request_secret', 'read_output', 'kb_search', 'load_skill', 'tasks', 'enter_plan_mode', 'think', 'set_focus', 'time_now', 'memory_file',
   'spawn_agent', 'helpers', 'share_file', 'find_tools',
 ];
 

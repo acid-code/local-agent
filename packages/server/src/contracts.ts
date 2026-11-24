@@ -51,20 +51,20 @@ const toolSchemas: Record<string, z.ZodTypeAny> = {
   tasks: z.object({
     action: z.enum(['set', 'update', 'list']),
     items: z.array(z.string().min(1)).max(30).optional(),
-    checks: z.array(z.string().min(1)).max(10).optional().describe('Optional acceptance checks verified before finishing.'),
+    checks: z.array(z.string().min(1)).max(10).optional(),
     item: z.coerce.number().int().min(1).optional(),
     status: z.enum(['pending', 'doing', 'done', 'blocked']).optional(),
     evidence: z.string().optional(),
     note: z.string().optional(),
   }),
   enter_plan_mode: z.object({
-    goal: z.string().optional().describe('What you are investigating or planning.'),
-    reason: z.string().optional().describe('Why planning first helps.'),
+    goal: z.string().optional(),
+    reason: z.string().optional(),
   }),
   exit_plan_mode: z.object({
-    steps: z.array(z.string().min(1)).min(1).max(20).describe('Ordered imperative steps for the plan checklist.'),
-    checks: z.array(z.string().min(1)).max(10).optional().describe('Optional 1-5 acceptance checks (put commands in backticks) to verify before finishing.'),
-    summary: z.string().optional().describe('Brief 1-2 sentence summary of the approach.'),
+    steps: z.array(z.string().min(1)).min(1).max(20),
+    checks: z.array(z.string().min(1)).max(10).optional(),
+    summary: z.string().optional(),
   }),
   git: z.object({
     action: z.enum(['status', 'diff', 'log', 'fetch', 'branches', 'show', 'branch', 'checkout', 'commit', 'pull', 'push', 'force-push', 'revert', 'open_pr']),
@@ -125,6 +125,22 @@ const toolSchemas: Record<string, z.ZodTypeAny> = {
   }),
   web_fetch: z.object({ url: z.string().min(1), include_scripts: z.boolean().optional() }),
   request_secret: z.object({ name: z.string().min(1), reason: z.string().min(1), scope: z.string().optional() }),
+  spawn_agent: z.object({
+    task: z.string().optional().describe('Concrete mission.'),
+    role: z.enum(['research', 'verify', 'coder', 'general']).optional(),
+    goal: z.string().optional(),
+    scope: z.string().optional(),
+    done_when: z.string().optional(),
+    why: z.string().optional(),
+    tier: z.enum(['fast', 'main', 'auto']).optional(),
+    model: z.string().optional(),
+    wait: z.boolean().optional(),
+    persona: z.string().optional(),
+    tools: z.array(z.string()).optional(),
+    max_steps: z.coerce.number().optional(),
+    timeout_minutes: z.coerce.number().optional(),
+    cli: z.string().optional(),
+  }),
 };
 
 export function personasDir() {

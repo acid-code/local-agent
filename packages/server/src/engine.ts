@@ -1579,11 +1579,14 @@ export class Engine {
         runId: run.id, kind: 'tool', name: call.name, status: 'running', input: args, output: null, toolCallId: call.id,
         turn: run.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now(),
       });
+      const whyText = typeof args.why === 'string' && args.why.trim() ? args.why.trim() : typeof args.summary === 'string' && args.summary.trim() ? args.summary.trim() : undefined;
+      const stepSummary = whyText || deriveStepFocus(call.name, args);
       if (call.name !== 'set_focus' && !run.cursor.helperId) {
-        const whyText = typeof args.why === 'string' && args.why.trim() ? args.why.trim() : typeof args.summary === 'string' && args.summary.trim() ? args.summary.trim() : undefined;
-        const autoFocus = whyText || deriveStepFocus(call.name, args);
         const autoPhase = deriveStepPhase(call.name, args, run.cursor.stage);
-        this.publishFocus(run.id, autoFocus, autoPhase);
+        this.publishFocus(run.id, stepSummary, autoPhase);
+      }
+      if (run.cursor.helperId) {
+        this.autonomy.noteProgress(run.cursor.helperId, { tool: call.name, summary: stepSummary, status: 'running', at: now() });
       }
       const started = Date.now();
       try {
@@ -1593,6 +1596,9 @@ export class Engine {
         this.store.updateStep(step.id, { status: 'completed', output, latencyMs: Date.now() - started, endedAt: now() });
         this.persistTool(run, call, `${output}${loopNote}`, 'completed', false);
         this.bus.publish({ type: 'step', runId: run.id, step: this.store.getStep(step.id) });
+        if (run.cursor.helperId) {
+          this.autonomy.noteProgress(run.cursor.helperId, { tool: call.name, summary: stepSummary, status: 'completed', at: now() });
+        }
       } catch (error) {
         if (error instanceof CrashError || error instanceof StopError || error instanceof InterruptedToolError) throw error;
         const message = error instanceof Error ? error.message : String(error);
@@ -1610,6 +1616,9 @@ export class Engine {
               : '';
         this.store.updateStep(step.id, { status: 'failed', error: message, endedAt: now(), latencyMs: Date.now() - started });
         this.persistTool(run, call, `Error: ${message}${recoveryHint(call.name, message)}${thrashNote}${loopNote}`, 'failed', false);
+        if (run.cursor.helperId) {
+          this.autonomy.noteProgress(run.cursor.helperId, { tool: call.name, summary: `${stepSummary}: ${message.slice(0, 60)}`, status: 'failed', at: now() });
+        }
       }
       const afterCall = this.store.getRun(run.id);
       if (call.name === 'plan' && Array.isArray(args.items) && args.items.length && (afterCall?.cursor.stage ?? run.cursor.stage) === 'plan' && !afterCall?.cursor.enteredPlanViaTool) handoff = true;
@@ -1878,10 +1887,14 @@ export class Engine {
     const session = this.store.getSession(run.sessionId);
     const repoTask = Boolean(session?.mode === 'code' || session?.workshopId || run.cursor.stage || turnRoots(this.store, run, this.libraryDir).length > 0);
     const roleForBudget = run.cursor.autoRole || contractForAgent(agent.name)?.modelRole || 'main';
-    let budget = roleContextBudget(roleForBudget, model, { repoTask });
+    let budget = run.cursor.budgetOverride || roleContextBudget(roleForBudget, model, { repoTask });
     const workshopNote = session?.workshopId ? workshopBrief(this.store, session.workshopId) : '';
     // Exactly this chat's attached workspaces: names, paths, branch, recent changes.
-    const chatWorkspaces = session ? await chatWorkspaceBrief(this.store, run.sessionId, session.ownerId || OWNER_ID).catch(() => '') : '';
+    const chatWorkspaces = run.cursor.worktreePath
+      ? `\n\nThis helper runs in an isolated git worktree at ${run.cursor.worktreePath}. Read and edit files inside this worktree only.`
+      : session
+        ? await chatWorkspaceBrief(this.store, run.sessionId, session.ownerId || OWNER_ID).catch(() => '')
+        : '';
     const stageNote = run.cursor.syncNote ? `\n\nWhat changed since you last looked:\n${run.cursor.syncNote}` : '';
     const roleNote = run.cursor.stage === 'plan'
       ? run.cursor.enteredPlanViaTool
@@ -1915,7 +1928,7 @@ export class Engine {
         ? `\n\nAvailable teammates you can consult or delegate to: ${teammates.slice(0, 12).map((t) => `${t.name}${t.title ? ` (${t.title})` : ''}`).join(', ')}.`
         : '',
       toolNames.includes('spawn_agent') && !run.cursor.helperId
-        ? '\n\nMini-agents: for smaller side missions on the same workspace (scanning files, checking logs, summarizing code, running quick checks), call spawn_agent (defaults to tier="fast" on a lightweight parallel model so it runs concurrently without blocking you) and collect results with helpers({action:"wait"}).'
+        ? '\n\nMini-agents: use spawn_agent with role="research" (fast 4B read-only search/facts), role="verify" (fast 4B test/build runner), or role="coder" (main model in an isolated git worktree) and pass structured goal/scope/done_when. Collect results with helpers({action:"wait"}).'
         : '',
       (() => {
         const caps: string[] = [];
@@ -2541,7 +2554,7 @@ export class Engine {
     const settings = this.store.getSettings();
     const member = agent.ownerId !== OWNER_ID;
     return {
-      agent, workspace: agent.workspacePath, signal, docker: this.docker, workbench: this.workbench, browser: this.browser, computer: this.computer, fetchImpl: this.fetchImpl, searxngUrl: settings.searxngUrl || process.env.SEARXNG_URL || '',
+      agent, workspace: run.cursor.worktreePath || agent.workspacePath, signal, docker: this.docker, workbench: this.workbench, browser: this.browser, computer: this.computer, fetchImpl: this.fetchImpl, searxngUrl: settings.searxngUrl || process.env.SEARXNG_URL || '',
       sandbox: settings.sandbox, store: this.store, depth: run.cursor.depth ?? 0,
       sessionId: run.sessionId, runId: run.id, codeApproval: settings.codeApproval,
       secretEnv: () => (member ? {} : this.vault.envFor(agent.id, `run:${run.id}`)),
@@ -3076,6 +3089,7 @@ async function prepareRepos(store: Store, run: RunRow, stage: 'plan' | 'implemen
 }
 
 function turnRoots(store: Store, run: RunRow, dataDir = '') {
+  if (run.cursor.worktreePath) return [{ label: 'worktree', path: run.cursor.worktreePath, write: true }];
   const session = store.getSession(run.sessionId);
   // Shared projects and workshops are the owner's. A member's persona works in its own workspace only.
   if ((store.getAgent(run.agentId)?.ownerId ?? OWNER_ID) !== OWNER_ID) return [];

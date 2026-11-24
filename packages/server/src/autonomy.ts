@@ -1,16 +1,20 @@
+import { execFile, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { nextCron } from '@local-agent/shared';
 import type { RunCursor } from '@local-agent/shared';
 import { OWNER_ID, foreignPath } from './accounts.js';
 import type { Bus } from './bus.js';
-import { getChatWorkspaces, setChatWorkspaces } from './chat-workspaces.js';
+import { chatWorkspacePaths, getChatWorkspaces, setChatWorkspaces } from './chat-workspaces.js';
 import { OLLAMA_SIDE_MAX_GIB, isLlamaServerProvider, isNonChatModel, isOllamaProvider, isUncensoredProvider, modelGiB } from './coexist.js';
 import type { ModelRow, RunRow, Store } from './db.js';
 import type { Tool, ToolContext } from './tools.js';
 import { createTrigger, getTrigger, listTriggers, updateTrigger, type TriggerKind } from './triggers.js';
 import { nid, now, secret as randomSecret } from './util.js';
 import type { Vault } from './vault.js';
+
+const execFileAsync = promisify(execFile);
 
 /** Small models often leave out "action". Infer create when they pass what a new row needs, list when they pass nothing. */
 const act = (args: Record<string, unknown>) => String(args.action || (args.id ? '' : (args.name || args.cron || args.prompt || args.kind || args.path) ? 'create' : 'list'));
@@ -24,13 +28,35 @@ const act = (args: Record<string, unknown>) => String(args.action || (args.id ? 
 export const HELPER_LIMITS = { perChat: 3, total: 4, defaultSteps: 8, maxSteps: 24, defaultMinutes: 10, minMinutes: 1, maxMinutes: 30, maxTimersPerPersona: 20 };
 /** A helper never gets these: no helpers of helpers, no scheduling or creating new projects from the background. */
 export const HELPER_DENIED = ['spawn_agent', 'helpers', 'manage_timer', 'manage_trigger', 'create_project'];
+export const HELPER_WORKTREE_ROOT = '/tmp/la-worktrees';
+
+export type HelperRole = 'research' | 'verify' | 'coder' | 'general';
+
+export interface HelperStepNote {
+  tool: string;
+  summary: string;
+  status: 'running' | 'completed' | 'failed';
+  at: string;
+}
 
 export interface HelperRow {
   id: string; parentSessionId: string; parentRunId: string | null; childSessionId: string; childRunId: string | null;
   agentId: string; agentName: string; ownerId: string; task: string; cli: string | null;
   status: 'queued' | 'running' | 'waiting' | 'done' | 'failed' | 'stopped'; result: string | null; error: string | null;
   maxSteps: number; timeoutMs: number; tools: string[] | null; createdAt: string; endedAt: string | null;
+  role?: HelperRole; modelName?: string | null; worktreePath?: string | null;
+  currentStep?: string | null; stepCount?: number; recentSteps?: HelperStepNote[];
 }
+
+type HelperMeta = {
+  role: HelperRole;
+  modelName?: string | null;
+  worktreePath?: string | null;
+  repoRoot?: string | null;
+  currentStep?: string | null;
+  stepCount: number;
+  recentSteps: HelperStepNote[];
+};
 
 type StartTurn = (input: { sessionId: string; agentId: string; content: string; modelId?: string; parentRunId?: string | null; depth?: number; background?: boolean; cursorExtras?: Partial<RunCursor>; onDone?: (run: RunRow) => void }) => Promise<RunRow>;
 
@@ -38,6 +64,8 @@ const obj = (properties: Record<string, unknown>, required: string[] = []) => ({
 const TERMINAL = new Set(['completed', 'failed', 'stopped', 'interrupted', 'cancelled']);
 
 export class Autonomy {
+  private readonly meta = new Map<string, HelperMeta>();
+
   constructor(
     private readonly store: Store,
     private readonly bus: Bus,
@@ -50,15 +78,51 @@ export class Autonomy {
   // ── Helpers ────────────────────────────────────────────────────────────────
 
   private mapHelper(row: Record<string, unknown>): HelperRow {
+    const id = String(row.id);
     const agent = this.store.getAgent(String(row.agent_id));
+    const extra = this.meta.get(id);
     return {
-      id: String(row.id), parentSessionId: String(row.parent_session_id), parentRunId: row.parent_run_id ? String(row.parent_run_id) : null,
+      id, parentSessionId: String(row.parent_session_id), parentRunId: row.parent_run_id ? String(row.parent_run_id) : null,
       childSessionId: String(row.child_session_id), childRunId: row.child_run_id ? String(row.child_run_id) : null,
       agentId: String(row.agent_id), agentName: agent?.name || 'Persona', ownerId: String(row.owner_id), task: String(row.task), cli: row.cli ? String(row.cli) : null,
       status: String(row.status) as HelperRow['status'], result: row.result ? String(row.result) : null, error: row.error ? String(row.error) : null,
       maxSteps: Number(row.max_steps), timeoutMs: Number(row.timeout_ms), tools: row.tools ? JSON.parse(String(row.tools)) as string[] : null,
       createdAt: String(row.created_at), endedAt: row.ended_at ? String(row.ended_at) : null,
+      ...(extra ? {
+        role: extra.role,
+        modelName: extra.modelName,
+        worktreePath: extra.worktreePath,
+        currentStep: extra.currentStep,
+        stepCount: extra.stepCount,
+        recentSteps: [...extra.recentSteps],
+      } : {}),
     };
+  }
+
+  /** Record a live tool step on a running helper and broadcast it to the parent chat. */
+  noteProgress(helperId: string, step: HelperStepNote): void {
+    const cur = this.meta.get(helperId) ?? { role: 'general' as HelperRole, currentStep: null, stepCount: 0, recentSteps: [] };
+    if (step.status === 'running') {
+      cur.stepCount += 1;
+      cur.currentStep = step.summary;
+      cur.recentSteps = [...cur.recentSteps.slice(-7), step];
+    } else {
+      const idx = [...cur.recentSteps].reverse().findIndex((item) => item.tool === step.tool && item.status === 'running');
+      if (idx >= 0) {
+        const realIdx = cur.recentSteps.length - 1 - idx;
+        const copy = [...cur.recentSteps];
+        copy[realIdx] = step;
+        cur.recentSteps = copy;
+      } else {
+        cur.recentSteps = [...cur.recentSteps.slice(-7), step];
+      }
+      cur.currentStep = step.summary;
+    }
+    this.meta.set(helperId, cur);
+    const row = this.store.db.prepare('SELECT * FROM helpers WHERE id = ?').get(helperId) as Record<string, unknown> | undefined;
+    if (!row) return;
+    const helper = this.mapHelper(row);
+    this.bus.publish({ type: 'helper', sessionId: helper.parentSessionId, helper });
   }
 
   getHelper(id: string): HelperRow | null {
@@ -93,20 +157,24 @@ export class Autonomy {
     if (!row) return null;
     const helper = this.mapHelper(row);
     if (Number(row.delivered)) return helper;
+    const meta = this.meta.get(id);
+    const maxChars = meta?.role === 'research' || meta?.role === 'verify' ? 2500 : 6000;
     const answer = [...this.store.listMessages(helper.childSessionId)].reverse().find((message) => message.role === 'assistant' && message.content.trim());
-    const result = (answer?.content || '').slice(0, 6000) || null;
-    const emptyAnswerFail = Boolean(result && /(?:returned an empty answer twice|only produced reasoning and no answer, twice)/i.test(result));
+    const capped = (answer?.content || '').slice(0, maxChars) || null;
+    const result = this.finishWorktree(meta, capped);
+    const emptyAnswerFail = Boolean(capped && /(?:returned an empty answer twice|only produced reasoning and no answer, twice)/i.test(capped));
     const status: HelperRow['status'] = run.status === 'completed'
       ? (emptyAnswerFail ? 'failed' : 'done')
       : run.status === 'stopped' ? 'stopped' : 'failed';
     const error = status === 'done'
       ? null
-      : (run.error || (emptyAnswerFail ? result : null) || (status === 'stopped' ? 'Stopped.' : 'The helper did not finish.'));
+      : (run.error || (emptyAnswerFail ? capped : null) || (status === 'stopped' ? 'Stopped.' : 'The helper did not finish.'));
     const claimed = this.store.db.prepare('UPDATE helpers SET status = ?, result = ?, error = ?, ended_at = ?, delivered = 1 WHERE id = ? AND delivered = 0').run(status, result, error, now(), id);
     if (!Number(claimed.changes)) return this.mapHelper(this.store.db.prepare('SELECT * FROM helpers WHERE id = ?').get(id) as Record<string, unknown>);
     const parent = this.store.getSession(helper.parentSessionId);
     if (parent) {
-      const head = status === 'done' ? `Helper finished · ${helper.agentName}` : status === 'stopped' ? `Helper stopped · ${helper.agentName}` : `Helper failed · ${helper.agentName}`;
+      const roleTag = meta?.role && meta.role !== 'general' ? ` [${meta.role}]` : '';
+      const head = status === 'done' ? `Helper finished${roleTag} · ${helper.agentName}` : status === 'stopped' ? `Helper stopped${roleTag} · ${helper.agentName}` : `Helper failed${roleTag} · ${helper.agentName}`;
       const body = status === 'done' ? (result || 'No answer.') : `${error}${result && result !== error ? `\n\nLast words:\n${result}` : ''}`;
       const posted = this.store.insertMessage({
         sessionId: parent.id, role: 'assistant', content: `**${head}** — “${helper.task.slice(0, 120)}”\n\n${body}`,
@@ -117,6 +185,53 @@ export class Autonomy {
     const done = this.mapHelper(this.store.db.prepare('SELECT * FROM helpers WHERE id = ?').get(id) as Record<string, unknown>);
     this.bus.publish({ type: 'helper', sessionId: helper.parentSessionId, helper: done });
     return done;
+  }
+
+  private async createCoderWorktree(id: string, candidates: string[]): Promise<{ worktreePath: string; repoRoot: string } | null> {
+    const unique = [...new Set(candidates.filter((p) => Boolean(p && fs.existsSync(p))))];
+    for (const dir of unique) {
+      try {
+        const { stdout } = await execFileAsync('git', ['-C', dir, 'rev-parse', '--show-toplevel']);
+        const repoRoot = stdout.trim();
+        if (!repoRoot) continue;
+        await execFileAsync('git', ['-C', repoRoot, 'rev-parse', '--verify', 'HEAD']);
+        fs.mkdirSync(HELPER_WORKTREE_ROOT, { recursive: true });
+        const worktreePath = path.join(HELPER_WORKTREE_ROOT, id);
+        await execFileAsync('git', ['-C', repoRoot, 'worktree', 'add', '--detach', worktreePath, 'HEAD']);
+        return { worktreePath, repoRoot };
+      } catch {
+        // Not a git repo with commits; check next candidate or fall back to shared workspace.
+      }
+    }
+    return null;
+  }
+
+  private finishWorktree(meta: HelperMeta | undefined, rawResult: string | null): string | null {
+    if (!meta?.worktreePath || !meta.repoRoot || !fs.existsSync(meta.worktreePath)) return rawResult;
+    const worktreePath = meta.worktreePath;
+    const repoRoot = meta.repoRoot;
+    let status = '';
+    let diffStat = '';
+    try {
+      status = execFileSync('git', ['-C', worktreePath, 'status', '--short'], { encoding: 'utf8', timeout: 5000 }).trim();
+      if (status) {
+        diffStat = execFileSync('git', ['-C', worktreePath, 'diff', '--stat'], { encoding: 'utf8', timeout: 5000 }).trim();
+      }
+    } catch {
+      return rawResult;
+    }
+    if (!status) {
+      try {
+        execFileSync('git', ['-C', repoRoot, 'worktree', 'remove', '--force', worktreePath], { timeout: 5000 });
+      } catch {
+        fs.rmSync(worktreePath, { recursive: true, force: true });
+        try { execFileSync('git', ['-C', repoRoot, 'worktree', 'prune'], { timeout: 5000 }); } catch { /* ignore */ }
+      }
+      meta.worktreePath = null;
+      return rawResult;
+    }
+    const summary = `[worktree] Isolated changes kept at ${worktreePath}\n${diffStat || status}`;
+    return rawResult ? `${rawResult}\n\n${summary}` : summary;
   }
 
   /**
@@ -172,11 +287,15 @@ export class Autonomy {
     return pool.sort((a, b) => modelGiB(a) - modelGiB(b))[0];
   }
 
-  async spawn(ctx: ToolContext, input: { task: string; persona?: string; tools?: string[]; maxSteps?: number; timeoutMinutes?: number; cli?: string; tier?: 'fast' | 'main' | 'auto'; model?: string }): Promise<HelperRow & { modelName?: string }> {
+  async spawn(ctx: ToolContext, input: {
+    task?: string; role?: HelperRole; goal?: string; scope?: string; doneWhen?: string; why?: string;
+    persona?: string; tools?: string[]; maxSteps?: number; timeoutMinutes?: number; cli?: string; tier?: 'fast' | 'main' | 'auto'; model?: string;
+  }): Promise<HelperRow & { modelName?: string }> {
     if (!ctx.sessionId) throw new Error('Helpers start from a chat.');
     if ((ctx.depth ?? 0) >= 1) throw new Error('A helper cannot start helpers of its own.');
-    const task = input.task.trim();
-    if (!task) throw new Error('Describe the task for the helper.');
+    const task = (input.task || input.goal || '').trim();
+    if (!task) throw new Error('Describe the task or goal for the helper.');
+    const role: HelperRole = input.role && ['research', 'verify', 'coder', 'general'].includes(input.role) ? input.role : 'general';
     const owner = ctx.agent.ownerId || OWNER_ID;
     const agent = input.persona ? this.store.getAgentByName(input.persona, owner) : ctx.agent;
     if (!agent || (agent.ownerId || OWNER_ID) !== owner) throw new Error(`No persona named ${input.persona}.`);
@@ -187,41 +306,83 @@ export class Autonomy {
     if (cli && !/^(claude|codex|gemini|aider|opencode|qwen)(?:[-_\w.]*)?$/i.test(cli)) {
       throw new Error(`cli is only for coding CLIs (claude, codex, gemini, aider, opencode). To run "${cli.slice(0, 60)}", call the shell tool directly (or omit cli so the helper uses shell directly).`);
     }
-    const maxSteps = Math.max(1, Math.min(HELPER_LIMITS.maxSteps, Math.floor(input.maxSteps || HELPER_LIMITS.defaultSteps)));
+    const effectiveTier = input.tier ?? (role === 'coder' ? 'main' : 'fast');
+    const defaultSteps = role === 'verify' ? 6 : role === 'coder' ? 12 : HELPER_LIMITS.defaultSteps;
+    const maxSteps = Math.max(1, Math.min(HELPER_LIMITS.maxSteps, Math.floor(input.maxSteps || defaultSteps)));
     const timeoutMs = Math.max(HELPER_LIMITS.minMinutes, Math.min(HELPER_LIMITS.maxMinutes, input.timeoutMinutes || HELPER_LIMITS.defaultMinutes)) * 60_000;
+    const scopeText = input.scope?.trim() || '';
     let tools = input.tools?.length ? input.tools.map(String).filter((name) => !HELPER_DENIED.includes(name)) : null;
+    if (!tools && !cli) {
+      if (role === 'research') {
+        const wantsWeb = /\b(web|url|https?:|docs|online|latest|current|article|site|fetch)\b/i.test(`${task} ${scopeText}`);
+        tools = wantsWeb ? ['read_file', 'grep', 'glob', 'list_dir', 'web_search', 'web_fetch'] : ['read_file', 'grep', 'glob', 'list_dir'];
+      } else if (role === 'verify') {
+        tools = ['shell', 'read_file', 'grep'];
+      }
+    }
     if (cli) tools = [...new Set([...(tools ?? ['read_file', 'list_dir', 'grep', 'glob', 'git']), 'handoff_cli'])];
+    const id = nid('hlp');
     const parent = this.store.getSession(ctx.sessionId);
-    const child = this.store.createSession({ agentId: agent.id, title: `Helper: ${task.slice(0, 60)}`, ownerId: owner });
+    const child = this.store.createSession({ agentId: agent.id, title: `Helper (${role}): ${task.slice(0, 54)}`, ownerId: owner });
     this.store.db.prepare('UPDATE chat_sessions SET helper_of = ? WHERE id = ?').run(ctx.sessionId, child.id);
     const childPatch: { mode?: 'chat' | 'code'; workshopId?: string | null } = {};
-    if (parent?.mode === 'code' || cli) childPatch.mode = 'code';
+    if (parent?.mode === 'code' || cli || role === 'coder') childPatch.mode = 'code';
     if (parent?.workshopId) childPatch.workshopId = parent.workshopId;
     if (Object.keys(childPatch).length) this.store.updateSession(child.id, childPatch);
-    // Same workspaces as the parent chat, so a mini-agent works on the exact same repos.
     const items = getChatWorkspaces(this.store, ctx.sessionId);
-    if (items.length) setChatWorkspaces(this.store, child.id, items);
-    const chosenModel = cli ? undefined : this.pickHelperModel(input.tier ?? 'fast', input.model, ctx.runId ? this.store.getRun(ctx.runId)?.modelId : null);
-    const id = nid('hlp');
+    const wsPaths = chatWorkspacePaths(this.store, ctx.sessionId, owner).map((item) => item.path);
+    const worktree = role === 'coder' && !cli ? await this.createCoderWorktree(id, [...wsPaths, agent.workspacePath]) : null;
+    if (items.length && !worktree) setChatWorkspaces(this.store, child.id, items);
+    const chosenModel = cli ? undefined : this.pickHelperModel(effectiveTier, input.model, ctx.runId ? this.store.getRun(ctx.runId)?.modelId : null);
+    const isSmallFast = effectiveTier === 'fast' && (!chosenModel || modelGiB(chosenModel) <= OLLAMA_SIDE_MAX_GIB);
+    const noThink = role === 'research' || role === 'verify' || isSmallFast;
+    const budgetOverride = noThink ? 16_384 : undefined;
+    this.meta.set(id, {
+      role,
+      modelName: chosenModel?.name ?? null,
+      worktreePath: worktree?.worktreePath ?? null,
+      repoRoot: worktree?.repoRoot ?? null,
+      currentStep: input.why?.trim() || null,
+      stepCount: 0,
+      recentSteps: [],
+    });
     this.store.db.prepare(`INSERT INTO helpers (id, parent_session_id, parent_run_id, child_session_id, child_run_id, agent_id, owner_id, task, cli, status, max_steps, timeout_ms, tools, created_at)
       VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)`).run(id, ctx.sessionId, ctx.runId ?? null, child.id, agent.id, owner, task, cli, maxSteps, timeoutMs, tools ? JSON.stringify(tools) : null, now());
+    const roleContract = role === 'research'
+      ? 'Return only verified facts with exact file:line citations (and URLs if web-fetched) under 2000 characters. Do not edit files.'
+      : role === 'verify'
+        ? 'Run the verification command(s), then report PASS/FAIL, exact command run, and the exact failing lines/errors under 2000 characters.'
+        : role === 'coder'
+          ? 'Make targeted edits in your workspace/worktree, verify them with tests/checks, and report modified files + verification output.'
+          : 'Return a short, concrete result with file paths, line numbers, or links when relevant. You cannot ask questions.';
+    const structured = Boolean(input.role || scopeText || input.doneWhen?.trim() || input.why?.trim() || worktree);
+    const briefLines = [
+      `Role: ${role}`,
+      input.why?.trim() ? `Why: ${input.why.trim()}` : '',
+      scopeText ? `Scope: ${scopeText}` : '',
+      input.doneWhen?.trim() ? `Done when: ${input.doneWhen.trim()}` : '',
+      worktree ? `Isolated git worktree: ${worktree.worktreePath}` : '',
+    ].filter(Boolean).join('\n');
     const prompt = cli
-      ? `Use handoff_cli with cli "${cli}" to do the task below in this chat's workspace, then report briefly what changed and anything left to do.\n\nTask:\n${task}`
-      : `You are a background helper (mini-agent) running in the same workspace as the main agent. Do the task below on your own, then answer with the result only: short, concrete, with file paths, line numbers, or links when relevant. You cannot ask questions.\n\nTask:\n${task}`;
+      ? `Use handoff_cli with cli "${cli}" to do the task below in this chat's workspace, then report briefly what changed and anything left to do.\n\n${briefLines ? `${briefLines}\n` : ''}Task:\n${task}`
+      : structured
+        ? `You are a background helper (${role}) working for the main agent. ${roleContract}\n\n${briefLines}\n\nTask:\n${task}`
+        : `You are a background helper (mini-agent) running in the same workspace as the main agent. ${roleContract}\n\nTask:\n${task}`;
     try {
       const run = await this.startTurn({
         sessionId: child.id, agentId: agent.id, content: prompt, modelId: chosenModel?.id, parentRunId: ctx.runId ?? null, depth: 1, background: true,
-        cursorExtras: { maxSteps, timeoutMs, toolSubset: tools ?? undefined, helperId: id },
+        cursorExtras: { maxSteps, timeoutMs, toolSubset: tools ?? undefined, helperId: id, ...(noThink ? { noThink: true } : {}), ...(budgetOverride ? { budgetOverride } : {}), ...(worktree ? { worktreePath: worktree.worktreePath } : {}) },
       });
       this.store.db.prepare("UPDATE helpers SET child_run_id = ?, status = CASE WHEN delivered = 1 THEN status ELSE 'running' END WHERE id = ?").run(run.id, id);
       if (TERMINAL.has(run.status)) this.finish(id, run);
     } catch (error) {
+      this.finishWorktree(this.meta.get(id), null);
       this.store.db.prepare('UPDATE helpers SET status = ?, error = ?, ended_at = ?, delivered = 1 WHERE id = ?').run('failed', (error as Error).message, now(), id);
       throw error;
     }
     const helper = this.getHelper(id)!;
     this.bus.publish({ type: 'helper', sessionId: ctx.sessionId, helper });
-    return { ...helper, modelName: chosenModel?.name };
+    return { ...helper, modelName: helper.modelName ?? chosenModel?.name };
   }
 
   /** Called by the engine whenever a helper's run ends, from the run record itself. */
@@ -419,24 +580,35 @@ export class Autonomy {
       },
       {
         name: 'spawn_agent',
-        description: `Spawn a mini-agent on the same workspace and repos to run a smaller sub-mission in parallel (default ${HELPER_LIMITS.defaultSteps} steps, ${HELPER_LIMITS.defaultMinutes} min). By default (tier="fast") it runs on a lightweight local model (<=4 GiB on Ollama) so it executes concurrently alongside the main model without blocking it. Pass tier="main" only if the sub-mission needs heavy reasoning, or wait=true to wait and receive its result immediately. Fan out multiple mini-agents and call helpers({action:"wait"}) to collect all results.`,
+        description: `Spawn a parallel mini-agent (role: research | verify | coder | general; fast defaults to <=4 GiB Ollama). Collect results via helpers({action:"wait"}).`,
         parameters: obj({
-          task: { type: 'string', description: 'Concrete mission for the mini-agent.' },
-          tier: { type: 'string', enum: ['fast', 'main', 'auto'], description: 'fast (default): lightweight parallel local model; main/auto: primary model.' },
-          model: { type: 'string', description: 'Optional explicit model name.' },
-          wait: { type: 'boolean', description: 'If true, wait for this mini-agent to finish and return its output directly.' },
+          task: { type: 'string', description: 'Concrete mission.' },
+          role: { type: 'string', enum: ['research', 'verify', 'coder', 'general'] },
+          goal: { type: 'string' },
+          scope: { type: 'string' },
+          done_when: { type: 'string' },
+          why: { type: 'string' },
+          tier: { type: 'string', enum: ['fast', 'main', 'auto'] },
+          model: { type: 'string' },
+          wait: { type: 'boolean' },
           persona: { type: 'string' },
           tools: { type: 'array', items: { type: 'string' } },
           max_steps: { type: 'number' },
           timeout_minutes: { type: 'number' },
           cli: { type: 'string' },
-        }, ['task']),
+        }),
         mutates: () => false,
         approval: () => null,
         async execute(args, ctx) {
-          const tier = args.tier === 'main' || args.tier === 'auto' ? args.tier : 'fast';
+          const role = args.role === 'research' || args.role === 'verify' || args.role === 'coder' || args.role === 'general' ? args.role : undefined;
+          const tier = args.tier === 'main' || args.tier === 'auto' || args.tier === 'fast' ? args.tier : undefined;
           const helper = await self.spawn(ctx, {
-            task: String(args.task || ''),
+            task: args.task ? String(args.task) : undefined,
+            role,
+            goal: args.goal ? String(args.goal) : undefined,
+            scope: args.scope ? String(args.scope) : undefined,
+            doneWhen: args.done_when ? String(args.done_when) : undefined,
+            why: args.why ? String(args.why) : undefined,
             tier,
             model: args.model ? String(args.model) : undefined,
             persona: args.persona ? String(args.persona) : undefined,
@@ -445,11 +617,12 @@ export class Autonomy {
             timeoutMinutes: Number(args.timeout_minutes) || undefined,
             cli: args.cli ? String(args.cli) : undefined,
           });
+          const label = `${helper.agentName}${helper.role && helper.role !== 'general' ? `:${helper.role}` : ''}${helper.modelName ? ` on ${helper.modelName}` : ''}`;
           if (args.wait && ctx.sessionId) {
             const done = (await self.wait(ctx.sessionId, [helper.id], Math.min(300, Math.round(helper.timeoutMs / 1000)), ctx.signal))[0] ?? helper;
-            return `Mini-agent ${done.id} (${done.agentName}${helper.modelName ? ` on ${helper.modelName}` : ''}) ${done.status}:\n${done.result || done.error || '(no output)'}`;
+            return `Mini-agent ${done.id} (${label}) ${done.status}:\n${done.result || done.error || '(no output)'}`;
           }
-          return `Started mini-agent ${helper.id} (${helper.agentName}${helper.modelName ? ` on ${helper.modelName}` : ''}${helper.cli ? ` via ${helper.cli}` : ''}, up to ${helper.maxSteps} steps / ${Math.round(helper.timeoutMs / 60000)} min) on the same workspace. Call helpers({action:"wait"}) to collect results.`;
+          return `Started mini-agent ${helper.id} (${label}${helper.worktreePath ? `, worktree ${helper.worktreePath}` : ''}${helper.cli ? ` via ${helper.cli}` : ''}, up to ${helper.maxSteps} steps / ${Math.round(helper.timeoutMs / 60000)} min). Call helpers({action:"wait"}) to collect results.`;
         },
       },
       {

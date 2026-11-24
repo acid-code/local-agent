@@ -485,6 +485,20 @@ export function Chat() {
           }
           return;
         }
+        if (data.type === 'helper' && data.helper) {
+          const incoming = data.helper as MiniAgentRow;
+          setMiniAgents((prev) => {
+            const idx = prev.findIndex((item) => item.id === incoming.id);
+            if (idx === -1) return [incoming, ...prev];
+            const copy = [...prev];
+            copy[idx] = { ...copy[idx], ...incoming };
+            return copy;
+          });
+          if (incoming.status === 'done' || incoming.status === 'failed' || incoming.status === 'stopped') {
+            setHelperTick((n) => n + 1);
+          }
+          return;
+        }
         const action = chatLiveAction(data, { sessionId, runId: runIdRef.current });
         if (action.kind === 'adopt-run') adopt(action.runId, action.status);
         else if (action.kind === 'upsert-message') setMessages((value) => [...value.filter((m) => m.id !== action.message.id), action.message as Message]);

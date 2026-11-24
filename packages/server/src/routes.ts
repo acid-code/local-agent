@@ -908,7 +908,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     mustOwn(store, req, 'session', id, 'Chat not found.');
     const helpers = engine.autonomy.listHelpers(id).map((h) => {
       const childRun = h.childRunId ? store.getRun(h.childRunId) : null;
-      const modelName = childRun?.modelId ? (store.getModel(childRun.modelId)?.name || childRun.modelId) : null;
+      const modelName = h.modelName || (childRun?.modelId ? (store.getModel(childRun.modelId)?.name || childRun.modelId) : null);
       return { ...h, modelName };
     });
     const files = listFiles(store, { sessionId: id, limit: 200, ownerId: me(req) });

@@ -6,10 +6,18 @@ import { api, post } from '../lib/api';
 import { errorText, toast } from '../lib/toast';
 import { t } from '../i18n';
 
+export interface HelperStepNote {
+  tool: string;
+  summary: string;
+  status: 'running' | 'completed' | 'failed';
+  at: string;
+}
+
 export interface MiniAgentRow {
   id: string;
   childRunId?: string | null;
   agentName: string;
+  role?: string;
   modelName?: string | null;
   task: string;
   status: string;
@@ -17,6 +25,10 @@ export interface MiniAgentRow {
   error?: string | null;
   createdAt?: string;
   endedAt?: string | null;
+  worktreePath?: string | null;
+  currentStep?: string | null;
+  stepCount?: number;
+  recentSteps?: HelperStepNote[];
 }
 
 export interface TraceStep {
@@ -99,8 +111,15 @@ export function MiniAgentStrip({
                 <button type="button" className="mini-card-toggle" onClick={() => setExpanded(open ? null : h.id)}>
                   <span className={`mini-dot ${isLive ? 'live' : h.status}`} aria-hidden />
                   <span className="mini-name">{h.agentName}</span>
+                  {h.role && h.role !== 'general' && (
+                    <span className={`mini-role role-${h.role}`}>
+                      {h.role === 'research' ? t('research') : h.role === 'verify' ? t('verify') : t('coder')}
+                    </span>
+                  )}
                   {h.modelName && <span className="mini-model">{h.modelName}</span>}
-                  <span className="mini-task ellipsis" dir="auto">{h.task}</span>
+                  <span className="mini-task ellipsis" dir="auto">
+                    {isLive && h.currentStep ? `${h.stepCount ? `#${h.stepCount} ` : ''}${h.currentStep}` : h.task}
+                  </span>
                   <span className="mini-time mono faint">{fmtElapsed(h.createdAt, h.endedAt, nowMs)}</span>
                   {open ? <ChevronDown size={13} aria-hidden /> : <ChevronRight size={13} aria-hidden />}
                 </button>
@@ -112,9 +131,31 @@ export function MiniAgentStrip({
               </div>
               {open && (
                 <div className="mini-card-body">
+                  {h.currentStep && isLive && (
+                    <div className="mini-live-step faint" dir="auto">
+                      <span>{t('Now: {0}', [h.currentStep])}</span>
+                    </div>
+                  )}
+                  {h.worktreePath && (
+                    <div className="mini-worktree mono faint">
+                      <GitBranch size={11} aria-hidden />
+                      <span>{t('Worktree')}: {h.worktreePath}</span>
+                    </div>
+                  )}
+                  {Array.isArray(h.recentSteps) && h.recentSteps.length > 0 && (
+                    <div className="mini-steps">
+                      {h.recentSteps.map((step, idx) => (
+                        <div key={`${h.id}-s-${idx}`} className={`mini-step-row ${step.status}`}>
+                          <span className={`mini-dot ${step.status === 'running' ? 'live' : step.status === 'completed' ? 'done' : 'failed'}`} aria-hidden />
+                          <span className="mini-step-tool mono">{step.tool}</span>
+                          <span className="mini-step-sum ellipsis" dir="auto">{step.summary}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   {h.result && <pre className="mini-out" dir="auto">{h.result.slice(0, 2000)}</pre>}
                   {h.error && <pre className="mini-out err">{h.error}</pre>}
-                  {!h.result && !h.error && <span className="faint">{t('Working on workspace…')}</span>}
+                  {!h.result && !h.error && !(Array.isArray(h.recentSteps) && h.recentSteps.length) && <span className="faint">{t('Working on workspace…')}</span>}
                 </div>
               )}
             </div>

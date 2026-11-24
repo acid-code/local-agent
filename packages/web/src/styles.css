@@ -2095,11 +2095,20 @@ button.state-card:hover, a.state-card:hover { background: var(--bg-3); }
 .mini-dot.done, .mini-dot.completed { background: #4ade80; }
 .mini-dot.failed { background: var(--danger); }
 .mini-name { font-weight: 600; flex: none; }
+.mini-role { font-size: calc(10.5px * var(--fs)); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; padding: 1px 6px; border-radius: 999px; background: rgba(var(--brass-rgb), 0.16); color: var(--brass); flex: none; }
+.mini-role.role-verify { background: rgba(74, 222, 128, 0.14); color: #4ade80; }
+.mini-role.role-coder { background: rgba(96, 165, 250, 0.15); color: #93c5fd; }
 .mini-model { font-family: var(--mono); font-size: calc(11px * var(--fs)); padding: 1px 6px; border-radius: 999px; background: var(--bg-3); color: var(--muted); flex: none; }
 .mini-task { color: var(--muted); flex: 1; min-width: 0; }
 .mini-time { font-size: calc(11px * var(--fs)); flex: none; }
 .mini-stop { width: 24px; height: 24px; color: var(--danger); }
-.mini-card-body { border-top: 1px solid var(--line); padding: 8px 10px; background: var(--bg-2); }
+.mini-card-body { border-top: 1px solid var(--line); padding: 8px 10px; background: var(--bg-2); display: flex; flex-direction: column; gap: 6px; }
+.mini-live-step { font-size: calc(11.5px * var(--fs)); }
+.mini-worktree { display: inline-flex; align-items: center; gap: 5px; font-size: calc(11px * var(--fs)); word-break: break-all; }
+.mini-steps { display: flex; flex-direction: column; gap: 3px; }
+.mini-step-row { display: flex; align-items: center; gap: 6px; font-size: calc(11.5px * var(--fs)); color: var(--muted); }
+.mini-step-tool { color: var(--text); font-weight: 500; flex: none; }
+.mini-step-sum { flex: 1; min-width: 0; }
 .mini-out { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: calc(11.5px * var(--fs)); max-height: 200px; overflow: auto; }
 .mini-out.err { color: var(--danger); }
 

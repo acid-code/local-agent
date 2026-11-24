@@ -1613,4 +1613,9 @@ export const he: Record<string, string> = {
   "Verifying": "אימות",
   "Fixing": "תיקון",
   "Summarizing": "סיכום",
+  "research": "מחקר",
+  "verify": "אימות",
+  "coder": "קוד",
+  "Now: {0}": "כעת: {0}",
+  "Worktree": "ענף עבודה מבודד",
 };
