@@ -60,6 +60,10 @@ export interface RunCursor {
   /** Human-readable live focus phrase and workflow phase surfaced to UI pills. */
   focus?: string;
   workPhase?: WorkPhase;
+  /** Tracks repeated failures on the same tool+target to break thrash loops. */
+  failStreak?: { key: string; count: number };
+  /** True when the model entered plan mode via enter_plan_mode rather than workshop stage transitions. */
+  enteredPlanViaTool?: boolean;
   /** User steering queued while the run is active. It changes the next model step without restarting or stopping work. */
   steering?: { id: string; content: string };
   /** Recovery rounds after a reply claimed success over a failed tool call, and the note sent back to the model. */

@@ -10,7 +10,7 @@ import { readPlan, replacePlan, updatePlanItem } from './coding.js';
 export const TASK_STATUSES = ['pending', 'doing', 'done', 'blocked'] as const;
 export const LONG_TASK_STEPS = 40;
 export const MAX_TASK_ROUNDS = 3;
-export const TASKS_HINT = '\n\nLong tasks: when a request needs 3 or more steps, call tasks with action "set" and the steps first, then work through them, marking each "doing" and then "done" with evidence from a tool result, or "blocked" with the reason. Do not give the final answer while any item is still pending or doing.';
+export const TASKS_HINT = '\n\nLong tasks: for multi-file coding, complex edits, or deep investigation, call enter_plan_mode first to lock into read-only research (with read_file, grep, glob, web_search, or research helpers), then call exit_plan_mode with concrete steps and acceptance checks to unlock editing. For ordinary 3+ step requests without plan mode, call tasks with action "set" (and optional checks) first, then work through them, marking each "doing" and then "done" with evidence from a tool result, or "blocked" with the reason. Do not give the final answer while any item is still pending or doing. When finishing, verify your checks, summarize what changed, and list key takeaways for the future.';
 
 const render = (store: Store, sessionId: string) => {
   const plan = readPlan(store, sessionId);
@@ -21,8 +21,8 @@ const render = (store: Store, sessionId: string) => {
 export function tasksTool(): Tool {
   return {
     name: 'tasks',
-    description: 'The visible task list for this chat. action "set" replaces it with items; "update" changes one item by number (1-based): status pending|doing|done|blocked, evidence (required for done: what the tool result showed), note (required for blocked); "list" shows it.',
-    parameters: { type: 'object', properties: { action: { type: 'string', enum: ['set', 'update', 'list'] }, items: { type: 'array', items: { type: 'string' } }, item: { type: 'number' }, status: { type: 'string', enum: [...TASK_STATUSES] }, evidence: { type: 'string' }, note: { type: 'string' } }, required: ['action'] },
+    description: 'The visible task list for this chat. action "set" replaces it with items (and optional acceptance checks); "update" changes one item by number (1-based): status pending|doing|done|blocked, evidence (required for done: what the tool result showed), note (required for blocked); "list" shows it.',
+    parameters: { type: 'object', properties: { action: { type: 'string', enum: ['set', 'update', 'list'] }, items: { type: 'array', items: { type: 'string' } }, checks: { type: 'array', items: { type: 'string' } }, item: { type: 'number' }, status: { type: 'string', enum: [...TASK_STATUSES] }, evidence: { type: 'string' }, note: { type: 'string' } }, required: ['action'] },
     mutates: () => false,
     approval: () => null,
     async execute(args, ctx) {
@@ -33,6 +33,11 @@ export function tasksTool(): Tool {
         const items = (Array.isArray(args.items) ? args.items : []).map((item) => String(item).trim()).filter(Boolean).slice(0, 30);
         if (!items.length) throw new Error('Give at least one item.');
         replacePlan(ctx.store, sessionId, items, ctx.runId);
+        const checks = Array.isArray(args.checks) ? (args.checks as unknown[]).map((c) => String(c).trim()).filter(Boolean).slice(0, 10) : [];
+        if (checks.length && ctx.runId) {
+          const live = ctx.store.getRun(ctx.runId);
+          if (live) ctx.store.updateRun(live.id, { cursor: { ...live.cursor, acceptance: checks } });
+        }
         return render(ctx.store, sessionId);
       }
       if (action === 'update') {
@@ -80,4 +85,83 @@ export function completeFinalReplyTask(store: Store, sessionId: string, runId: s
 
 export function tasksNote(open: string[]) {
   return `\n\nCHECK BEFORE FINISHING: your task list still has open items:\n${open.join('\n')}\nContinue with the next one now. If one cannot be done, mark it blocked with the reason. Finish only when every item is done (with evidence) or blocked.`;
+}
+
+export function enterPlanModeTool(): Tool {
+  return {
+    name: 'enter_plan_mode',
+    description: 'Enter read-only plan mode while you read files, search, inspect logs, or run research helpers before editing anything. Call exit_plan_mode when your plan is ready.',
+    parameters: {
+      type: 'object',
+      properties: {
+        goal: { type: 'string', description: 'What you are investigating or planning.' },
+        reason: { type: 'string', description: 'Why planning first helps.' },
+      },
+    },
+    mutates: () => false,
+    approval: () => null,
+    async execute(args, ctx) {
+      const goal = typeof args.goal === 'string' && args.goal.trim() ? args.goal.trim() : undefined;
+      const reason = typeof args.reason === 'string' && args.reason.trim() ? args.reason.trim() : undefined;
+      if (ctx.enterPlanMode) {
+        ctx.enterPlanMode(goal, reason);
+      } else if (ctx.runId) {
+        const live = ctx.store.getRun(ctx.runId);
+        if (live) {
+          ctx.store.updateRun(live.id, {
+            cursor: { ...live.cursor, stage: 'plan', workPhase: 'planning', enteredPlanViaTool: true },
+          });
+        }
+      }
+      ctx.setFocus?.(goal ? `Planning: ${goal.slice(0, 60)}` : 'Investigating in plan mode', 'planning');
+      return `Entered read-only plan mode${goal ? ` (${goal})` : ''}. Investigate with read_file, grep, glob, list_dir, web_search, or research helpers; file edits and mutating commands are locked until you call exit_plan_mode with your steps.`;
+    },
+  };
+}
+
+export function exitPlanModeTool(): Tool {
+  return {
+    name: 'exit_plan_mode',
+    description: 'Save the finalized ordered plan steps and acceptance checks, unlock file editing, and move to execute mode.',
+    parameters: {
+      type: 'object',
+      properties: {
+        steps: { type: 'array', items: { type: 'string' }, description: 'Ordered imperative steps for the plan checklist.' },
+        checks: { type: 'array', items: { type: 'string' }, description: 'Optional 1-5 acceptance checks (put commands in backticks) to verify before finishing.' },
+        summary: { type: 'string', description: 'Brief 1-2 sentence summary of the approach.' },
+      },
+      required: ['steps'],
+    },
+    mutates: () => false,
+    approval: () => null,
+    async execute(args, ctx) {
+      const steps = (Array.isArray(args.steps) ? args.steps : []).map((s) => String(s).trim()).filter(Boolean).slice(0, 20);
+      if (!steps.length) throw new Error('exit_plan_mode requires at least one step.');
+      const checks = (Array.isArray(args.checks) ? args.checks : []).map((c) => String(c).trim()).filter(Boolean).slice(0, 10);
+      const summary = typeof args.summary === 'string' && args.summary.trim() ? args.summary.trim() : undefined;
+      if (ctx.exitPlanMode) {
+        ctx.exitPlanMode({ steps, checks, summary });
+      } else {
+        if (ctx.sessionId) replacePlan(ctx.store, ctx.sessionId, steps, ctx.runId);
+        if (ctx.runId) {
+          const live = ctx.store.getRun(ctx.runId);
+          if (live) {
+            ctx.store.updateRun(live.id, {
+              cursor: {
+                ...live.cursor,
+                stage: 'implement',
+                workPhase: 'editing',
+                enteredPlanViaTool: false,
+                ...(checks.length ? { acceptance: checks } : {}),
+              },
+            });
+          }
+        }
+      }
+      ctx.setFocus?.(summary ? summary.slice(0, 60) : 'Executing plan', 'editing');
+      const listed = steps.map((s, i) => `${i + 1}. [pending] ${s}`).join('\n');
+      const checkLines = checks.length ? `\nAcceptance checks (verified before you finish):\n${checks.map((c) => `- ${c}`).join('\n')}` : '';
+      return `Exited plan mode. File edits and execution tools are now unlocked (stage: implement).\nPlan:\n${listed}${checkLines}`;
+    },
+  };
 }

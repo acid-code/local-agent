@@ -317,7 +317,7 @@ export const CODING_TOOLS: Tool[] = [
   {
     name: 'plan',
     description: 'Replace or update the visible plan for this coding session. The owner can edit it too. With items, also pass checks: 1-5 acceptance checks that prove it is done (put commands in backticks, e.g. "`npm test` passes"); the run cannot finish until they are verified.',
-    parameters: obj({ items: { type: 'array', items: { type: 'string' } }, itemId: { type: 'string' }, status: { type: 'string' }, text: { type: 'string' }, checks: { type: 'array', items: { type: 'string' } } }),
+    parameters: obj({ items: { type: 'array', items: { type: 'string' } }, itemId: { type: 'string' }, status: { type: 'string' }, text: { type: 'string' }, checks: { type: 'array', items: { type: 'string' } }, evidence: { type: 'string' }, note: { type: 'string' } }),
     mutates: () => false,
     approval: () => null,
     async execute(args, ctx) {
@@ -334,7 +334,8 @@ export const CODING_TOOLS: Tool[] = [
         return checks.length ? `${listed}\nAcceptance checks (verified before you finish):\n${checks.map((item) => `- ${item}`).join('\n')}` : listed;
       }
       if (args.itemId) {
-        updatePlanItem(ctx.store, String(args.itemId), { status: args.status ? String(args.status) : undefined, text: args.text ? String(args.text) : undefined });
+        const note = args.evidence !== undefined ? String(args.evidence) : args.note !== undefined ? String(args.note) : undefined;
+        updatePlanItem(ctx.store, String(args.itemId), { status: args.status ? String(args.status) : undefined, text: args.text ? String(args.text) : undefined, note });
         return 'Plan item updated.';
       }
       const plan = readPlan(ctx.store, sessionId);

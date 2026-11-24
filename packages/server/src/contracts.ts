@@ -45,6 +45,26 @@ const toolSchemas: Record<string, z.ZodTypeAny> = {
     status: z.string().optional().describe('New status for itemId: pending, doing, done, or blocked.'),
     text: z.string().optional().describe('New text for itemId.'),
     checks: z.array(z.string().min(1)).max(10).optional().describe('Acceptance checks that prove the work is done, e.g. "`npm test` passes" or "README lists the new flag". Commands in backticks are run-verified before the run may finish.'),
+    evidence: z.string().optional().describe('Evidence from a tool result showing this item is done.'),
+    note: z.string().optional().describe('Note or blocker reason for this item.'),
+  }),
+  tasks: z.object({
+    action: z.enum(['set', 'update', 'list']),
+    items: z.array(z.string().min(1)).max(30).optional(),
+    checks: z.array(z.string().min(1)).max(10).optional().describe('Optional acceptance checks verified before finishing.'),
+    item: z.coerce.number().int().min(1).optional(),
+    status: z.enum(['pending', 'doing', 'done', 'blocked']).optional(),
+    evidence: z.string().optional(),
+    note: z.string().optional(),
+  }),
+  enter_plan_mode: z.object({
+    goal: z.string().optional().describe('What you are investigating or planning.'),
+    reason: z.string().optional().describe('Why planning first helps.'),
+  }),
+  exit_plan_mode: z.object({
+    steps: z.array(z.string().min(1)).min(1).max(20).describe('Ordered imperative steps for the plan checklist.'),
+    checks: z.array(z.string().min(1)).max(10).optional().describe('Optional 1-5 acceptance checks (put commands in backticks) to verify before finishing.'),
+    summary: z.string().optional().describe('Brief 1-2 sentence summary of the approach.'),
   }),
   git: z.object({
     action: z.enum(['status', 'diff', 'log', 'fetch', 'branches', 'show', 'branch', 'checkout', 'commit', 'pull', 'push', 'force-push', 'revert', 'open_pr']),

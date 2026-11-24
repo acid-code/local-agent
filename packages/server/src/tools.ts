@@ -39,6 +39,8 @@ export interface ToolContext {
   gitIdentity?: { name?: string; email?: string; sshKey?: string; token?: string | null };
   toolCallId?: string;
   setFocus?: (focus: string, phase?: WorkPhase) => void;
+  enterPlanMode?: (goal?: string, reason?: string) => void;
+  exitPlanMode?: (input: { steps?: string[]; checks?: string[]; summary?: string }) => void;
 }
 
 export interface Tool {

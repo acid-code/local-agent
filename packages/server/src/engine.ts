@@ -37,7 +37,7 @@ import type { DockerCtl } from './docker.js';
 import { indexText, retrieve, type VectorIndex } from './embeddings.js';
 import { countGeminiTokens, maxTokensFor, ollamaNumCtx, providerFor, samplingFor, type ModelProvider } from './providers.js';
 import type { Settings } from './settings.js';
-import { CODING_TOOLS } from './coding.js';
+import { CODING_TOOLS, replacePlan } from './coding.js';
 import { formatCitations, searchKnowledge } from './kb.js';
 import { kbSearchTool, loadSkillTool, setFocusTool, toolsFor, type Tool, type ToolContext } from './tools.js';
 import { CORE_TOOLS, LEAN_MIN_TOOLS, SEED_TOOLS, findToolsTool, leanMenuEnabled, rankTools } from './toolsearch.js';
@@ -51,7 +51,7 @@ import { scanMachine } from './discovery.js';
 import { CrashError, InterruptedToolError, StopError, clampText, now } from './util.js';
 import type { Vault } from './vault.js';
 import { cleanupHebrew } from './hebrew-cleanup.js';
-import { LONG_TASK_STEPS, MAX_TASK_ROUNDS, TASKS_HINT, completeFinalReplyTask, openTasks, tasksNote, tasksTool } from './tasks.js';
+import { LONG_TASK_STEPS, MAX_TASK_ROUNDS, TASKS_HINT, completeFinalReplyTask, enterPlanModeTool, exitPlanModeTool, openTasks, tasksNote, tasksTool } from './tasks.js';
 import { HONESTY_RULE, checkFinalReply, recoveryHint } from './recovery.js';
 import { ocrTool, understandImageTool, type ImageAnalysisResult, type OcrMode, type OcrResult } from './ocr.js';
 import { getLanguage, languageHint, replyLanguage, wantsCleanup } from './language.js';
@@ -76,6 +76,8 @@ const WAITING_RUN_STATUSES = new Set(['running', 'paused', 'awaiting_approval', 
 export const SECRET_REQUEST_TTL_MS = 24 * 60 * 60 * 1000;
 
 const ACTIVE_RUN_STATUSES = new Set(['queued', 'running', 'loading', 'waiting', 'paused', 'awaiting_approval', 'awaiting_secret']);
+/** Tools mechanically blocked while a run is locked in read-only plan mode. */
+const PLAN_READONLY_BLOCKED = new Set(['apply_patch', 'write_file', 'create_file', 'docker_run', 'docker_rm', 'create_project', 'vercel', 'handoff_cli']);
 
 export class Engine {
   private readonly inflight = new Map<string, { abort: AbortController; paused: boolean; resumePause: () => void }>();
@@ -988,12 +990,22 @@ export class Engine {
       else await this.llama.switchToQwen();
     }
     const sessionForCtx = this.store.getSession(run.sessionId);
-    const sessionEffort = !current.cursor.noThink && sessionForCtx?.effort ? sessionForCtx.effort : undefined;
+    const explicitEffort = !current.cursor.noThink && sessionForCtx?.effort ? sessionForCtx.effort : undefined;
+    const autoEffort: 'low' | 'medium' | 'high' | undefined = current.cursor.noThink || explicitEffort
+      ? undefined
+      : (current.cursor.stage === 'plan' || (current.cursor.recovery?.rounds ?? 0) > 0 || Boolean(current.cursor.failStreak && current.cursor.failStreak.count >= 2))
+        ? 'high'
+        : current.cursor.autoRole === 'fast'
+          ? 'low'
+          : (current.cursor.stage === 'implement' && current.cursor.turn > 0)
+            ? 'medium'
+            : undefined;
+    const sessionEffort = explicitEffort ?? autoEffort;
     const thinkingOn = current.cursor.noThink || sessionEffort === 'off'
       ? false
-      : sessionEffort
+      : explicitEffort
         ? true
-        : (Boolean(current.cursor.reasoning) || Boolean(providerRow && (isLlamaServerProvider(providerRow) || isUncensoredProvider(providerRow))));
+        : (Boolean(current.cursor.reasoning) || autoEffort === 'high' || autoEffort === 'medium' || Boolean(providerRow && (isLlamaServerProvider(providerRow) || isUncensoredProvider(providerRow))));
     const nativeThinking = thinkingOn || (/(?:qwen3|flint|deepseek[-_]?r1|qwq|\bo[134]\b)/i.test(`${model.apiName} ${model.name}`) && !/-instruct\b/i.test(model.apiName));
     const toolless = Boolean(current.cursor.noTools) || this.toolSupportOf(model) === false;
     const tools = toolless
@@ -1058,7 +1070,7 @@ export class Engine {
         paceMs: model.profileId === 'rehearsal' && process.env.NODE_ENV !== 'test' ? 10 : 0,
         numCtx,
         keepAlive: model.local ? keepAliveFor(model) : undefined,
-        think: Boolean(current.cursor.reasoning) && !current.cursor.noThink && sessionEffort !== 'off',
+        think: (Boolean(current.cursor.reasoning) || autoEffort === 'high') && !current.cursor.noThink && sessionEffort !== 'off',
         noThink: Boolean(current.cursor.noThink),
         effort: sessionEffort,
         sampling: effectiveSampling,
@@ -1437,7 +1449,12 @@ export class Engine {
         continue;
       }
       if (!tool) {
-        this.persistTool(run, call, `Unknown tool ${call.name}.`, 'failed');
+        const liveLock = this.store.getRun(run.id) ?? run;
+        const planBlocked = liveLock.cursor.stage === 'plan' && PLAN_READONLY_BLOCKED.has(call.name);
+        const msg = planBlocked
+          ? 'Blocked by plan mode (read-only): finish investigating and call exit_plan_mode with your plan before editing files or running mutating commands.'
+          : `Unknown tool ${call.name}.`;
+        this.persistTool(run, call, msg, planBlocked ? 'skipped' : 'failed');
         completed.add(call.id);
         this.bumpTools(run.id, completed);
         continue;
@@ -1503,8 +1520,30 @@ export class Engine {
       }
       const toolContext = this.contextFor(run, signal);
       const limits = this.limitsFor(run.agentId);
+      const liveForLock = this.store.getRun(run.id) ?? run;
       if ((limits.readOnly || this.store.getSettings().readOnly) && tool.mutates(args)) {
         this.persistTool(run, call, 'Blocked. This persona is in read-only mode.', 'skipped');
+        completed.add(call.id);
+        this.bumpTools(run.id, completed);
+        continue;
+      }
+      const inPlanMode = liveForLock.cursor.stage === 'plan';
+      const coderHelperInPlan = call.name === 'spawn_agent' && String(args.role || args.persona || '').toLowerCase() === 'coder';
+      if (inPlanMode && (PLAN_READONLY_BLOCKED.has(call.name) || coderHelperInPlan || (tool.mutates(args) && call.name !== 'repo_sync' && call.name !== 'consult_agent'))) {
+        this.persistTool(run, call, 'Blocked by plan mode (read-only): finish investigating and call exit_plan_mode with your plan before editing files or running mutating commands.', 'skipped');
+        completed.add(call.id);
+        this.bumpTools(run.id, completed);
+        continue;
+      }
+      const failTarget = String(args.path ?? args.command ?? args.query ?? args.pattern ?? args.action ?? args.url ?? '').slice(0, 80);
+      const failKey = `${call.name}:${failTarget}`;
+      if (liveForLock.cursor.failStreak?.key === failKey && liveForLock.cursor.failStreak.count >= 3) {
+        const nextCount = liveForLock.cursor.failStreak.count + 1;
+        const msg = `[thrash] Re-plan stop: ${call.name} failed ${liveForLock.cursor.failStreak.count} times in a row on ${failTarget || call.name}. Do not repeat — switch approach, call enter_plan_mode to re-investigate, or summarize where you are blocked.`;
+        if (nextCount >= 4) run.cursor.noTools = true;
+        this.store.updateRun(run.id, { cursor: { ...liveForLock.cursor, failStreak: { key: failKey, count: nextCount }, ...(nextCount >= 4 ? { noTools: true } : {}) } });
+        this.store.addStep({ runId: run.id, kind: 'contract', name: 'thrash', status: 'failed', input: { tool: call.name, target: failTarget, count: nextCount }, output: msg, toolCallId: call.id, turn: run.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: msg, startedAt: now() });
+        this.persistTool(run, call, msg, 'failed', false);
         completed.add(call.id);
         this.bumpTools(run.id, completed);
         continue;
@@ -1549,16 +1588,31 @@ export class Engine {
       const started = Date.now();
       try {
         const output = this.vault.redact(clampText(await tool.execute(args, { ...this.contextFor(run, signal), toolCallId: call.id }), 200_000));
+        const afterOk = this.store.getRun(run.id);
+        if (afterOk?.cursor.failStreak) this.store.updateRun(run.id, { cursor: { ...afterOk.cursor, failStreak: undefined } });
         this.store.updateStep(step.id, { status: 'completed', output, latencyMs: Date.now() - started, endedAt: now() });
         this.persistTool(run, call, `${output}${loopNote}`, 'completed', false);
         this.bus.publish({ type: 'step', runId: run.id, step: this.store.getStep(step.id) });
       } catch (error) {
         if (error instanceof CrashError || error instanceof StopError || error instanceof InterruptedToolError) throw error;
         const message = error instanceof Error ? error.message : String(error);
+        const liveForFail = this.store.getRun(run.id) ?? run;
+        const prevStreak = liveForFail.cursor.failStreak;
+        const failCount = prevStreak?.key === failKey ? prevStreak.count + 1 : 1;
+        if (failCount >= 4) run.cursor.noTools = true;
+        this.store.updateRun(run.id, { cursor: { ...liveForFail.cursor, failStreak: { key: failKey, count: failCount }, ...(failCount >= 4 ? { noTools: true } : {}) } });
+        const thrashNote = failCount === 2
+          ? `\n[thrash] Failed twice on ${failTarget || call.name}. Stop repeating blindly: inspect a wider slice, rethink the approach, or call enter_plan_mode.`
+          : failCount === 3
+            ? `\n[thrash] Re-plan stop: failed 3 times in a row on ${failTarget || call.name}. Do not repeat this call — switch approach or mark the step blocked.`
+            : failCount >= 4
+              ? `\n[thrash] Stopped retrying after ${failCount} failures on ${failTarget || call.name}. Summarize what worked and where you are blocked.`
+              : '';
         this.store.updateStep(step.id, { status: 'failed', error: message, endedAt: now(), latencyMs: Date.now() - started });
-        this.persistTool(run, call, `Error: ${message}${recoveryHint(call.name, message)}${loopNote}`, 'failed', false);
+        this.persistTool(run, call, `Error: ${message}${recoveryHint(call.name, message)}${thrashNote}${loopNote}`, 'failed', false);
       }
-      if (call.name === 'plan' && Array.isArray(args.items) && args.items.length && run.cursor.stage === 'plan') handoff = true;
+      const afterCall = this.store.getRun(run.id);
+      if (call.name === 'plan' && Array.isArray(args.items) && args.items.length && (afterCall?.cursor.stage ?? run.cursor.stage) === 'plan' && !afterCall?.cursor.enteredPlanViaTool) handoff = true;
       if (call.name === 'tasks' && args.action === 'set' && Array.isArray(args.items) && args.items.length >= 2) {
         const live = this.store.getRun(run.id)!;
         if (!live.cursor.longTask) this.store.updateRun(run.id, { cursor: { ...live.cursor, longTask: true } });
@@ -1830,9 +1884,11 @@ export class Engine {
     const chatWorkspaces = session ? await chatWorkspaceBrief(this.store, run.sessionId, session.ownerId || OWNER_ID).catch(() => '') : '';
     const stageNote = run.cursor.syncNote ? `\n\nWhat changed since you last looked:\n${run.cursor.syncNote}` : '';
     const roleNote = run.cursor.stage === 'plan'
-      ? '\n\nYou are planning a change to a shared repo. Pull it with repo_sync, summarize what changed, and consult the coder persona with that summary if one exists. Search the web when the task depends on current facts. Save the plan with the plan tool. Do not edit files yet.'
+      ? run.cursor.enteredPlanViaTool
+        ? '\n\nPLAN MODE (read-only): investigate with read_file, grep, glob, list_dir, web_search, or read-only research helpers. File edits and mutating commands are locked. Once you know the exact files and steps, call exit_plan_mode with your plan and acceptance checks.'
+        : '\n\nYou are planning a change to a shared repo. Pull it with repo_sync, summarize what changed, and consult the coder persona with that summary if one exists. Search the web when the task depends on current facts. Save the plan with the plan tool. Do not edit files yet.'
       : run.cursor.stage === 'implement'
-        ? '\n\nThe plan is saved. Implement it in the shared repos. Commit when the checks pass. Push only after the owner approves.'
+        ? '\n\nEXECUTE STAGE: the plan is saved and editing tools are unlocked. Work through the plan steps methodically, verify with tests or checks (or verify helpers), then summarize what changed, what was verified, and main points to keep in mind for the future.'
         : '';
     const skillNote = skillCatalog(this.store, agent.id, user?.content ?? '');
     const hasKb = this.hasKnowledge(agent.id);
@@ -2343,11 +2399,15 @@ export class Engine {
     // Tools the persona's contract would reject are never offered (they only cost tokens and a failed call).
     const contract = contractForAgent(agent.name);
     const permitted = allowed.filter((tool) => contractAllows(contract, tool.name, servers));
-    if (!leanMenuEnabled() || permitted.length <= LEAN_MIN_TOOLS) return permitted;
+    const hideDuplicateTasks = (list: Tool[]) => list.some((tool) => tool.name === 'plan') && !agent.toolAllowlist.includes('tasks')
+      ? list.filter((tool) => tool.name !== 'tasks')
+      : list;
+    if (!leanMenuEnabled() || permitted.length <= LEAN_MIN_TOOLS) return all ? permitted : hideDuplicateTasks(permitted);
     const core = new Set<string>([...agent.toolAllowlist, ...CORE_TOOLS]);
-    if (stage === 'plan') for (const name of ['plan', 'recall', 'consult_agent']) core.add(name);
+    if (stage === 'plan') for (const name of ['plan', 'recall', 'consult_agent', 'enter_plan_mode', 'exit_plan_mode']) core.add(name);
     if (core.has('make_slides')) core.add('slide_draft');
     if (stage === 'implement' || sessionMode === 'code') for (const tool of CODING_TOOLS) core.add(tool.name);
+    if (permitted.some((tool) => tool.name === 'plan' && core.has('plan')) && !agent.toolAllowlist.includes('tasks')) core.delete('tasks');
     const base = permitted.filter((tool) => core.has(tool.name));
     const baseNames = new Set(base.map((tool) => tool.name));
     const discoverable = permitted.filter((tool) => !baseNames.has(tool.name));
@@ -2445,12 +2505,13 @@ export class Engine {
     }
     if (this.ocrReader) names.add('read_image_text');
     if (this.imageAnalyzer) names.add('understand_image');
-    for (const name of ['tasks', 'manage_timer', 'manage_trigger', 'spawn_agent', 'helpers', 'memory_file', 'search_chats', 'propose_skill', 'run_tool_script', 'time_now', 'think', 'set_focus']) names.add(name);
+    for (const name of ['tasks', 'enter_plan_mode', 'exit_plan_mode', 'manage_timer', 'manage_trigger', 'spawn_agent', 'helpers', 'memory_file', 'search_chats', 'propose_skill', 'run_tool_script', 'time_now', 'think', 'set_focus']) names.add(name);
     if (this.store.getSettings().imageGen.mode !== 'off') names.add('generate_image');
     if (stage === 'plan') {
-      for (const name of ['web_search', 'web_fetch', 'read_file', 'list_dir', 'grep', 'glob', 'plan', 'recall', 'consult_agent']) names.add(name);
+      for (const name of ['web_search', 'web_fetch', 'read_file', 'list_dir', 'grep', 'glob', 'plan', 'recall', 'consult_agent', 'enter_plan_mode', 'exit_plan_mode']) names.add(name);
     }
     if (stage === 'implement' || sessionMode === 'code') for (const tool of CODING_TOOLS) names.add(tool.name);
+    if (stage === 'plan') for (const blocked of PLAN_READONLY_BLOCKED) names.delete(blocked);
     // MCP connector tools: owner personas only (servers carry the owner's tokens). A persona gets a server's tools when its
     // allowlist names them (exact name, "mcp:<server>" or "mcp:*"), or when its gallery template lists that connector.
     const mcp = (agent.ownerId || OWNER_ID) === OWNER_ID ? this.mcpTools() : [];
@@ -2464,7 +2525,7 @@ export class Engine {
     if (helper) for (const name of HELPER_DENIED) names.delete(name);
     // Built-in connectors the owner switched off take their tools with them.
     for (const name of disabledConnectorTools(this.store)) names.delete(name);
-    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), setFocusTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), fetchImageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl }),     ...slidesTools({ dataDir: this.libraryDir, photo: async (query, ctx) => ({ fileId: (await fetchWebImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, searxngUrl: this.store.getSettings().searxngUrl || process.env.SEARXNG_URL || '' }, { query, ownerId: ctx.ownerId, sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal, primaryOnly: true })).file.id }), image: async (prompt, ctx) => { try { return { fileId: (await generateImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }, { prompt, ownerId: ctx.ownerId, shape: 'landscape', sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal })).file.id }; } catch { const searxngUrl = this.store.getSettings().searxngUrl || process.env.SEARXNG_URL || ''; return { fileId: (await fetchWebImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, searxngUrl }, { query: prompt, ownerId: ctx.ownerId, sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal, primaryOnly: true })).file.id }; } } }), ...this.autonomy.tools(), tasksTool(), memoryFileTool(), searchChatsTool(), proposeSkillTool(), ...CONNECTOR_TOOLS(), ...vercelTools(), ...(this.ocrReader ? [ocrTool(this.ocrReader)] : []), ...(this.imageAnalyzer ? [understandImageTool(this.imageAnalyzer)] : []), ...this.extraTools, ...mcp.map((row) => row.tool)];
+    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), setFocusTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), fetchImageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl }),     ...slidesTools({ dataDir: this.libraryDir, photo: async (query, ctx) => ({ fileId: (await fetchWebImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, searxngUrl: this.store.getSettings().searxngUrl || process.env.SEARXNG_URL || '' }, { query, ownerId: ctx.ownerId, sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal, primaryOnly: true })).file.id }), image: async (prompt, ctx) => { try { return { fileId: (await generateImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }, { prompt, ownerId: ctx.ownerId, shape: 'landscape', sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal })).file.id }; } catch { const searxngUrl = this.store.getSettings().searxngUrl || process.env.SEARXNG_URL || ''; return { fileId: (await fetchWebImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, searxngUrl }, { query: prompt, ownerId: ctx.ownerId, sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal, primaryOnly: true })).file.id }; } } }), ...this.autonomy.tools(), tasksTool(), enterPlanModeTool(), exitPlanModeTool(), memoryFileTool(), searchChatsTool(), proposeSkillTool(), ...CONNECTOR_TOOLS(), ...vercelTools(), ...(this.ocrReader ? [ocrTool(this.ocrReader)] : []), ...(this.imageAnalyzer ? [understandImageTool(this.imageAnalyzer)] : []), ...this.extraTools, ...mcp.map((row) => row.tool)];
     const seen = new Set<string>();
     const chosen = catalog.filter((tool) => {
       if (!names.has(tool.name) || seen.has(tool.name)) return false;
@@ -2487,6 +2548,36 @@ export class Engine {
       libraryDir: this.libraryDir,
       roots: turnRoots(this.store, run, this.libraryDir),
       setFocus: (focus, phase) => this.publishFocus(run.id, focus, phase),
+      enterPlanMode: (goal, reason) => {
+        const live = this.store.getRun(run.id);
+        if (!live) return;
+        const focus = goal ? `Planning: ${goal.slice(0, 60)}` : reason ? `Planning: ${reason.slice(0, 60)}` : 'Planning in read-only mode';
+        this.store.updateRun(run.id, {
+          cursor: { ...live.cursor, stage: 'plan', workPhase: 'planning', focus, enteredPlanViaTool: true },
+        });
+        this.publishFocus(run.id, focus, 'planning');
+      },
+      exitPlanMode: ({ steps, checks, summary }) => {
+        const cleanSteps = (steps ?? []).map((s) => s.trim()).filter(Boolean).slice(0, 20);
+        if (run.sessionId && cleanSteps.length) {
+          replacePlan(this.store, run.sessionId, cleanSteps, run.id);
+        }
+        const live = this.store.getRun(run.id);
+        if (live) {
+          const focus = summary ? summary.slice(0, 60) : 'Executing plan';
+          this.store.updateRun(run.id, {
+            cursor: {
+              ...live.cursor,
+              stage: 'implement',
+              workPhase: 'editing',
+              focus,
+              enteredPlanViaTool: false,
+              ...(checks?.length ? { acceptance: checks } : {}),
+            },
+          });
+          this.publishFocus(run.id, focus, 'editing');
+        }
+      },
       // The owner's GitHub token, SSH key and vault never reach a member's persona.
       gitIdentity: member ? { name: agent.name, email: 'agent@local-agent.invalid' } : { ...gitIdentity(this.store.getSettings()), token: this.vault.valueByName('GITHUB_TOKEN') },
       consult: (name, question) => this.consult(run, name, question),
@@ -3193,7 +3284,7 @@ export function stableJson(value: unknown): string {
 
 const CONTRACT_ALWAYS = new Set([
   'request_secret', 'kb_search', 'load_skill', 'manage_timer', 'manage_trigger',
-  'time_now', 'tasks', 'think', 'memory_file', 'search_chats', 'web_search', 'web_fetch',
+  'time_now', 'tasks', 'plan', 'enter_plan_mode', 'exit_plan_mode', 'set_focus', 'think', 'memory_file', 'search_chats', 'web_search', 'web_fetch',
   'spawn_agent', 'helpers', 'propose_skill', 'read_output', 'run_skill_script',
   'find_context', 'share_file', 'make_slides', 'read_slides', 'slide_draft', 'fetch_image', 'browse', 'create_project', 'vercel', 'turbo_inspect', 'read_image_text', 'understand_image', 'generate_image', 'repo_sync',
   'create_file', 'write_file', 'read_file', 'list_dir', 'grep', 'glob', 'apply_patch', 'shell', 'git', 'find_tools',
