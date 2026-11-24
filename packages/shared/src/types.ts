@@ -1,5 +1,7 @@
 export type TokenizerId = 'gemma4' | 'qwen3' | 'gemini' | 'approx';
 
+export type ReasoningEffort = 'auto' | 'off' | 'low' | 'medium' | 'high';
+
 export type StrategyName = 'rolling' | 'hierarchical' | 'hierarchical+retrieval' | 'pinned' | 'retrieval';
 
 export type RequestKind =

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
-import type { RunCursor, StrategyName } from '@local-agent/shared';
+import type { ReasoningEffort, RunCursor, StrategyName } from '@local-agent/shared';
 import { DEFAULT_SETTINGS, normalizeSettings, type Settings } from './settings.js';
 import { writeLog } from './debug.js';
 import { nid, now, parseJson, slugify } from './util.js';
@@ -39,7 +39,7 @@ export interface Agent {
 export interface Room { id: string; name: string; createdAt: string; agentIds: string[] }
 export interface Session {
   id: string; agentId: string | null; roomId: string | null; title: string; summary: string;
-  activeModelId: string | null; modelPin: string | null; archived: boolean; mode: 'chat' | 'code'; workshopId: string | null; createdAt: string; updatedAt: string; ownerId: string;
+  activeModelId: string | null; modelPin: string | null; effort: Exclude<ReasoningEffort, 'auto'> | null; archived: boolean; mode: 'chat' | 'code'; workshopId: string | null; createdAt: string; updatedAt: string; ownerId: string;
   /** '' = first-message stub, 'auto' = generated, 'fallback' = heuristic, 'user' = renamed. */
   titleSource: string;
 }
@@ -240,6 +240,7 @@ export class Store {
     if (!sessionCols.includes('mode')) this.db.exec(`ALTER TABLE chat_sessions ADD COLUMN mode TEXT NOT NULL DEFAULT 'chat'`);
     if (!sessionCols.includes('workshop_id')) this.db.exec(`ALTER TABLE chat_sessions ADD COLUMN workshop_id TEXT`);
     if (!sessionCols.includes('model_pin')) this.db.exec(`ALTER TABLE chat_sessions ADD COLUMN model_pin TEXT`);
+    if (!sessionCols.includes('effort')) this.db.exec(`ALTER TABLE chat_sessions ADD COLUMN effort TEXT`);
     const triggerCols = this.many<Raw>('PRAGMA table_info(trigger_events)').map((row) => String(row.name));
     if (!triggerCols.includes('delivery_key')) this.db.exec('ALTER TABLE trigger_events ADD COLUMN delivery_key TEXT');
     this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS trigger_delivery ON trigger_events(trigger_id, delivery_key)');
@@ -665,12 +666,12 @@ export class Store {
     return row ? mapSession(row) : null;
   }
 
-  updateSession(id: string, patch: Partial<Pick<Session, 'title' | 'summary' | 'activeModelId' | 'modelPin' | 'archived' | 'mode' | 'workshopId' | 'agentId'>>) {
+  updateSession(id: string, patch: Partial<Pick<Session, 'title' | 'summary' | 'activeModelId' | 'modelPin' | 'effort' | 'archived' | 'mode' | 'workshopId' | 'agentId'>>) {
     const current = this.getSession(id);
     if (!current) return null;
     const next = { ...current, ...patch, updatedAt: now() };
-    this.db.prepare('UPDATE chat_sessions SET title=?, summary=?, active_model_id=?, model_pin=?, archived=?, mode=?, workshop_id=?, agent_id=?, updated_at=? WHERE id=?').run(
-      next.title, next.summary, next.activeModelId, next.modelPin, next.archived ? 1 : 0, next.mode, next.workshopId, next.agentId, next.updatedAt, id,
+    this.db.prepare('UPDATE chat_sessions SET title=?, summary=?, active_model_id=?, model_pin=?, effort=?, archived=?, mode=?, workshop_id=?, agent_id=?, updated_at=? WHERE id=?').run(
+      next.title, next.summary, next.activeModelId, next.modelPin, next.effort, next.archived ? 1 : 0, next.mode, next.workshopId, next.agentId, next.updatedAt, id,
     );
     return this.getSession(id);
   }
@@ -1128,6 +1129,7 @@ function mapSession(row: Raw): Session {
     id: String(row.id), agentId: row.agent_id ? String(row.agent_id) : null, roomId: row.room_id ? String(row.room_id) : null,
     title: String(row.title), summary: String(row.summary ?? ''), activeModelId: row.active_model_id ? String(row.active_model_id) : null,
     modelPin: row.model_pin ? String(row.model_pin) : null,
+    effort: (row.effort && ['off', 'low', 'medium', 'high'].includes(String(row.effort)) ? String(row.effort) : null) as Session['effort'],
     archived: Boolean(row.archived), mode: row.mode === 'code' ? 'code' : 'chat', workshopId: row.workshop_id ? String(row.workshop_id) : null, createdAt: String(row.created_at), updatedAt: String(row.updated_at),
     ownerId: String(row.owner_id || 'owner'), titleSource: String(row.title_source ?? ''),
   };

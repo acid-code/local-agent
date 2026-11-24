@@ -469,6 +469,7 @@ export class Engine {
       mode: source.mode,
       workshopId: source.workshopId,
       modelPin: source.modelPin,
+      effort: source.effort,
       activeModelId: source.activeModelId,
     });
     const workspaces = getChatWorkspaces(this.store, source.id);
@@ -960,15 +961,20 @@ export class Engine {
       if (kind === 'uncensored') await this.llama.switchToUncensored();
       else await this.llama.switchToQwen();
     }
-    const thinkingOn = !current.cursor.noThink && (Boolean(current.cursor.reasoning) || Boolean(providerRow && (isLlamaServerProvider(providerRow) || isUncensoredProvider(providerRow))));
+    const sessionForCtx = this.store.getSession(run.sessionId);
+    const sessionEffort = !current.cursor.noThink && sessionForCtx?.effort ? sessionForCtx.effort : undefined;
+    const thinkingOn = current.cursor.noThink || sessionEffort === 'off'
+      ? false
+      : sessionEffort
+        ? true
+        : (Boolean(current.cursor.reasoning) || Boolean(providerRow && (isLlamaServerProvider(providerRow) || isUncensoredProvider(providerRow))));
     const nativeThinking = thinkingOn || (/(?:qwen3|flint|deepseek[-_]?r1|qwq|\bo[134]\b)/i.test(`${model.apiName} ${model.name}`) && !/-instruct\b/i.test(model.apiName));
     const toolless = Boolean(current.cursor.noTools) || this.toolSupportOf(model) === false;
     const tools = toolless
       ? []
-      : this.tools(agent, this.store.getSession(run.sessionId)?.mode, current.cursor.stage, current.cursor.toolSubset, Boolean(current.cursor.helperId), current)
+      : this.tools(agent, sessionForCtx?.mode, current.cursor.stage, current.cursor.toolSubset, Boolean(current.cursor.helperId), current)
           .filter((tool) => !(nativeThinking && tool.name === 'think'))
           .map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
-    const sessionForCtx = this.store.getSession(run.sessionId);
     const repoTask = Boolean(sessionForCtx?.mode === 'code' || sessionForCtx?.workshopId || current.cursor.stage || turnRoots(this.store, current, this.libraryDir).length > 0);
     const roleForCtx = current.cursor.autoRole || contractForAgent(agent.name)?.modelRole || 'main';
     const roleBudget = roleContextBudget(roleForCtx, model, { repoTask });
@@ -1017,8 +1023,9 @@ export class Engine {
         paceMs: model.profileId === 'rehearsal' && process.env.NODE_ENV !== 'test' ? 10 : 0,
         numCtx,
         keepAlive: model.local ? keepAliveFor(model) : undefined,
-        think: Boolean(current.cursor.reasoning) && !current.cursor.noThink,
+        think: Boolean(current.cursor.reasoning) && !current.cursor.noThink && sessionEffort !== 'off',
         noThink: Boolean(current.cursor.noThink),
+        effort: sessionEffort,
         sampling: effectiveSampling,
         maxTokens: maxTokensFor({ thinking: thinkingOn }),
       })) {

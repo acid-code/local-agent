@@ -748,6 +748,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun setEffort(effort: String?) {
+        val sessionId = _ui.value.currentSession?.id ?: return
+        viewModelScope.launch {
+            runCatching { client.patchSessionEffort(sessionId, effort) }
+                .onSuccess { _ui.update { s -> s.copy(currentSession = s.currentSession?.copy(effort = effort)) } }
+                .onFailure { e -> _ui.update { it.copy(snackbar = e.message) } }
+        }
+    }
+
     fun refreshModels() {
         viewModelScope.launch {
             _ui.update { it.copy(refreshingModels = true) }

@@ -78,6 +78,8 @@ export interface ModelProvider {
     think?: boolean;
     /** Send think:false explicitly. Used to retry a thinking model that gave no answer. */
     noThink?: boolean;
+    /** Explicit per-chat reasoning effort override. */
+    effort?: 'off' | 'low' | 'medium' | 'high';
     /** Sampling from the model card (llama-server). */
     sampling?: Sampling;
     /** Output token cap. */
@@ -129,10 +131,18 @@ export function providerFor(model: ModelRow, provider: ProviderRow, fetchImpl: t
   return new OpenAIProvider(base, key || '', fetchImpl, provider.kind === 'openrouter', extra, llama);
 }
 
+/** Request parameters for llama-server /v1/chat/completions from a reasoning effort level. */
+export function llamaEffortParams(effort: 'off' | 'low' | 'medium' | 'high'): Record<string, unknown> {
+  if (effort === 'off') return { chat_template_kwargs: { enable_thinking: false }, reasoning_effort: 'none', reasoning_budget_tokens: 0 };
+  if (effort === 'low') return { chat_template_kwargs: { enable_thinking: true }, reasoning_effort: 'low', reasoning_budget_tokens: 512 };
+  if (effort === 'medium') return { chat_template_kwargs: { enable_thinking: true }, reasoning_effort: 'medium', reasoning_budget_tokens: 2048 };
+  return { chat_template_kwargs: { enable_thinking: true }, reasoning_effort: 'high' };
+}
+
 class OllamaProvider implements ModelProvider {
   constructor(private readonly root: string, private readonly fetchImpl: typeof fetch) {}
 
-  async *complete(req: { model: string; messages: ChatMessage[]; tools?: ToolDefinition[]; signal?: AbortSignal; numCtx?: number; keepAlive?: string | number; think?: boolean; noThink?: boolean; maxTokens?: number }): AsyncIterable<ProviderEvent> {
+  async *complete(req: { model: string; messages: ChatMessage[]; tools?: ToolDefinition[]; signal?: AbortSignal; numCtx?: number; keepAlive?: string | number; think?: boolean; noThink?: boolean; effort?: 'off' | 'low' | 'medium' | 'high'; maxTokens?: number }): AsyncIterable<ProviderEvent> {
     const response = await this.fetchImpl(`${this.root}/api/chat`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -142,7 +152,7 @@ class OllamaProvider implements ModelProvider {
         stream: true,
         messages: req.messages.map(toOllama),
         tools: req.tools?.length ? req.tools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.parameters } })) : undefined,
-        think: req.noThink ? false : req.think || undefined,
+        think: req.noThink || req.effort === 'off' ? false : req.effort ? true : req.think || undefined,
         keep_alive: req.keepAlive ?? '30m',
         options: { num_ctx: req.numCtx ?? 32768, ...(req.maxTokens ? { num_predict: req.maxTokens } : {}) },
       }),
@@ -186,7 +196,7 @@ class OpenAIProvider implements ModelProvider {
     private readonly isLlama = false,
   ) {}
 
-  async *complete(req: { model: string; messages: ChatMessage[]; tools?: ToolDefinition[]; signal?: AbortSignal; think?: boolean; noThink?: boolean; sampling?: Sampling; maxTokens?: number }): AsyncIterable<ProviderEvent> {
+  async *complete(req: { model: string; messages: ChatMessage[]; tools?: ToolDefinition[]; signal?: AbortSignal; think?: boolean; noThink?: boolean; effort?: 'off' | 'low' | 'medium' | 'high'; sampling?: Sampling; maxTokens?: number }): AsyncIterable<ProviderEvent> {
     const headers: Record<string, string> = { 'content-type': 'application/json' };
     if (this.apiKey) headers.authorization = `Bearer ${this.apiKey}`;
     if (this.openRouter) {
@@ -198,11 +208,20 @@ class OpenAIProvider implements ModelProvider {
     const llamaExtras: Record<string, unknown> = this.isLlama
       ? {
         stream_options: { include_usage: true },
-        ...(req.noThink ? { chat_template_kwargs: { enable_thinking: false } } : req.think ? { chat_template_kwargs: { enable_thinking: true } } : {}),
+        ...(req.noThink
+          ? { chat_template_kwargs: { enable_thinking: false } }
+          : req.effort
+            ? llamaEffortParams(req.effort)
+            : req.think
+              ? { chat_template_kwargs: { enable_thinking: true } }
+              : {}),
         ...(req.sampling ?? {}),
         ...(req.maxTokens ? { max_tokens: req.maxTokens } : {}),
       }
-      : (req.maxTokens ? { max_tokens: req.maxTokens } : {});
+      : {
+        ...(req.maxTokens ? { max_tokens: req.maxTokens } : {}),
+        ...(!req.noThink && req.effort ? { reasoning_effort: req.effort === 'off' ? 'none' : req.effort } : {}),
+      };
     const payload = JSON.stringify({
       model: req.model,
       stream: true,

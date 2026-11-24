@@ -379,10 +379,12 @@ private fun ChatScreen(state: AppUiState, vm: ChatViewModel, onVoiceDictation: (
         ModelPickerSheet(
             models = state.models,
             currentPin = state.currentSession?.modelPin,
+            currentEffort = state.currentSession?.effort,
             refreshing = state.refreshingModels,
             pullingStatus = state.pullingStatus,
             onDismiss = { showModelSheet = false },
             onSelect = { id -> vm.pinModel(id); showModelSheet = false },
+            onSelectEffort = vm::setEffort,
             onRefresh = vm::refreshModels,
             onPull = vm::pullModel,
         )

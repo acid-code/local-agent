@@ -975,7 +975,14 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     return store.pageMessages(id, query.limit ?? 100, query.before ?? null);
   });
   app.patch('/api/sessions/:id', async (req) => {
-    const body = parse(z.object({ title: z.string().optional(), mode: z.enum(['chat', 'code']).optional(), modelPin: z.string().nullable().optional(), agentId: z.string().optional(), workshopId: z.string().nullable().optional() }), req.body);
+    const body = parse(z.object({
+      title: z.string().optional(),
+      mode: z.enum(['chat', 'code']).optional(),
+      modelPin: z.string().nullable().optional(),
+      effort: z.enum(['auto', 'off', 'low', 'medium', 'high']).nullable().optional(),
+      agentId: z.string().optional(),
+      workshopId: z.string().nullable().optional(),
+    }), req.body);
     if (body.workshopId) { mustOwn(store, req, 'workshop', body.workshopId, 'Workspace set not found.'); body.mode = body.mode ?? 'code'; }
     mustOwn(store, req, 'session', (req.params as { id: string }).id, 'Chat not found.');
     if (body.agentId) mustOwn(store, req, 'agent', body.agentId, 'Persona not found.');
@@ -983,7 +990,10 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const id = (req.params as { id: string }).id;
     // A title typed by the user is theirs: generated titles never replace it.
     if (body.title !== undefined) { const title = body.title.trim().slice(0, 120); delete body.title; if (title) store.setSessionTitle(id, title, 'user'); }
-    return { session: store.updateSession(id, body) };
+    const effort = body.effort !== undefined ? (body.effort === 'auto' ? null : body.effort) : undefined;
+    const { effort: _ignored, ...rest } = body;
+    const patch = effort !== undefined ? { ...rest, effort } : rest;
+    return { session: store.updateSession(id, patch) };
   });
   /** The workspaces this chat works in (its context), sets expanded, with branch and uncommitted count. */
   app.get('/api/sessions/:id/workspaces', async (req) => {

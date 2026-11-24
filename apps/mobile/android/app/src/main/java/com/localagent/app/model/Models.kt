@@ -22,6 +22,7 @@ data class ChatSession(
     val agentId: String?,
     val title: String,
     val modelPin: String? = null,
+    val effort: String? = null,
     val mode: String = "chat",
     val updatedAt: String = "",
     val summary: String = "",

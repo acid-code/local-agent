@@ -22,7 +22,7 @@ import { TypingDots, WorkGroupView } from '../components/WorkSteps';
 import { TraceList } from '../components/TraceList';
 import { groupWork, savedSkills } from '../lib/work-steps';
 import { ContextNudgeBanner, DecisionTimeline, BulkDiffCard, LocalRepoPicker, MiniAgentStrip, type MiniAgentRow } from '../components/ChatUpgrades';
-import { parseSources, toolSummary, waitStateOf, waitedFor, type ContextBreakdown } from '@local-agent/shared';
+import { parseSources, toolSummary, waitStateOf, waitedFor, type ContextBreakdown, type ReasoningEffort } from '@local-agent/shared';
 import { toast, errorText } from '../lib/toast';
 import { copyText } from '../lib/files';
 import { speak, subscribeSpeaking } from '../lib/speak';
@@ -34,7 +34,7 @@ import { Markdown } from '../components/Markdown';
 import { Face, type FaceAgent } from '../components/Face';
 import { t, fmt } from '../i18n';
 
-interface Session { id: string; title: string; agentId: string | null; mode: 'chat' | 'code'; workshopId?: string | null; modelPin?: string | null; updatedAt?: string }
+interface Session { id: string; title: string; agentId: string | null; mode: 'chat' | 'code'; workshopId?: string | null; modelPin?: string | null; effort?: Exclude<ReasoningEffort, 'auto'> | null; updatedAt?: string }
 type Agent = PanelAgent & FaceAgent;
 interface Message { id: string; role: string; content: string; createdAt?: string; agentId?: string | null; toolName?: string | null; toolCallId?: string | null; runId?: string | null; routingNote?: string | null; thinking?: string | null; toolCalls?: { id?: string; name: string; arguments?: string }[] | null }
 interface Step { id: string; kind: string; name: string; status: string; latencyMs?: number; output?: unknown; error?: string | null }
@@ -88,6 +88,7 @@ export function Chat() {
   const modelState = useUsableModels();
   const { models: usable, all: models, loaded: modelsLoaded } = modelState;
   const [modelPin, setModelPin] = useState<string | null>(null);
+  const [effort, setEffort] = useState<ReasoningEffort>('auto');
   const [loadingNote, setLoadingNote] = useState('');
   // What a waiting run waits for: the large-model queue or RAM (see waitStateOf).
   const [waitInfo, setWaitInfo] = useState<unknown>(null);
@@ -218,6 +219,7 @@ export function Chat() {
       setEdits(data.edits);
       setMode(data.session.mode);
       setModelPin(data.session.modelPin || null);
+      setEffort(data.session.effort || 'auto');
       setBreakdown(data.breakdown ?? null);
       if (switching) {
         setRunError(null);
@@ -1393,6 +1395,39 @@ export function Chat() {
                   } catch (error) { toast(errorText(error), 'error'); setModelPin(previous); }
                 }} />
               </span>
+              {(() => {
+                const effortOptions: { value: ReasoningEffort; label: string; hint: string }[] = [
+                  { value: 'auto', label: t('Auto'), hint: t('per turn') },
+                  { value: 'off', label: t('Off'), hint: t('no thinking, fastest') },
+                  { value: 'low', label: t('Low'), hint: t('short thinking') },
+                  { value: 'medium', label: t('Medium'), hint: t('balanced') },
+                  { value: 'high', label: t('High'), hint: t('deep thinking') },
+                ];
+                const pickEffort = async (value: ReasoningEffort) => {
+                  const previous = effort;
+                  setEffort(value);
+                  try {
+                    if (current) await api(`/api/sessions/${current}`, { method: 'PATCH', body: JSON.stringify({ effort: value === 'auto' ? null : value }) });
+                  } catch (error) { toast(errorText(error), 'error'); setEffort(previous); }
+                };
+                const activeOption = effortOptions.find((opt) => opt.value === effort) ?? effortOptions[0]!;
+                return (
+                  <DropMenu
+                    label={t('Thinking effort')}
+                    text={effort === 'auto' ? t('Effort') : `${t('Effort')}: ${activeOption.label}`}
+                    icon={Brain}
+                    className="model-trigger"
+                    align="start"
+                    trailing={<ChevronDown size={14} aria-hidden />}
+                    items={effortOptions.map((opt) => ({
+                      label: opt.label,
+                      hint: opt.hint,
+                      checked: effort === opt.value,
+                      onSelect: () => void pickEffort(opt.value),
+                    }))}
+                  />
+                );
+              })()}
               <ContextRing
                 breakdown={breakdown}
                 busy={Boolean(active)}

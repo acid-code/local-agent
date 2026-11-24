@@ -12,7 +12,9 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.shape.CircleShape
@@ -380,10 +382,12 @@ fun ComposerBar(
 fun ModelPickerSheet(
     models: List<UsableModel>,
     currentPin: String?,
+    currentEffort: String?,
     refreshing: Boolean,
     pullingStatus: String?,
     onDismiss: () -> Unit,
     onSelect: (String?) -> Unit,
+    onSelectEffort: (String?) -> Unit,
     onRefresh: () -> Unit,
     onPull: (String) -> Unit,
 ) {
@@ -393,6 +397,28 @@ fun ModelPickerSheet(
             Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp).navigationBarsPadding(),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
+            Text("Thinking effort", style = MaterialTheme.typography.labelLarge)
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                val efforts = listOf(
+                    null to "Auto",
+                    "off" to "Off",
+                    "low" to "Low",
+                    "medium" to "Med",
+                    "high" to "High",
+                )
+                efforts.forEach { (value, label) ->
+                    val selected = (currentEffort ?: "") == (value ?: "")
+                    FilterChip(
+                        selected = selected,
+                        onClick = { onSelectEffort(value) },
+                        label = { Text(label) },
+                    )
+                }
+            }
+            HorizontalDivider()
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text("Models", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                 TextButton(onClick = onRefresh, enabled = !refreshing) {

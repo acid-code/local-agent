@@ -26,6 +26,7 @@ object AgentJson {
         agentId = obj.optString("agentId", "").takeIf { it.isNotBlank() && it != "null" },
         title = obj.optString("title", "").takeIf { it.isNotBlank() && it != "null" } ?: "New chat",
         modelPin = obj.optString("modelPin", "").takeIf { it.isNotBlank() && it != "null" },
+        effort = obj.optString("effort", "").takeIf { it.isNotBlank() && it != "null" },
         mode = obj.optString("mode", "chat"),
         updatedAt = obj.optString("updatedAt", ""),
         summary = obj.optString("summary", "").takeIf { it != "null" }.orEmpty(),

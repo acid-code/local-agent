@@ -222,6 +222,12 @@ class LocalAgentClient(context: Context) {
         })
     }
 
+    suspend fun patchSessionEffort(sessionId: String, effort: String?) {
+        requestJson("PATCH", "/api/sessions/$sessionId", JSONObject().apply {
+            put("effort", effort ?: JSONObject.NULL)
+        })
+    }
+
     suspend fun getSession(sessionId: String): SessionDetail {
         return try {
             val json = requestJson("GET", "/api/sessions/$sessionId?limit=150")
