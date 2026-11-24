@@ -464,7 +464,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       const preview = previewOf(rows);
       const at = rows.at(-1)?.at;
       const chat = store.latestSessionForAgent(agent.id, owner);
-      if (chat && needsTitle(chat.titleSource) && rows.length) untitled.push(chat.id);
+      if (chat && needsTitle(chat.titleSource, chat.title) && rows.length) untitled.push(chat.id);
       return {
         ...agent,
         lastMessage: preview && at ? { text: preview.text, role: preview.role, at } : null,
@@ -888,7 +888,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   app.get('/api/sessions', async (req) => {
     const query = parse(z.object({ limit: z.coerce.number().int().min(1).max(500).optional(), cursor: z.string().optional() }), req.query);
     const page = store.pageSessions({ limit: query.limit ?? 100, cursor: query.cursor || null, ownerId: me(req) });
-    const untitled = page.sessions.filter((row) => needsTitle(row.titleSource) && row.title !== 'New chat').slice(0, 10).map((row) => row.id);
+    const untitled = page.sessions.filter((row) => needsTitle(row.titleSource, row.title) && row.title !== 'New chat').slice(0, 10).map((row) => row.id);
     if (untitled.length) engine.queueTitles(untitled);
     return page;
   });

@@ -67,7 +67,7 @@ import { GALLERY } from './gallery.js';
 import { disabledRules } from './rules.js';
 import { CONNECTOR_TOOLS, disabledConnectorTools } from './connectors.js';
 import { memoryBrief, memoryFileTool, projectRules, proposeSkillTool, searchChatsTool, skillNudge } from './learning.js';
-import { cleanText, fallbackTitle, isNotice, needsTitle, parseTitle, titlePrompt } from './chat-titles.js';
+import { cleanText, fallbackTitle, hasHebrew, isNotice, needsTitle, parseTitle, titlePrompt } from './chat-titles.js';
 import { LlamaWatch, OLLAMA_SIDE_MAX_GIB, isLlamaServerProvider, isNonChatModel, isOllamaProvider, isUncensoredProvider, modelGiB } from './coexist.js';
 
 /** A run in one of these states can still use the answer to a secret request or approval. */
@@ -2364,7 +2364,7 @@ export class Engine {
   /** Names one chat from its first exchange, unless the user named it or it already has a generated title. */
   async titleSession(sessionId: string): Promise<string | null> {
     const session = this.store.getSession(sessionId);
-    if (!session || !needsTitle(session.titleSource)) return null;
+    if (!session || !needsTitle(session.titleSource, session.title)) return null;
     const messages = this.store.listMessages(sessionId);
     const user = messages.find((m) => m.role === 'user' && cleanText(m.content));
     if (!user) return null;
@@ -2375,15 +2375,27 @@ export class Engine {
     if (model) {
       try {
         const provider = this.provider(model);
-        let out = '';
-        for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: titlePrompt(user.content, reply?.content ?? '') }], paceMs: 0, noThink: true, sampling: samplingFor(`${model.apiName} ${model.name}`, { thinking: false, task: 'general' }), maxTokens: 40, signal: AbortSignal.timeout(20_000) })) {
-          if (event.type === 'token') out += event.text;
-        }
+        const runTitleComplete = async (prompt: string): Promise<string> => {
+          let out = '';
+          for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, noThink: true, sampling: samplingFor(`${model.apiName} ${model.name}`, { thinking: false, task: 'general' }), maxTokens: 40, signal: AbortSignal.timeout(20_000) })) {
+            if (event.type === 'token') out += event.text;
+          }
+          return out;
+        };
+        const out = await runTitleComplete(titlePrompt(user.content, reply?.content ?? ''));
         title = parseTitle(out);
+        if (!title && hasHebrew(out)) {
+          const retryPrompt = `Translate the topic of this chat into a 3 to 6 word English title using only English words. Reply with the title only:\n\n${out.trim().slice(0, 200)}\nUser: ${cleanText(user.content).slice(0, 300)}`;
+          title = parseTitle(await runTitleComplete(retryPrompt));
+        }
       } catch { title = null; }
     }
     const source = title ? 'auto' : 'fallback';
-    title = title ?? fallbackTitle(user.content);
+    if (!title) {
+      const fb = fallbackTitle(user.content);
+      if (session.titleSource === 'auto' && hasHebrew(fb)) return null;
+      title = fb;
+    }
     if (session.titleSource === 'fallback' && source === 'fallback') return null;
     const fresh = this.store.getSession(sessionId);
     if (!fresh || fresh.titleSource === 'user') return null;

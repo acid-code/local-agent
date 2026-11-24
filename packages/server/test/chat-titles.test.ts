@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cleanText, fallbackTitle, needsTitle, parseTitle, previewOf } from '../src/chat-titles';
+import { cleanText, fallbackTitle, needsTitle, parseTitle, previewOf, titlePrompt } from '../src/chat-titles';
 import { shellTimeoutMs } from '../src/tools';
 import { humanDuration, pairSteps, traceLabel, traceSummary } from '../../web/src/lib/trace';
 
@@ -12,15 +12,22 @@ describe('chat titles and previews', () => {
     const p = previewOf([{ role: 'user', content: 'im working on the site' }, { role: 'assistant', content: '⚠️ This reply stopped before finishing' }]);
     expect(p).toEqual({ role: 'user', text: 'im working on the site' });
   });
-  it('parses model titles (Hebrew kept) and rejects junk', () => {
+  it('instructs English-only prompts, keeps English titles, and rejects Hebrew or junk', () => {
+    const prompt = titlePrompt('חפש לי דיסקים באליאקספרס', 'Sure, checking AliExpress listings now.');
+    expect(prompt).toMatch(/English only/i);
+    expect(prompt).not.toMatch(/write the title in Hebrew/i);
     expect(parseTitle('Title: "Connect Vercel deployment."')).toBe('Connect Vercel deployment');
-    expect(parseTitle('חיבור לחשבון ורסל')).toBe('חיבור לחשבון ורסל');
+    expect(parseTitle('AliExpress NVMe SSD prices')).toBe('AliExpress NVMe SSD prices');
+    expect(parseTitle('חיבור לחשבון ורסל')).toBeNull();
+    expect(parseTitle('בדוק אלiexpress תמונה בחיים')).toBeNull();
     expect(parseTitle('')).toBeNull();
     expect(parseTitle('one two three four five six seven eight nine ten eleven')).toBeNull();
   });
-  it('falls back to the first words and never replaces a user title', () => {
+  it('falls back to the first words, re-queues Hebrew auto titles, and never replaces a user title', () => {
     expect(fallbackTitle('you you connect to my vercel for the deploy please now')).toBe('you you connect to my vercel');
-    expect(needsTitle('user')).toBe(false);
+    expect(needsTitle('user', 'צ׳אט בעברית')).toBe(false);
+    expect(needsTitle('auto', 'English title')).toBe(false);
+    expect(needsTitle('auto', 'בדוק אלiexpress תמונה בחיים')).toBe(true);
     expect(needsTitle('auto')).toBe(false);
     expect(needsTitle('fallback')).toBe(true);
     expect(needsTitle('')).toBe(true);

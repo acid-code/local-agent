@@ -1,12 +1,14 @@
 /**
- * Chat titles and previews for the sidebar. Titles are 3-6 words written by the small side model after the first
- * exchange (in the chat's language; Hebrew stays Hebrew), with a plain-text fallback when no model is around.
+ * Chat titles and previews for the sidebar. Titles are 3-6 words in English written by the small side model after the first
+ * exchange, with a plain-text fallback when no model is around.
  * A title the user typed (rename) is never replaced. Pure helpers here; the engine does the model call.
  */
 import { CONTEXT_MARK } from './mentions.js';
 
 /** Where a chat's title came from: '' = the first-message stub, 'auto' = generated, 'fallback' = heuristic, 'user' = renamed. */
 export type TitleSource = '' | 'auto' | 'fallback' | 'user';
+
+export const hasHebrew = (text: string): boolean => /[\u0590-\u05FF]/.test(text);
 
 /** Strips our own markers, tool/action tags, markdown and links, so previews and prompts read as plain text. */
 export function cleanText(raw: string): string {
@@ -48,20 +50,21 @@ export function previewOf(messages: { role: string; content: string }[], max = 2
 /** The prompt for the side model: the first exchange, trimmed. */
 export function titlePrompt(user: string, reply: string): string {
   return [
-    'Write a short title (3 to 6 words) for this chat, like a chat app does.',
-    'Use the same language as the user\'s message (if it is Hebrew, write the title in Hebrew).',
-    'No quotes, no emoji, no trailing punctuation. Reply with the title only.',
+    'Write a short title in English (3 to 6 words) summarizing this chat.',
+    'Always write the title in English only — translate the topic to English if the chat uses another language.',
+    'No quotes, no emoji, no trailing punctuation. Reply with the English title only.',
     '',
     `User: ${cleanText(user).slice(0, 600)}`,
     reply ? `Assistant: ${cleanText(reply).slice(0, 400)}` : '',
   ].filter((line) => line !== undefined).join('\n');
 }
 
-/** Cleans what the model wrote into a title, or null when it is unusable. */
+/** Cleans what the model wrote into an English title, or null when it is unusable (e.g. contains Hebrew or lacks Latin letters). */
 export function parseTitle(raw: string): string | null {
   let text = cleanText(String(raw ?? '').replace(/<think>[\s\S]*?<\/think>/gi, ''));
   text = text.split(/\n/)[0] ?? '';
   text = text.replace(/^(title|כותרת)\s*[:：-]\s*/i, '').replace(/^["'“”«»‘’]+|["'“”«»‘’]+$/g, '').replace(/[.!?。:;,]+$/u, '').trim();
+  if (!text || hasHebrew(text) || !/[A-Za-z]/.test(text)) return null;
   const words = text.split(/\s+/).filter(Boolean);
   if (!words.length || words.length > 10) return null;
   const title = words.slice(0, 8).join(' ');
@@ -76,7 +79,9 @@ export function fallbackTitle(user: string): string {
   return title.length > 48 ? `${title.slice(0, 47)}…` : title;
 }
 
-/** A chat still needs a generated title (it has a first exchange and nobody named it). */
-export function needsTitle(source: string | null | undefined): boolean {
-  return source !== 'auto' && source !== 'user';
+/** A chat still needs a generated title (unnamed, heuristic fallback, or an old auto-title containing Hebrew). */
+export function needsTitle(source: string | null | undefined, title?: string | null): boolean {
+  if (source === 'user') return false;
+  if (source === 'auto') return Boolean(title && hasHebrew(title));
+  return true;
 }
