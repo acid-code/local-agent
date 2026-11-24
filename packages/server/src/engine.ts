@@ -37,7 +37,7 @@ import type { DockerCtl } from './docker.js';
 import { indexText, retrieve, type VectorIndex } from './embeddings.js';
 import { computePrefillSnapshot, countGeminiTokens, maxTokensFor, ollamaNumCtx, providerFor, samplingFor, type ModelProvider, type PrefillSnapshot } from './providers.js';
 import type { Settings } from './settings.js';
-import { CODING_TOOLS, replacePlan } from './coding.js';
+import { CODING_TOOLS, readPlan, replacePlan } from './coding.js';
 import { formatCitations, searchKnowledge } from './kb.js';
 import { kbSearchTool, loadSkillTool, setFocusTool, toolsFor, type Tool, type ToolContext } from './tools.js';
 import { CORE_TOOLS, LEAN_MIN_TOOLS, SEED_TOOLS, findToolsTool, leanMenuEnabled, rankTools } from './toolsearch.js';
@@ -877,12 +877,12 @@ export class Engine {
   private stepCap(cursor: RunCursor, sessionMode?: string) {
     const settings = this.store.getSettings();
     const configured = Number.isFinite(settings.maxSteps) ? settings.maxSteps : 24;
-    const base = cursor.longTask
-      ? LONG_TASK_STEPS
-      : sessionMode === 'code' || cursor.stage
-        ? 24
-        : 12;
-    return cursor.maxSteps ? Math.min(cursor.maxSteps, base) : Math.min(Math.max(8, configured), base);
+    if (cursor.maxSteps) return Math.min(cursor.maxSteps, cursor.longTask ? LONG_TASK_STEPS : 28);
+    if (cursor.longTask) return Math.max(configured, LONG_TASK_STEPS);
+    if (cursor.stage === 'plan' || cursor.stage === 'implement' || sessionMode === 'code') {
+      return Math.max(configured, 28);
+    }
+    return Math.max(16, Math.min(configured, 24));
   }
 
   private async stepModel(run: RunRow, signal: AbortSignal) {
@@ -3218,6 +3218,11 @@ function senderFor(store: Store, fallback: string, call: ToolCall) {
 function stageFor(store: Store, run: RunRow): 'plan' | 'implement' | undefined {
   if ((run.cursor.depth ?? 0) > 0) return undefined;
   if (run.cursor.stage === 'plan' || run.cursor.stage === 'implement') return run.cursor.stage;
+  const priorParent = store.listSessionRuns(run.sessionId, 5).find((r) => r.id !== run.id && !r.parentRunId);
+  if (priorParent?.cursor.stage === 'implement') {
+    const plan = readPlan(store, run.sessionId);
+    if (plan?.items.some((item) => item.status === 'pending' || item.status === 'doing')) return 'implement';
+  }
   const session = store.getSession(run.sessionId);
   const text = [...store.listMessages(run.sessionId)].reverse().find((message) => message.role === 'user')?.content ?? '';
   const match = matchRepos(text, listSharedRepos(store));
@@ -3593,6 +3598,11 @@ export function detectDegenerateRepeat(buf: string): string | null {
   if (single) return single[0];
   const multi = tail.match(/(.{2,8})\1{19,}$/);
   if (multi && /[^\s\-=_*#|.─═~`]/.test(multi[1])) return multi[0];
+  const longTail = buf.slice(-600);
+  const wordLoop = longTail.match(/\b([\p{L}\p{N}_'-]{2,24})(?:[\s,.;:!?]+\1){7,}\b/iu);
+  if (wordLoop) return wordLoop[0];
+  const phraseLoop = longTail.match(/(.{10,80}?)\1{4,}$/s);
+  if (phraseLoop && /[\p{L}\p{N}]{3,}/u.test(phraseLoop[1]!)) return phraseLoop[0];
   return null;
 }
 

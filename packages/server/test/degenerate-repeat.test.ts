@@ -16,4 +16,10 @@ describe('detectDegenerateRepeat', () => {
     expect(detectDegenerateRepeat('thinking ' + 'a'.repeat(65))).toBe('a'.repeat(65));
     expect(detectDegenerateRepeat('loop ' + 'foo '.repeat(20))).toBe('foo '.repeat(20));
   });
+
+  it('catches word and phrase repetition loops in thinking without false-positives on normal text', () => {
+    expect(detectDegenerateRepeat('Let me check '.repeat(1) + 'writing '.repeat(8).trim())).toBeTruthy();
+    expect(detectDegenerateRepeat('Reasoning: ' + 'Checking the file now. '.repeat(5))).toBeTruthy();
+    expect(detectDegenerateRepeat('Let me inspect the repository carefully, check package.json dependencies, inspect test helpers, and prepare a concrete edit plan.')).toBeNull();
+  });
 });

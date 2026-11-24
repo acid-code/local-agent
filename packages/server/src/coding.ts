@@ -642,21 +642,27 @@ export async function runGrep(root: string, pattern: string, opts: GrepOpts = {}
   const ignoreCase = opts.ignoreCase !== false;
   const context = Math.max(0, Math.min(2, opts.context ?? 0));
   const filesOnly = Boolean(opts.filesOnly);
-  const rgOut = await tryRipgrep(root, pattern, { include: opts.include, ignoreCase, context, filesOnly, limit });
+  const st = await fs.stat(root).catch(() => null);
+  const isFile = Boolean(st?.isFile());
+  const rgOut = await tryRipgrep(root, pattern, { include: opts.include, ignoreCase, context, filesOnly, limit, isFile });
   if (rgOut != null) return rgOut;
-  return walkGrep(root, pattern, { include: opts.include, ignoreCase, context, filesOnly, limit });
+  return walkGrep(root, pattern, { include: opts.include, ignoreCase, context, filesOnly, limit, isFile });
 }
 
-function tryRipgrep(root: string, pattern: string, opts: Required<Pick<GrepOpts, 'ignoreCase' | 'context' | 'filesOnly' | 'limit'>> & { include?: string }): Promise<string | null> {
+function tryRipgrep(root: string, pattern: string, opts: Required<Pick<GrepOpts, 'ignoreCase' | 'context' | 'filesOnly' | 'limit'>> & { include?: string; isFile?: boolean }): Promise<string | null> {
   return new Promise((resolve, reject) => {
     const args = ['--no-heading', '--line-number', '--color=never', '--max-filesize=1M'];
-    for (const dir of SKIP_DIRS) args.push('-g', `!${dir}`);
+    if (!opts.isFile) {
+      for (const dir of SKIP_DIRS) args.push('-g', `!${dir}`);
+    }
     if (opts.ignoreCase) args.push('-i');
     if (opts.include?.trim()) args.push('-g', opts.include.trim());
     if (opts.filesOnly) args.push('-l');
     else if (opts.context > 0) args.push('-C', String(opts.context));
-    args.push('--', pattern, '.');
-    const child = spawn('rg', args, { cwd: root, timeout: 15_000 });
+    const cwd = opts.isFile ? path.dirname(root) : root;
+    const target = opts.isFile ? path.basename(root) : '.';
+    args.push('--', pattern, target);
+    const child = spawn('rg', args, { cwd, timeout: 15_000 });
     let out = '';
     let err = '';
     child.stdout.on('data', (chunk) => { if (out.length < 400_000) out += String(chunk); });
@@ -694,7 +700,7 @@ function tryRipgrep(root: string, pattern: string, opts: Required<Pick<GrepOpts,
   });
 }
 
-async function walkGrep(root: string, pattern: string, opts: GrepOpts = {}): Promise<string> {
+async function walkGrep(root: string, pattern: string, opts: GrepOpts & { isFile?: boolean } = {}): Promise<string> {
   const limit = Math.max(1, Math.min(80, opts.limit ?? 40));
   const ignoreCase = opts.ignoreCase !== false;
   const context = Math.max(0, Math.min(2, opts.context ?? 0));
@@ -704,6 +710,28 @@ async function walkGrep(root: string, pattern: string, opts: GrepOpts = {}): Pro
   const fileSet = new Set<string>();
   let totalMatches = 0;
   let shownMatches = 0;
+  const scanFile = async (full: string, rel: string) => {
+    const text = await fs.readFile(full, 'utf8').catch(() => '');
+    if (!text || text.includes('\u0000')) return;
+    const lines = text.split('\n');
+    let fileMatched = false;
+    lines.forEach((line, index) => {
+      if (!regex.test(line)) return;
+      fileMatched = true;
+      fileSet.add(rel);
+      totalMatches += 1;
+      if (filesOnly || shownMatches >= limit) return;
+      shownMatches += 1;
+      if (context > 0 && hits.length > 0) hits.push('--');
+      const from = Math.max(0, index - context);
+      const to = Math.min(lines.length - 1, index + context);
+      for (let i = from; i <= to; i += 1) {
+        const sep = i === index ? ':' : '-';
+        hits.push(`${rel}${sep}${i + 1}${sep} ${lines[i]!.slice(0, 180)}`);
+      }
+    });
+    if (filesOnly && fileMatched && hits.length < limit) hits.push(rel);
+  };
   const walk = async (dir: string) => {
     const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
@@ -713,29 +741,11 @@ async function walkGrep(root: string, pattern: string, opts: GrepOpts = {}): Pro
       if (GREP_SKIP_EXT.test(entry.name)) continue;
       const rel = path.relative(root, full).replace(/\\/g, '/');
       if (!matchesInclude(rel, entry.name, opts.include)) continue;
-      const text = await fs.readFile(full, 'utf8').catch(() => '');
-      if (!text || text.includes('\u0000')) continue;
-      const lines = text.split('\n');
-      let fileMatched = false;
-      lines.forEach((line, index) => {
-        if (!regex.test(line)) return;
-        fileMatched = true;
-        fileSet.add(rel);
-        totalMatches += 1;
-        if (filesOnly || shownMatches >= limit) return;
-        shownMatches += 1;
-        if (context > 0 && hits.length > 0) hits.push('--');
-        const from = Math.max(0, index - context);
-        const to = Math.min(lines.length - 1, index + context);
-        for (let i = from; i <= to; i += 1) {
-          const sep = i === index ? ':' : '-';
-          hits.push(`${rel}${sep}${i + 1}${sep} ${lines[i]!.slice(0, 180)}`);
-        }
-      });
-      if (filesOnly && fileMatched && hits.length < limit) hits.push(rel);
+      await scanFile(full, rel);
     }
   };
-  await walk(root);
+  if (opts.isFile) await scanFile(root, path.basename(root));
+  else await walk(root);
   if (filesOnly) {
     if (!hits.length) return 'No matches.';
     const header = fileSet.size > limit ? `Found ${fileSet.size} matching files (showing first ${hits.length}):\n` : '';

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { readChatCommand, type ChatMessage, type ToolCall } from '@local-agent/shared';
 import { buildApp } from '../src/app.js';
-import { readPlan } from '../src/coding.js';
+import { readPlan, runGrep } from '../src/coding.js';
 import type { CompletionRequest, ModelProvider } from '../src/providers.js';
 
 const dirs: string[] = [];
@@ -300,6 +300,53 @@ describe('wave 2 plan-execute guardrails & auto-effort', () => {
       const toolMsgs = built.store.listMessages(chatSession.id).filter((m) => m.role === 'tool' && m.runId === run.id);
       expect(toolMsgs.find((m) => m.toolCallId === 'b2')?.content).toMatch(/Blocked by plan mode \(read-only\)/);
       expect(fs.readFileSync(path.join(built.agent.workspacePath, 'target.txt'), 'utf8')).toContain('ALPHA');
+    } finally {
+      await built.app.close();
+    }
+  });
+
+  it('gives planning/implement/code missions at least 28 steps even with old maxSteps=12, preserves implement stage on continue, and greps single files', async () => {
+    const built = await setup();
+    const chatSession = built.store.createSession({ agentId: built.agent.id, ownerId: built.agent.ownerId });
+    try {
+      built.store.saveSettings({ ...built.store.getSettings(), maxSteps: 12 }, 'simulate old default', { maxSteps: 12 });
+      expect((built.engine as any).stepCap({ stage: 'plan' }, 'chat')).toBeGreaterThanOrEqual(28);
+      expect((built.engine as any).stepCap({ stage: 'implement' }, 'chat')).toBeGreaterThanOrEqual(28);
+      expect((built.engine as any).stepCap({}, 'code')).toBeGreaterThanOrEqual(28);
+      expect((built.engine as any).stepCap({ longTask: true }, 'chat')).toBeGreaterThanOrEqual(40);
+      expect((built.engine as any).stepCap({}, 'chat')).toBeGreaterThanOrEqual(16);
+      expect((built.engine as any).stepCap({ maxSteps: 8 }, 'chat')).toBe(8);
+
+      const grepOut = await runGrep(path.join(built.agent.workspacePath, 'target.txt'), 'beta');
+      expect(grepOut).toContain('target.txt:2: beta');
+
+      built.provider.steps = [
+        { toolCalls: [call('p1', 'enter_plan_mode', { goal: 'Plan two-step change' })] },
+        { toolCalls: [call('x1', 'exit_plan_mode', { steps: ['Step one', 'Step two'], summary: 'Ready to implement' })] },
+        { text: 'Reached limit before finishing step 1.' },
+      ];
+      const run1 = await built.engine.startTurn({
+        sessionId: chatSession.id,
+        agentId: built.agent.id,
+        content: '/plan Implement change',
+        wait: true,
+      });
+      expect(run1.cursor.stage).toBe('implement');
+
+      built.provider.requests = [];
+      built.provider.steps = [
+        { toolCalls: [call('ap1', 'apply_patch', { path: 'target.txt', search: 'beta', replace: 'BETA' })] },
+        { text: 'Continued and patched.' },
+      ];
+      const run2 = await built.engine.startTurn({
+        sessionId: chatSession.id,
+        agentId: built.agent.id,
+        content: 'continue',
+        wait: true,
+      });
+      expect(run2.status).toBe('completed');
+      expect(built.provider.requests[0]!.toolNames).toContain('apply_patch');
+      expect(fs.readFileSync(path.join(built.agent.workspacePath, 'target.txt'), 'utf8')).toContain('BETA');
     } finally {
       await built.app.close();
     }

@@ -259,7 +259,10 @@ function boundedLineSlice(lines: string[], startIndex: number, maxLinesEndIndex:
 async function writeWorkspaceTarget(args: Record<string, unknown>, ctx: ToolContext, verb: 'Created' | 'Wrote'): Promise<string> {
   const target = String(args.path || '');
   const hit = locatePath({ workspace: ctx.workspace, roots: ctx.roots, target });
-  if (!hit?.write) throw new Error('That file is not in a writable project.');
+  if (!hit) throw new Error('That file is not in a writable project.');
+  if (!hit.write) {
+    throw new Error('That file is not in a writable project (shared repos are read-only outside implement/code mode — call exit_plan_mode, switch the chat to code mode, or spawn a coder helper in a worktree).');
+  }
   let before: string | null = null;
   try { before = await fs.readFile(hit.full, 'utf8'); } catch { before = null; }
   if (before != null && args.overwrite !== true) {
