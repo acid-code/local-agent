@@ -180,6 +180,32 @@ export async function fetchPublicText(
   return text;
 }
 
+const BROWSE_PREFERRED_HOSTS = /(?:^|\.)(?:(?:aliexpress|amazon|ebay|airbnb|skyscanner)\.[a-z.]{2,}|temu\.com|shein\.com|walmart\.com|bestbuy\.com|newegg\.com|etsy\.com|target\.com|ksp\.co\.il|ivory\.co\.il|zap\.co\.il|booking\.com|expedia\.com|kayak\.com|x\.com|twitter\.com|instagram\.com|facebook\.com|tiktok\.com|linkedin\.com|reddit\.com|youtube\.com|tradingview\.com|zillow\.com)$/i;
+const JS_OR_BOT_WALL = /\b(enable javascript|javascript is required|turn on javascript|please enable cookies|verify you are human|are you a robot|just a moment|access denied|attention required|checking your browser)\b/i;
+
+/** Returns a steering hint toward `browse` when `web_fetch` hits a store/JS/interactive domain, bot wall, or thin shell. */
+export function shouldSteerToBrowse(url: string, text: string): string | null {
+  let reason: string | null = null;
+  try {
+    const host = new URL(url).hostname;
+    if (BROWSE_PREFERRED_HOSTS.test(host)) {
+      reason = `${host} is a dynamic/interactive site whose real prices and listings require live browser rendering`;
+    }
+  } catch { /* ignore invalid URL parsing */ }
+  const trimmed = text.trim();
+  if (!reason) {
+    if (trimmed === '(empty page)' || !trimmed) {
+      reason = 'web_fetch returned an empty page shell';
+    } else if (JS_OR_BOT_WALL.test(trimmed.slice(0, 2000))) {
+      reason = 'page returned a JavaScript or bot-protection challenge to plain HTTP fetch';
+    } else if (trimmed.length < 220) {
+      reason = `web_fetch returned very little text (${trimmed.length} chars, likely JS-rendered)`;
+    }
+  }
+  if (!reason) return null;
+  return `\n\n[Hint: ${reason}. Use browse({ url: ${JSON.stringify(url)} }) to open this page in the live browser (renders JS, real prices/listings, scrolling/clicking) instead of calling web_fetch again.]`;
+}
+
 export const READ_FILE_MAX_CHARS = 20_000;
 const OUTLINE_CODE_EXT = /\.(?:[cm]?[jt]sx?|py|kt|kts|java|go|rs|c|cc|cpp|h|hpp)$/i;
 const OUTLINE_MD_EXT = /\.(?:md|mdx|markdown)$/i;
@@ -424,7 +450,7 @@ export const BUILTIN_TOOLS: Tool[] = [
   },
   {
     name: 'web_fetch',
-    description: 'Fetch a public http(s) URL and return clean visible text (strips scripts, styles, comments, and nav/footer boilerplate by default). Set include_scripts=true only if you specifically need inline scripts. For JS-rendered stores/pages that return no prices or content, use browse instead.',
+    description: 'Lightweight static HTTP text fetch ONLY for simple static pages (articles, docs, manuals, raw text/JSON). Do NOT use for stores/shopping (AliExpress, Amazon, etc.), prices/listings, JS-rendered sites, or when asked to browse/surf a site — use browse instead.',
     parameters: obj({
       url: { type: 'string' },
       include_scripts: { type: 'boolean', description: 'Include inline <script> contents (default false).' },
@@ -432,7 +458,10 @@ export const BUILTIN_TOOLS: Tool[] = [
     mutates: () => false,
     approval: () => null,
     async execute(args, ctx) {
-      return fetchPublicText(String(args.url || ''), ctx.fetchImpl, ctx.signal, { includeScripts: Boolean(args.include_scripts) });
+      const url = String(args.url || '');
+      const text = await fetchPublicText(url, ctx.fetchImpl, ctx.signal, { includeScripts: Boolean(args.include_scripts) });
+      const hint = shouldSteerToBrowse(url, text);
+      return hint ? `${text}${hint}` : text;
     },
   },
   {

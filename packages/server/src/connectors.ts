@@ -453,13 +453,13 @@ async function runCdpSession(chrome: string, url: string, actions: BrowseAction[
 export function browseTool(): Tool {
   return {
     name: 'browse',
-    description: 'Open a public web page in headless Chromium, inspect the rendered page and interactive controls, and perform bounded actions (navigate, reload, back, click, fill, select, hover, press, scroll, submit, wait). Screenshots are saved as [file:<id>] for understand_image. Cookie/site state is retained for this chat for up to 30 minutes. Public http(s) only.',
+    description: 'Open and surf a public web page in the live browser (visible in Live Computer). Preferred over web_fetch for websites, stores (AliExpress, Amazon, etc.), prices, product listings, JS apps, or interactive pages. Supports click/fill/select/hover/press/scroll/wait and screenshots ([file:<id>]). Keeps cookies 30m.',
     parameters: obj({
       url: { type: 'string', description: 'Public http(s) URL to open.' },
-      screenshot: { type: 'boolean', description: 'Capture a rendered PNG screenshot saved as [file:<id>] (pass to understand_image to see visual layout/colors).' },
+      screenshot: { type: 'boolean', description: 'Capture PNG screenshot ([file:<id>]).' },
       actions: {
         type: 'array',
-        description: 'Optional sequence: navigate/reload/back/click/fill/select/hover/press/scroll/submit/wait, with selector, text, value, key, y or ms.',
+        description: 'Actions: navigate/reload/back/click/fill/select/hover/press/scroll/submit/wait (selector, text, value, key, y, ms).',
         items: { type: 'object' },
       },
     }, ['url']),

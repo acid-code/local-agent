@@ -8,7 +8,7 @@ import type { Tool } from './tools.js';
 
 /** Essentials every persona keeps on its menu when they are allowed at all. */
 export const CORE_TOOLS = [
-  'read_file', 'write_file', 'create_file', 'list_dir', 'grep', 'glob', 'shell', 'git', 'web_search', 'web_fetch',
+  'read_file', 'write_file', 'create_file', 'list_dir', 'grep', 'glob', 'shell', 'git', 'web_search', 'browse', 'web_fetch',
   'request_secret', 'read_output', 'kb_search', 'load_skill', 'tasks', 'enter_plan_mode', 'think', 'set_focus', 'time_now', 'memory_file',
   'spawn_agent', 'helpers', 'share_file', 'find_tools',
 ];
@@ -32,7 +32,7 @@ const SYNONYMS: Record<string, string[]> = {
   deploy: ['vercel', 'deployment', 'hosting', 'domain'],
   remind: ['reminder', 'timer', 'alarm', 'תזכורת'],
   trigger: ['when', 'watch', 'webhook'],
-  browse: ['browser', 'website', 'page', 'click', 'login'],
+  browse: ['browser', 'surf', 'surfing', 'website', 'site', 'page', 'click', 'login', 'shop', 'shopping', 'store', 'price', 'prices', 'aliexpress', 'amazon', 'ebay', 'open', 'visit', 'screenshot', 'לגלוש', 'גלישה', 'דפדפן', 'אתר', 'חנות'],
   task: ['todo', 'clickup', 'ticket', 'משימה'],
   shell: ['command', 'terminal', 'bash', 'run', 'npm', 'test'],
   edit: ['patch', 'change', 'modify', 'fix', 'replace'],

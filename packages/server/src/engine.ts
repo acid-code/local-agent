@@ -868,6 +868,16 @@ export class Engine {
           },
         },
       })!;
+      const steeringAgent = this.store.getAgent(current.agentId);
+      if (steeringAgent && !current.cursor.helperId) {
+        const offered = this.tools(steeringAgent, sessionMode, current.cursor.stage, current.cursor.toolSubset, false, current);
+        const offeredNames = new Set(offered.map((t) => t.name));
+        const contract = contractForAgent(steeringAgent.name);
+        const { tools: allPermitted, servers } = this.allowedTools(steeringAgent, sessionMode, current.cursor.stage, current.cursor.toolSubset, false);
+        const discoverable = allPermitted.filter((t) => contractAllows(contract, t.name, servers) && !offeredNames.has(t.name));
+        this.seedToolsFromText(current, steering.content, discoverable, servers);
+        current = this.store.getRun(run.id) ?? current;
+      }
       this.bus.publish({ type: 'steering', runId: run.id, messageId: steering.id, status: 'applied' });
     }
     // Runs that switched to the uncensored model before the one-step rule (no uncensoredFrom) stayed on it for hours,
@@ -1302,7 +1312,8 @@ export class Engine {
             : `${model.name} returned an empty answer. Retrying once.`;
         this.store.updateStep(step.id, { status: 'failed', error: why, output: reasoningText ? { reasoning: reasoningText.slice(0, 4000) } : null, endedAt: now(), latencyMs: Date.now() - started });
         this.store.addLog('warn', why, undefined, 'providers');
-        this.store.updateRun(run.id, { cursor: { ...current.cursor, emptyRetry: true, noThink: true, ...(degenerateMatch ? { safeSampling: true } : {}), phase: 'model' } });
+        const freshEmpty = this.store.getRun(run.id);
+        this.store.updateRun(run.id, { cursor: { ...current.cursor, ...(freshEmpty?.cursor.steering ? { steering: freshEmpty.cursor.steering } : {}), emptyRetry: true, noThink: true, ...(degenerateMatch ? { safeSampling: true } : {}), phase: 'model' } });
         return;
       }
       emptyAnswerFailed = true;
@@ -1331,6 +1342,7 @@ export class Engine {
         this.store.updateRun(run.id, {
           cursor: {
             ...current.cursor,
+            ...(fresh.cursor.steering ? { steering: fresh.cursor.steering } : {}),
             phase: 'model',
             turn: current.cursor.turn + 1,
             researchRetried: true,
@@ -1355,7 +1367,7 @@ export class Engine {
         this.store.addStep({ runId: run.id, kind: 'contract', name: 'verify', status: 'completed', input: { round: rounds + 1 }, output: `Sent back: ${check.reason}`, toolCallId: null, turn: current.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now() });
         this.store.addLog('warn', `Run ${run.id}: ${check.reason} Asking ${model.name} to recover (round ${rounds + 1}).`, undefined, 'engine');
         const fresh = this.store.getRun(run.id)!;
-        this.store.updateRun(run.id, { cursor: { ...current.cursor, phase: 'model', turn: current.cursor.turn + 1, recovery: { rounds: rounds + 1, note: check.note } }, inputTokens: fresh.inputTokens + usage.inputTokens, outputTokens: fresh.outputTokens + usage.outputTokens, costUsd: fresh.costUsd + cost });
+        this.store.updateRun(run.id, { cursor: { ...current.cursor, ...(fresh.cursor.steering ? { steering: fresh.cursor.steering } : {}), phase: 'model', turn: current.cursor.turn + 1, recovery: { rounds: rounds + 1, note: check.note } }, inputTokens: fresh.inputTokens + usage.inputTokens, outputTokens: fresh.outputTokens + usage.outputTokens, costUsd: fresh.costUsd + cost });
         return;
       }
       if (check.action === 'ok') completeFinalReplyTask(this.store, run.sessionId, run.id, text);
@@ -1371,7 +1383,7 @@ export class Engine {
         this.bus.publish({ type: 'step', runId: run.id, step: this.store.getStep(step.id) });
         this.store.addStep({ runId: run.id, kind: 'contract', name: 'verify', status: 'completed', input: { tasks: open.length }, output: `Sent back: ${open.length} task(s) still open`, toolCallId: null, turn: current.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now() });
         const fresh = this.store.getRun(run.id)!;
-        this.store.updateRun(run.id, { cursor: { ...current.cursor, phase: 'model', turn: current.cursor.turn + 1, taskRounds: taskRounds + 1, taskSnapshot, recovery: { rounds: current.cursor.recovery?.rounds ?? 0, note: tasksNote(open) } }, inputTokens: fresh.inputTokens + usage.inputTokens, outputTokens: fresh.outputTokens + usage.outputTokens, costUsd: fresh.costUsd + cost });
+        this.store.updateRun(run.id, { cursor: { ...current.cursor, ...(fresh.cursor.steering ? { steering: fresh.cursor.steering } : {}), phase: 'model', turn: current.cursor.turn + 1, taskRounds: taskRounds + 1, taskSnapshot, recovery: { rounds: current.cursor.recovery?.rounds ?? 0, note: tasksNote(open) } }, inputTokens: fresh.inputTokens + usage.inputTokens, outputTokens: fresh.outputTokens + usage.outputTokens, costUsd: fresh.costUsd + cost });
         return;
         }
       }
@@ -1398,12 +1410,15 @@ export class Engine {
     });
     const live = this.liveStreams.get(run.id);
     if (live) { live.text = ''; live.thinking = ''; }
+    const fresh = this.store.getRun(run.id)!;
+    const queuedSteering = fresh.cursor.steering;
     const cursor: RunCursor = toolCalls?.length
-      ? { ...current.cursor, phase: 'tools', toolCalls, completedToolIds: [], approvalId: undefined }
-      : { ...current.cursor, phase: 'summarize', toolCalls: undefined };
+      ? { ...current.cursor, ...(queuedSteering ? { steering: queuedSteering } : {}), phase: 'tools', toolCalls, completedToolIds: [], approvalId: undefined }
+      : queuedSteering && current.cursor.turn + 1 < maxSteps
+        ? { ...current.cursor, steering: queuedSteering, phase: 'model', turn: current.cursor.turn + 1, toolCalls: undefined }
+        : { ...current.cursor, phase: 'summarize', toolCalls: undefined };
     this.store.updateStep(step.id, { status: 'completed', output: { text, toolCalls, ...(telemetry ? { telemetry } : {}), ...(reasoningText ? { reasoning: reasoningText.slice(0, 4000) } : {}) }, tokensIn: usage.inputTokens, tokensOut: usage.outputTokens, costUsd: cost, latencyMs: Date.now() - started, endedAt: now() });
     this.bus.publish({ type: 'step', runId: run.id, step: this.store.getStep(step.id) });
-    const fresh = this.store.getRun(run.id)!;
     this.store.updateRun(run.id, {
       cursor,
       inputTokens: fresh.inputTokens + usage.inputTokens,
@@ -1992,7 +2007,7 @@ export class Engine {
         if (toolNames.includes('read_slides')) caps.push('read_slides (inspect .pptx decks)');
         if (toolNames.includes('read_image_text')) caps.push('read_image_text (run local OCR on images/screenshots)');
         if (toolNames.includes('understand_image')) caps.push('understand_image (full multimodal vision analysis: scene description, colors/shades/hex codes, charts/numbers, layout, and text)');
-        if (toolNames.includes('browse')) caps.push('browse (open public web pages in headless Chromium, capture screenshots as [file:<id>] to inspect visuals with understand_image, and interact via click/fill/press/scroll)');
+        if (toolNames.includes('browse')) caps.push('browse (live visual browser / surf tool: preferred over web_fetch for websites, stores, prices, product listings, JS-rendered pages, screenshots as [file:<id>] for understand_image, and click/fill/press/scroll)');
         if (toolNames.includes('create_project')) caps.push('create_project (spin up a brand-new local git repo + optional private GitHub repo and start building immediately)');
         if (toolNames.includes('vercel')) caps.push('vercel (inspect Vercel projects, deployments, build & runtime logs, env vars, Vercel Blob stores/diagnostics, update project settings/env vars, and trigger redeploys)');
         if (toolNames.includes('turbo_inspect')) caps.push('turbo_inspect (inspect Turborepo monorepos, turbo.json strict env pass-through, vercel.json, and Next.js Blob image config)');
@@ -2004,7 +2019,7 @@ export class Engine {
       })(),
     ].join('');
     const searchFirstNote = toolNames.includes('web_search')
-      ? '\n\nWeb lookup rule: always call web_search (SearXNG) first before calling web_fetch or browse; never invent URLs. If web_fetch returns navigation chrome or no prices (JS-rendered store), do not keep calling web_fetch on similar store pages — use browse or a targeted web_search instead, then synthesize a clear answer.'
+      ? '\n\nWeb lookup rule: call web_search (SearXNG) first to discover real URLs and facts; never invent URLs. When opening a website, store/shopping page (AliExpress, Amazon, eBay, etc.), product listing, live prices, JS-heavy page, or whenever the user asks to browse/surf/open a site, prefer browse (live browser) instead of web_fetch. Reserve web_fetch for lightweight static articles, manuals, or docs. If web_fetch returns nav chrome, missing prices, empty text, or a block/403, switch immediately to browse — do not keep calling web_fetch.'
       : '';
     const sharedRepoNote = sharedRepoBrief(this.store);
     const todayIso = (run.startedAt || new Date().toISOString()).slice(0, 10);
@@ -2495,9 +2510,15 @@ export class Engine {
   /** First step of a run: pre-load the few tools the request obviously needs, so it skips a find_tools round trip. */
   private seedTools(run: RunRow, discoverable: Tool[], servers: Map<string, string>) {
     const user = run.cursor.userMessageId ? this.store.listMessages(run.sessionId).find((message) => message.id === run.cursor.userMessageId) : undefined;
-    const seeds = user?.content ? rankTools(discoverable, user.content.slice(0, 2000), servers).filter((row) => row.score >= 3).slice(0, SEED_TOOLS).map((row) => row.tool.name) : [];
     run.cursor.extraTools = [];
-    this.addRunTools(run, seeds);
+    if (user?.content) this.seedToolsFromText(run, user.content, discoverable, servers);
+  }
+
+  /** Pre-load discoverable tools matching a request or steering text (append-only so prompt prefixes hold). */
+  private seedToolsFromText(run: RunRow, text: string, discoverable: Tool[], servers: Map<string, string>) {
+    if (!text.trim() || !discoverable.length) return;
+    const seeds = rankTools(discoverable, text.slice(0, 2000), servers).filter((row) => row.score >= 3).slice(0, SEED_TOOLS).map((row) => row.tool.name);
+    if (seeds.length) this.addRunTools(run, seeds);
   }
 
   /** Append tools to this run's menu (never removed, never reordered). */
@@ -3461,7 +3482,7 @@ export function deriveStepPhase(toolName: string, _args: Record<string, unknown>
   if (stage === 'plan' || ['plan', 'tasks', 'enter_plan_mode'].includes(toolName)) return 'planning';
   if (['apply_patch', 'write_file', 'create_file'].includes(toolName)) return 'editing';
   if (['shell'].includes(toolName)) return 'verifying';
-  if (['read_file', 'list_dir', 'grep', 'glob', 'web_search', 'web_fetch', 'kb_search', 'search_chats', 'find_context'].includes(toolName)) return 'investigating';
+  if (['read_file', 'list_dir', 'grep', 'glob', 'web_search', 'browse', 'web_fetch', 'kb_search', 'search_chats', 'find_context'].includes(toolName)) return 'investigating';
   return undefined;
 }
 
@@ -3475,6 +3496,7 @@ export function deriveStepFocus(toolName: string, args: Record<string, unknown>)
     case 'apply_patch': case 'write_file': case 'create_file': return `Editing ${base(args.path) || 'file'}`;
     case 'shell': return `Running ${String(args.command || 'command').split('\n')[0]!.slice(0, 36)}`;
     case 'web_search': return `Searching web: ${String(args.query || '').slice(0, 32)}`;
+    case 'browse': return `Browsing ${String(args.url || 'page').replace(/^https?:\/\//, '').slice(0, 36)}`;
     case 'web_fetch': return `Fetching ${String(args.url || 'page').replace(/^https?:\/\//, '').slice(0, 36)}`;
     case 'plan': case 'tasks': return 'Updating plan steps';
     case 'spawn_agent': return `Spawning helper${args.role ? ` (${String(args.role)})` : ''}`;

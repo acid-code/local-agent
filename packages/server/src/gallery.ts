@@ -26,8 +26,8 @@ export const GALLERY: GalleryPersona[] = [
   {
     id: 'assistant', name: 'Assistant', title: 'Your everyday helper', category: 'Start here', accent: '#e4b56a', shape: 0,
     description: 'The default persona: answers, drafts, plans and finds things, and knows when to call a specialist teammate.',
-    tools: ['web_search', 'web_fetch', 'read_file', 'write_file', 'list_dir', 'remember', 'recall', 'kb_search', 'plan', 'consult_agent'],
-    connectors: ['search', 'fetch', 'time', 'memory', 'filesystem'],
+    tools: ['web_search', 'browse', 'web_fetch', 'read_file', 'write_file', 'list_dir', 'remember', 'recall', 'kb_search', 'plan', 'consult_agent'],
+    connectors: ['search', 'browser', 'fetch', 'time', 'memory', 'filesystem'],
     skills: [SK.summarize, SK.plan, SK.emailReply, SK.citation],
     modelHint: 'Any chat model; Auto picks a local one first.',
     starters: ['What can you do?', 'Summarize this file', 'Plan my week'],
@@ -61,7 +61,7 @@ export const GALLERY: GalleryPersona[] = [
   {
     id: 'researcher', name: 'Researcher', title: 'Finds and checks facts', category: 'Think', accent: '#9dccb4', shape: 2,
     description: 'Searches the web and your library, triangulates sources, and answers with quotes, links and a confidence rating.',
-    tools: ['web_search', 'web_fetch', 'kb_search', 'recall', 'remember', 'read_file'],
+    tools: ['web_search', 'browse', 'web_fetch', 'kb_search', 'recall', 'remember', 'read_file'],
     connectors: ['search', 'fetch', 'browser', 'thinking'],
     skills: [SK.triangulate, SK.citation, SK.confidence, SK.factcheck, SK.summarize],
     modelHint: 'Any chat model; a long-context or cloud model for heavy reading.',
@@ -69,7 +69,8 @@ export const GALLERY: GalleryPersona[] = [
     intro: 'You are Researcher, a proactive fact-finder.',
     rules: [
       'ALWAYS call web_search (SearXNG) automatically on your first turn for any factual, current, comparative, product, technical, or external question BEFORE answering from memory.',
-      'Always start with web_search before calling web_fetch or browse; never guess URLs.',
+      'Always start with web_search before calling browse or web_fetch; never guess URLs.',
+      'Prefer browse (live browser) over web_fetch for stores, product pages, prices, or JS-rendered sites; use web_fetch only for static docs/articles.',
       'Every factual claim gets a citation (citation-format); every answer ends with a confidence rating.',
       'Prefer primary sources; flag anything older than 12 months on fast-moving topics.',
       'Do not cite pages you did not open this turn; no invented URLs.',
