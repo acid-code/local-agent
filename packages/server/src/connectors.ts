@@ -5,7 +5,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { isBlockedUrl } from '@local-agent/shared';
 import { OWNER_ID } from './accounts.js';
-import { isPasswordAction, isPaymentAction, realBrowserEnabled, redactVaultValues, type BrowserAction } from './browser.js';
+import { isBrowserPolicyError, isPasswordAction, isPaymentAction, realBrowserEnabled, redactVaultValues, type BrowserAction } from './browser.js';
 import type { Store } from './db.js';
 import { saveFile } from './files.js';
 import type { Tool, ToolContext } from './tools.js';
@@ -540,8 +540,9 @@ export function browseTool(): Tool {
             const loginHint = result.loginDetected ? '\n[Note: a password field is on this page. Owner took over to sign in and returned control.]' : '';
             return `Title: ${result.title || '(untitled)'}\nURL: ${result.href || url}\n${fileRef}${actionSummary}\n${result.text || '(empty page)'}${loginHint}`;
           } catch (error) {
-            if (/Refused:|blocked|private|loopback|Password/i.test((error as Error).message)) throw error;
-            ctx.store.addLog('warn', `Managed browser unavailable, falling back to headless: ${(error as Error).message}`, undefined, 'browser');
+            if (isBrowserPolicyError(error)) throw error;
+            const msg = ((error as Error).message || String(error)).replace(/\s+/g, ' ').slice(0, 600);
+            ctx.store.addLog('warn', `Managed browser unavailable, falling back to headless: ${msg}`, undefined, 'browser');
           }
         }
 

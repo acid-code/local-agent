@@ -7,7 +7,10 @@ import { MEMBER_DENIED_TOOLS } from '../src/accounts.js';
 import {
   BROWSER_MEMORY_BYTES,
   BROWSER_NAME,
+  BROWSER_PIDS_LIMIT,
+  BROWSER_SHM_BYTES,
   ManagedBrowser,
+  isBrowserPolicyError,
   isPasswordAction,
   isPaymentAction,
   personaProfileDir,
@@ -34,6 +37,7 @@ function fakeDocker() {
     start: vi.fn(async () => { running = true; }),
     startDetached: vi.fn(async (spec: any) => { startedSpecs.push(spec); exists = true; running = true; return 'br-1'; }),
     stop: vi.fn(async () => { running = false; }),
+    remove: vi.fn(async () => { exists = false; running = false; }),
     stats: vi.fn(async () => ({ memoryBytes: 0.8 * GiB, memoryLimitBytes: BROWSER_MEMORY_BYTES, cpuPercent: 5 })),
   } as unknown as DockerCtl;
   return { docker, startedSpecs };
@@ -96,6 +100,9 @@ describe('managed real browser (la-browser)', () => {
     expect(startedSpecs).toHaveLength(1);
     expect(startedSpecs[0].name).toBe(BROWSER_NAME);
     expect(startedSpecs[0].HostConfig.Memory).toBe(BROWSER_MEMORY_BYTES);
+    expect(startedSpecs[0].HostConfig.PidsLimit).toBe(BROWSER_PIDS_LIMIT);
+    expect(startedSpecs[0].HostConfig.ShmSize).toBe(BROWSER_SHM_BYTES);
+    expect(startedSpecs[0].HostConfig.Init).toBe(true);
     expect(startedSpecs[0].HostConfig.PortBindings).toBeUndefined();
     expect(startedSpecs[0].HostConfig.NetworkMode).not.toBe('host');
 
@@ -159,5 +166,157 @@ describe('managed real browser (la-browser)', () => {
     expect(realBrowserEnabled({ LA_BROWSER: 'container' })).toBe(true);
     expect(MEMBER_DENIED_TOOLS.has('browse')).toBe(true);
     expect(redactVaultValues('token=ghp_1234567890 ok', ['ghp_1234567890'])).toBe('token=[REDACTED_SECRET] ok');
+  });
+
+  it('recreates an existing container whose HostConfig has old PidsLimit/ShmSize/Init, and reuses when upgraded', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'la-br-drift-'));
+    dirs.push(dataDir);
+    let inspectConfig = { PidsLimit: 200, Init: false, ShmSize: 67_108_864 };
+    const startedSpecs: any[] = [];
+    const startMock = vi.fn(async () => undefined);
+    let state = 'exited';
+    const docker = {
+      available: () => true,
+      containerState: vi.fn(async () => ({ id: 'br-old', state, status: 'Exited' })),
+      inspect: vi.fn(async () => ({ HostConfig: inspectConfig })),
+      hasImage: vi.fn(async () => true),
+      start: startMock,
+      startDetached: vi.fn(async (spec: any) => {
+        startedSpecs.push(spec);
+        inspectConfig = {
+          PidsLimit: spec.HostConfig.PidsLimit,
+          Init: spec.HostConfig.Init,
+          ShmSize: spec.HostConfig.ShmSize,
+        };
+        state = 'running';
+        return 'br-new';
+      }),
+      stop: vi.fn(async () => { state = 'exited'; }),
+      stats: vi.fn(async () => ({ memoryBytes: 0.4 * GiB, memoryLimitBytes: BROWSER_MEMORY_BYTES, cpuPercent: 1 })),
+    } as unknown as DockerCtl;
+
+    const browser = new ManagedBrowser(docker, dataDir, () => null);
+    await browser.ensure();
+    expect(startedSpecs).toHaveLength(1);
+    expect(startedSpecs[0].replace).toBe(true);
+    expect(startedSpecs[0].HostConfig.PidsLimit).toBe(BROWSER_PIDS_LIMIT);
+    expect(startedSpecs[0].HostConfig.ShmSize).toBe(BROWSER_SHM_BYTES);
+    expect(startedSpecs[0].HostConfig.Init).toBe(true);
+    expect(startMock).not.toHaveBeenCalled();
+
+    // After idle stop, container matches upgraded limits, so ensure() calls start() instead of recreating.
+    await browser.stop();
+    await browser.ensure();
+    expect(startMock).toHaveBeenCalledTimes(1);
+    expect(startedSpecs).toHaveLength(1);
+  });
+
+  it('serializes concurrent browse calls FIFO via tabQueue', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'la-br-queue-'));
+    dirs.push(dataDir);
+    const { docker } = fakeDocker();
+    let active = 0;
+    let maxActive = 0;
+    const order: string[] = [];
+    const driver: CdpDriver = {
+      async runTab(input) {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        order.push(`start:${input.url}`);
+        await new Promise((r) => setTimeout(r, input.url.includes('first') ? 40 : 10));
+        order.push(`end:${input.url}`);
+        active -= 1;
+        return { title: input.url, href: input.url, text: 'ok', elements: [], log: ['navigate'], png: null };
+      },
+    };
+
+    const browser = new ManagedBrowser(docker, dataDir, () => null, (p) => p, driver);
+    const [r1, r2] = await Promise.all([
+      browser.browse({ personaSlug: 'assistant', url: 'https://example.com/first' }),
+      browser.browse({ personaSlug: 'assistant', url: 'https://example.com/second' }),
+    ]);
+
+    expect(r1.href).toBe('https://example.com/first');
+    expect(r2.href).toBe('https://example.com/second');
+    expect(maxActive).toBe(1);
+    expect(order).toEqual([
+      'start:https://example.com/first',
+      'end:https://example.com/first',
+      'start:https://example.com/second',
+      'end:https://example.com/second',
+    ]);
+  });
+
+  it('recycles la-browser once and retries on EAGAIN / Resource temporarily unavailable errors', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'la-br-eagain-'));
+    dirs.push(dataDir);
+    const { docker, startedSpecs } = fakeDocker();
+    let attempts = 0;
+    const driver: CdpDriver = {
+      async runTab(input) {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new Error('browserType.launch: fork: Resource temporarily unavailable (11)');
+        }
+        return { title: 'Recovered', href: input.url, text: 'ok', elements: [], log: ['navigate'], png: null };
+      },
+    };
+
+    const browser = new ManagedBrowser(docker, dataDir, () => null, (p) => p, driver);
+    const res = await browser.browse({ personaSlug: 'assistant', url: 'https://example.com' });
+    expect(res.title).toBe('Recovered');
+    expect(attempts).toBe(2);
+    expect((docker as any).stop).toHaveBeenCalledTimes(1);
+    expect((docker as any).remove).toHaveBeenCalledTimes(1);
+    expect(startedSpecs).toHaveLength(2);
+  });
+
+  it('classifies policy errors without false-positives on Chromium launch flags', () => {
+    const playwrightCrash = new Error(
+      'browserType.launch: Target page, context or browser has been closed\n' +
+      'Browser logs:\n' +
+      '<launching> /ms-playwright/chromium-1169/chrome-linux/chrome --password-store=basic --disable-popup-blocking --no-sandbox\n' +
+      '[pid=1373][err] fork: Resource temporarily unavailable (11)',
+    );
+    expect(isBrowserPolicyError(playwrightCrash)).toBe(false);
+    expect(isBrowserPolicyError(new Error('Refused: the agent never types passwords.'))).toBe(true);
+    expect(isBrowserPolicyError(new Error('Password field detected: ask the user to take over to sign in.'))).toBe(true);
+    expect(isBrowserPolicyError(new Error('Private or loopback address is blocked: 127.0.0.1'))).toBe(true);
+  });
+
+  it('runs dockerCdpDriver with timeout wrapper, crash-reporter disabled, file JSON IPC, and temp cleanup', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'la-br-ipc-'));
+    dirs.push(dataDir);
+    const { docker } = fakeDocker();
+    let capturedCmd: string[] = [];
+    let hostResPath = '';
+    (docker as any).exec = vi.fn(async (_name: string, cmd: string[]) => {
+      capturedCmd = cmd;
+      const envArg = cmd.find((part) => part.startsWith('LA_BROWSE_REQ='))!;
+      const reqPayload = JSON.parse(Buffer.from(envArg.slice('LA_BROWSE_REQ='.length), 'base64').toString('utf8'));
+      const resName = path.basename(reqPayload.resPath);
+      hostResPath = path.resolve(dataDir, 'browser', resName);
+      fs.writeFileSync(hostResPath, JSON.stringify({
+        title: 'IPC Domain',
+        href: 'https://example.com/',
+        text: 'hello ' + 'x'.repeat(70_000),
+        elements: [],
+        log: ['navigate https://example.com'],
+        loginDetected: false,
+      }), 'utf8');
+      return { output: 'noisy stderr warning that would corrupt stdout JSON', code: 0 };
+    });
+
+    const browser = new ManagedBrowser(docker, dataDir, () => null);
+    const res = await browser.browse({ personaSlug: 'assistant', url: 'https://example.com', screenshot: false });
+
+    expect(res.title).toBe('IPC Domain');
+    expect(res.text.length).toBe(70_006);
+    expect(capturedCmd.slice(2, 8)).toEqual(['DISPLAY=:99', 'timeout', '-k', '5', '42', 'node']);
+    const scriptArg = capturedCmd[capturedCmd.length - 1];
+    expect(scriptArg).toContain('--disable-crash-reporter');
+    expect(scriptArg).toContain('--disable-breakpad');
+    expect(hostResPath).not.toBe('');
+    expect(fs.existsSync(hostResPath)).toBe(false);
   });
 });
