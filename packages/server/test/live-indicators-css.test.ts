@@ -22,4 +22,11 @@ describe('live indicator styles', () => {
   it('turns the typing dots off for reduced motion', () => {
     expect(css).toMatch(/prefers-reduced-motion: reduce\)[\s\S]{0,200}\.typing span/);
   });
+
+  it('keeps the Live computer viewport from shrinking and gives tail logs a fixed scrollable box', () => {
+    expect(rule('.computer-viewport-wrap')).toMatch(/flex:\s*0 0 auto/);
+    expect(rule('.computer-viewport')).toMatch(/height:\s*clamp\(/);
+    expect(rule('.shell-tail-box')).toMatch(/height:\s*\d+px/);
+    expect(rule('.shell-tail-box')).toMatch(/overflow-y:\s*auto/);
+  });
 });

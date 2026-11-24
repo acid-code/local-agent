@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Globe, Hand, Monitor, Play, Terminal, X } from 'lucide-react';
+import { ArrowDown, Globe, Hand, Monitor, Play, Terminal, X } from 'lucide-react';
 import { api, post } from '../lib/api';
 import { fmt, t } from '../i18n';
 
@@ -52,6 +52,37 @@ interface ComputerState {
   lastScreen?: LastScreenMeta | null;
   browseSteps?: BrowseStepEntry[];
   shellTail: ShellTailEntry[];
+}
+
+function useAutoFollowTail(tailKey: string) {
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const followRef = useRef(true);
+  const [following, setFollowing] = useState(true);
+
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el || !followRef.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [tailKey]);
+
+  const onScroll = () => {
+    const el = boxRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 24;
+    if (followRef.current !== nearBottom) {
+      followRef.current = nearBottom;
+      setFollowing(nearBottom);
+    }
+  };
+
+  const jumpToLatest = () => {
+    const el = boxRef.current;
+    followRef.current = true;
+    setFollowing(true);
+    if (el) el.scrollTop = el.scrollHeight;
+  };
+
+  return { boxRef, following, onScroll, jumpToLatest };
 }
 
 export function Computer() {
@@ -160,6 +191,10 @@ export function Computer() {
   const wsPath = typeof window !== 'undefined' ? `${wsProto}//${window.location.host}/api/computer/vnc` : '';
   const entries = (state?.shellTail ?? []).filter((e) => !runFilter || e.runId === runFilter);
   const browseEntries = (state?.browseSteps ?? []).filter((e) => !runFilter || e.runId === runFilter);
+  const lastBrowse = browseEntries.at(-1);
+  const lastShell = entries.at(-1);
+  const browseTail = useAutoFollowTail(`${runFilter}|${browseEntries.length}|${lastBrowse?.id ?? ''}|${lastBrowse?.status ?? ''}|${lastBrowse?.error?.length ?? 0}`);
+  const shellTail = useAutoFollowTail(`${runFilter}|${entries.length}|${lastShell?.id ?? ''}|${lastShell?.code ?? ''}|${lastShell?.output?.length ?? 0}`);
   const overlayLabel = state?.lastScreen?.title || state?.browser?.lastTitle || state?.lastScreen?.url || state?.browser?.lastUrl;
 
   return (
@@ -255,63 +290,82 @@ export function Computer() {
         </div>
       </section>
 
-      <section className="shell-tail-sec">
-        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-          <h2><Globe size={16} aria-hidden /> {t('Recent browse steps')}</h2>
-          <input
-            type="search"
-            value={runFilter}
-            onChange={(e) => setRunFilter(e.target.value)}
-            placeholder={t('Filter by run ID')}
-            style={{ maxWidth: 220 }}
-          />
-        </div>
-        {browseEntries.length === 0 ? (
-          <p className="faint">{t('No recent browse steps yet.')}</p>
-        ) : (
-          <ul className="shell-tail-list">
-            {browseEntries.slice().reverse().map((step) => (
-              <li key={step.id} className="shell-tail-item">
-                <div className="shell-tail-head">
-                  <strong>{step.persona}</strong>
-                  <span className={`pill small${step.status === 'failed' ? ' bad' : step.status === 'running' ? ' on' : ''}`}>
-                    {step.status === 'running' ? t('Running') : step.status === 'failed' ? t('Failed') : t('Done')}
-                  </span>
-                  <span className="ellipsis" dir="auto" style={{ flex: 1, minWidth: 0 }}>{step.title ? `${step.title} · ` : ''}{step.url}</span>
-                  <span className="faint">{fmt.ago(step.at)}</span>
-                </div>
-                {step.actions.length > 0 && (
-                  <p className="mono faint browse-actions" dir="ltr">{step.actions.join(' → ')}</p>
-                )}
-                {step.error && <pre className="mono shell-tail-out" dir="ltr">{step.error.slice(0, 600)}</pre>}
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+      <div className="computer-logs-toolbar">
+        <input
+          type="search"
+          value={runFilter}
+          onChange={(e) => setRunFilter(e.target.value)}
+          placeholder={t('Filter by run ID')}
+          style={{ maxWidth: 240 }}
+        />
+      </div>
 
-      <section className="shell-tail-sec">
-        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-          <h2><Terminal size={16} aria-hidden /> {t('Workbench shell tail')}</h2>
-        </div>
-        {entries.length === 0 ? (
-          <p className="faint">{t('No recent shell commands yet.')}</p>
-        ) : (
-          <ul className="shell-tail-list">
-            {entries.slice().reverse().map((entry) => (
-              <li key={entry.id} className="shell-tail-item">
-                <div className="shell-tail-head">
-                  <strong>{entry.persona}</strong>
-                  <code className="mono" dir="ltr">$ {entry.command}</code>
-                  <span className={`pill small${entry.code === 0 ? '' : ' bad'}`}>exit {entry.code}</span>
-                  <span className="faint">{fmt.ago(entry.at)}</span>
-                </div>
-                {entry.output && <pre className="mono shell-tail-out" dir="ltr">{entry.output.slice(0, 1000)}</pre>}
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+      <div className="computer-logs-grid">
+        <section className="shell-tail-sec">
+          <div className="shell-tail-head-row">
+            <h2><Globe size={16} aria-hidden /> {t('Recent browse steps')}</h2>
+            {!browseTail.following && browseEntries.length > 0 && (
+              <button type="button" className="pill small" onClick={browseTail.jumpToLatest}>
+                <ArrowDown size={12} aria-hidden /> {t('Jump to latest')}
+              </button>
+            )}
+          </div>
+          <div className="shell-tail-box" ref={browseTail.boxRef} onScroll={browseTail.onScroll}>
+            {browseEntries.length === 0 ? (
+              <p className="faint">{t('No recent browse steps yet.')}</p>
+            ) : (
+              <ul className="shell-tail-list">
+                {browseEntries.map((step) => (
+                  <li key={step.id} className="shell-tail-item">
+                    <div className="shell-tail-head">
+                      <strong>{step.persona}</strong>
+                      <span className={`pill small${step.status === 'failed' ? ' bad' : step.status === 'running' ? ' on' : ''}`}>
+                        {step.status === 'running' ? t('Running') : step.status === 'failed' ? t('Failed') : t('Done')}
+                      </span>
+                      <span className="ellipsis" dir="auto" style={{ flex: 1, minWidth: 0 }}>{step.title ? `${step.title} · ` : ''}{step.url}</span>
+                      <span className="faint">{fmt.ago(step.at)}</span>
+                    </div>
+                    {step.actions.length > 0 && (
+                      <p className="mono faint browse-actions" dir="ltr">{step.actions.join(' → ')}</p>
+                    )}
+                    {step.error && <pre className="mono shell-tail-out" dir="ltr">{step.error.slice(0, 600)}</pre>}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </section>
+
+        <section className="shell-tail-sec">
+          <div className="shell-tail-head-row">
+            <h2><Terminal size={16} aria-hidden /> {t('Workbench shell tail')}</h2>
+            {!shellTail.following && entries.length > 0 && (
+              <button type="button" className="pill small" onClick={shellTail.jumpToLatest}>
+                <ArrowDown size={12} aria-hidden /> {t('Jump to latest')}
+              </button>
+            )}
+          </div>
+          <div className="shell-tail-box" ref={shellTail.boxRef} onScroll={shellTail.onScroll}>
+            {entries.length === 0 ? (
+              <p className="faint">{t('No recent shell commands yet.')}</p>
+            ) : (
+              <ul className="shell-tail-list">
+                {entries.map((entry) => (
+                  <li key={entry.id} className="shell-tail-item">
+                    <div className="shell-tail-head">
+                      <strong>{entry.persona}</strong>
+                      <code className="mono" dir="ltr">$ {entry.command}</code>
+                      <span className={`pill small${entry.code === 0 ? '' : ' bad'}`}>exit {entry.code}</span>
+                      <span className="faint">{fmt.ago(entry.at)}</span>
+                    </div>
+                    {entry.output && <pre className="mono shell-tail-out" dir="ltr">{entry.output.slice(0, 1000)}</pre>}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </section>
+      </div>
     </div>
   );
 }
