@@ -344,6 +344,20 @@ export function BulkDiffCard({ edits, onChanged }: { edits: DiffEdit[]; onChange
   );
 }
 
+export interface LivePrefillState {
+  total: number;
+  cached: number;
+  processed: number;
+  toEval: number;
+  evaluated: number;
+  prefillPct: number;
+  promptPct: number;
+  cacheHitPct: number;
+  timeMs: number;
+  prefillTokPerSec: number | null;
+  done: boolean;
+}
+
 /** Cursor-style expandable decision & tool-call timeline (live while running, inspectable after). */
 interface LiveLlmTelemetry {
   slot: {
@@ -356,8 +370,13 @@ interface LiveLlmTelemetry {
     promptTotal: number;
     promptProcessed: number;
     promptCached: number;
+    promptNewTotal?: number;
+    promptNewProcessed?: number;
     prefillPct: number | null;
+    promptPct?: number | null;
     cacheHitPct: number | null;
+    prefillTokPerSec?: number | null;
+    exactProgress?: boolean;
     speculative: boolean;
     speculativeType: string | null;
   } | null;
@@ -392,7 +411,19 @@ function modelArchOf(name: string) {
   return null;
 }
 
-function ModelLiveViz({ modelName, telemetry, live, tps }: { modelName: string; telemetry: LiveLlmTelemetry | null; live: boolean; tps?: number | null }) {
+function ModelLiveViz({
+  modelName,
+  telemetry,
+  livePrefill,
+  live,
+  tps,
+}: {
+  modelName: string;
+  telemetry: LiveLlmTelemetry | null;
+  livePrefill?: LivePrefillState | null;
+  live: boolean;
+  tps?: number | null;
+}) {
   const arch = modelArchOf(modelName);
   const slot = telemetry?.slot;
   const gpu = telemetry?.gpu;
@@ -405,26 +436,61 @@ function ModelLiveViz({ modelName, telemetry, live, tps }: { modelName: string; 
     return () => window.clearInterval(id);
   }, [live]);
 
-  const total = slot?.promptTotal ?? 0;
-  const cachedPct = total > 0 ? Math.min(100, Math.round(((slot?.promptCached ?? 0) / total) * 100)) : 0;
-  const procPct = slot?.prefillPct ?? 0;
+  const activePrefill = live ? livePrefill : null;
+  const isPrefilling = Boolean(activePrefill) || Boolean(slot?.isPrefilling && !slot?.isGenerating);
+  const isGenerating = !activePrefill && Boolean(slot?.isGenerating);
+  const total = activePrefill ? activePrefill.total : (slot?.promptTotal ?? 0);
+  const cached = activePrefill ? activePrefill.cached : (slot?.promptCached ?? 0);
+  const processed = activePrefill ? activePrefill.processed : (slot?.promptProcessed ?? 0);
+  const cachedPct = activePrefill
+    ? activePrefill.cacheHitPct
+    : total > 0
+      ? Math.min(100, Math.round((cached / total) * 100))
+      : 0;
+  const workPct = activePrefill ? activePrefill.prefillPct : slot?.prefillPct ?? null;
+  const overallPct = activePrefill
+    ? activePrefill.promptPct
+    : slot?.promptPct ?? (total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0);
+  const toEval = activePrefill ? activePrefill.toEval : (slot?.promptNewTotal ?? Math.max(0, total - cached));
+  const evaluated = activePrefill ? activePrefill.evaluated : (slot?.promptNewProcessed ?? Math.max(0, processed - cached));
+  const prefillTps = activePrefill ? activePrefill.prefillTokPerSec : (slot?.prefillTokPerSec ?? null);
+  const cacheLabel = activePrefill ? activePrefill.cacheHitPct : (slot?.cacheHitPct ?? null);
   const gttPct = gpu?.gttUsedGiB != null && gpu?.gttTotalGiB ? Math.min(100, Math.round((gpu.gttUsedGiB / gpu.gttTotalGiB) * 100)) : 0;
   const ramPct = cpu?.ramTotalGiB ? Math.min(100, Math.round((cpu.ramUsedGiB / cpu.ramTotalGiB) * 100)) : 0;
 
   return (
     <div className="llm-viz" dir="ltr">
-      {slot && total > 0 && (
+      {(activePrefill || slot) && total > 0 && (
         <div className="llm-viz-sec">
           <div className="llm-viz-head">
-            <span>{slot.isPrefilling && !slot.isGenerating ? `Prefill ${procPct}%` : slot.isGenerating ? `Generating${slot.nDecoded ? ` · ${slot.nDecoded} tok` : ''}` : 'Prompt ready'}</span>
+            <span>
+              {isPrefilling
+                ? workPct != null
+                  ? `Prefill ${workPct}%${prefillTps ? ` · ${prefillTps} t/s` : ''}`
+                  : 'Prefilling…'
+                : isGenerating
+                  ? `Generating${slot?.nDecoded ? ` · ${slot.nDecoded} tok` : ''}`
+                  : 'Prompt ready'}
+            </span>
             <span className="mono faint">
-              {(slot.isPrefilling && !slot.isGenerating ? slot.promptProcessed : total).toLocaleString()} / {total.toLocaleString()} tok
-              {slot.cacheHitPct != null ? ` · ${slot.cacheHitPct}% cached` : ''}
+              {isPrefilling
+                ? cached > 0
+                  ? `${evaluated.toLocaleString()} / ${toEval.toLocaleString()} new · ${cachedPct}% cached (${total.toLocaleString()} total)`
+                  : `${processed.toLocaleString()} / ${total.toLocaleString()} tok`
+                : `${total.toLocaleString()} tok${cacheLabel != null ? ` · ${cacheLabel}% cached` : isGenerating ? '' : ' in KV cache'}`}
             </span>
           </div>
           <div className="llm-bar">
-            <span className="llm-bar-cached" style={{ width: `${Math.min(slot.isPrefilling && !slot.isGenerating ? procPct : 100, cachedPct)}%` }} />
-            <span className="llm-bar-new" style={{ width: `${Math.max(0, (slot.isPrefilling && !slot.isGenerating ? procPct : 100) - cachedPct)}%` }} />
+            <span className="llm-bar-cached" style={{ width: `${isPrefilling ? cachedPct : (cacheLabel ?? 0)}%` }} />
+            <span className="llm-bar-new" style={{ width: `${isPrefilling ? Math.max(0, overallPct - cachedPct) : Math.max(0, 100 - (cacheLabel ?? 0))}%` }} />
+          </div>
+        </div>
+      )}
+      {!activePrefill && slot && isPrefilling && total === 0 && (
+        <div className="llm-viz-sec">
+          <div className="llm-viz-head">
+            <span>Prefilling…</span>
+            <span className="mono faint">{(slot.promptProcessed ?? 0).toLocaleString()} tok evaluated</span>
           </div>
         </div>
       )}
@@ -491,12 +557,14 @@ export function DecisionTimeline({
   steps,
   live,
   liveTokPerSec,
+  livePrefill,
   docked,
   onStop,
 }: {
   steps: TraceStep[];
   live: boolean;
   liveTokPerSec?: number | null;
+  livePrefill?: LivePrefillState | null;
   docked?: boolean;
   onStop?: () => void;
 }) {
@@ -527,8 +595,9 @@ export function DecisionTimeline({
   const totalSec = completedModelSteps.reduce((acc, s) => acc + ((s.latencyMs || 0) / 1000), 0);
   const avgTps = totalOut > 0 && totalSec > 0 ? Math.round((totalOut / totalSec) * 10) / 10 : null;
   const shownTps = live ? (liveTokPerSec ?? avgTps) : avgTps;
-  const isActivelyStreaming = Boolean(liveTokPerSec && liveTokPerSec > 0) || Boolean(telemetry?.slot?.isGenerating);
-  const prefillPct = live && activeModelStepId && !isActivelyStreaming && telemetry?.slot?.isPrefilling ? telemetry.slot.prefillPct : null;
+  const isActivelyStreaming = Boolean(liveTokPerSec && liveTokPerSec > 0) || (!livePrefill && Boolean(telemetry?.slot?.isGenerating));
+  const prefillingNow = Boolean(live && activeModelStepId && !isActivelyStreaming && (livePrefill || telemetry?.slot?.isPrefilling));
+  const prefillPct = prefillingNow ? (livePrefill ? livePrefill.prefillPct : (telemetry?.slot?.prefillPct ?? null)) : null;
 
   return (
     <div className={`decision-trace${docked ? ' docked' : ''}${live ? ' live' : ''}`}>
@@ -540,7 +609,9 @@ export function DecisionTimeline({
             {activeStep
               ? prefillPct != null
                 ? `${activeStep.name} · Prefill ${prefillPct}%`
-                : t('Running {0}…', [activeStep.name])
+                : prefillingNow && activeStep.id === activeModelStepId
+                  ? `${activeStep.name} · Prefilling…`
+                  : t('Running {0}…', [activeStep.name])
               : t('Decision path · {0} steps ({1} tools)', [visible.length, toolCount])}
           </span>
         </button>
@@ -566,7 +637,7 @@ export function DecisionTimeline({
             const summary = step.kind === 'routing'
               ? String((step.output as { reason?: string } | null)?.reason || step.name)
               : step.kind === 'model'
-                ? `${step.name}${isLiveModel && prefillPct != null ? ` · Prefill ${prefillPct}%` : step.tokensOut ? ` · ${step.tokensOut} tok` : ''}`
+                ? `${step.name}${isLiveModel && prefillPct != null ? ` · Prefill ${prefillPct}%` : isLiveModel && prefillingNow ? ' · Prefilling…' : step.tokensOut ? ` · ${step.tokensOut} tok` : ''}`
                 : step.name;
             return (
               <li key={step.id} className={`decision-item ${step.status}`}>
@@ -585,7 +656,7 @@ export function DecisionTimeline({
                 {isStepOpen && (
                   <div className="decision-detail">
                     {step.kind === 'model' && (
-                      <ModelLiveViz modelName={step.name} telemetry={telemetry} live={isLiveModel} tps={shownTps} />
+                      <ModelLiveViz modelName={step.name} telemetry={telemetry} livePrefill={isLiveModel ? livePrefill : null} live={isLiveModel} tps={shownTps} />
                     )}
                     {step.input != null && <pre className="mini-out">{typeof step.input === 'string' ? step.input : JSON.stringify(step.input, null, 2).slice(0, 1200)}</pre>}
                     {step.output != null && <pre className="mini-out">{typeof step.output === 'string' ? step.output.slice(0, 1800) : JSON.stringify(step.output, null, 2).slice(0, 1800)}</pre>}

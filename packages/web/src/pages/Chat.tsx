@@ -21,7 +21,7 @@ import { ContextRing } from '../components/ContextRing';
 import { PlanProgressPill, TypingDots, WorkGroupView, type PlanView } from '../components/WorkSteps';
 import { TraceList } from '../components/TraceList';
 import { groupWork, savedSkills } from '../lib/work-steps';
-import { ContextNudgeBanner, DecisionTimeline, BulkDiffCard, LocalRepoPicker, MiniAgentStrip, type MiniAgentRow } from '../components/ChatUpgrades';
+import { ContextNudgeBanner, DecisionTimeline, BulkDiffCard, LocalRepoPicker, MiniAgentStrip, type LivePrefillState, type MiniAgentRow } from '../components/ChatUpgrades';
 import { parseSources, toolSummary, waitStateOf, waitedFor, type ContextBreakdown, type ReasoningEffort } from '@local-agent/shared';
 import { toast, errorText } from '../lib/toast';
 import { copyText } from '../lib/files';
@@ -63,7 +63,13 @@ export function Chat() {
   const [draft, setDraft] = useState('');
   const [streaming, setStreaming] = useState('');
   const [liveTps, setLiveTps] = useState<number | null>(null);
+  const [livePrefill, setLivePrefill] = useState<LivePrefillState | null>(null);
   const streamMetricsRef = useRef<{ startedAt: number; chunks: number; chars: number }>({ startedAt: 0, chunks: 0, chars: 0 });
+  const resetLiveMetrics = () => {
+    streamMetricsRef.current = { startedAt: 0, chunks: 0, chars: 0 };
+    setLiveTps(null);
+    setLivePrefill(null);
+  };
   const streamFlushRef = useRef<{ text: string; thinking: string; textTimer: number | null; thinkingTimer: number | null }>({ text: '', thinking: '', textTimer: null, thinkingTimer: null });
   const [runId, setRunId] = useState<string | null>(null);
   const runIdRef = useRef<string | null>(null);
@@ -239,12 +245,16 @@ export function Chat() {
         setLivePhase(data.live?.phase || '');
         setRunStartedAt(data.live?.startedAt || null);
         setWaitInfo((data.live as { waitInfo?: unknown } | null)?.waitInfo ?? null);
+        streamMetricsRef.current = { startedAt: 0, chunks: 0, chars: 0 };
+        setLiveTps(null);
+        setLivePrefill((data.live as { prefill?: LivePrefillState | null } | null)?.prefill ?? null);
       } else if (runSession.current !== id) {
         runSession.current = null;
         setRunId(null);
         setStatus('');
         setStreaming('');
         setThinking('');
+        resetLiveMetrics();
         setLoadingNote('');
         setLiveFocus('');
         setLivePhase('');
@@ -252,6 +262,7 @@ export function Chat() {
       } else {
         setStreaming('');
         setThinking('');
+        resetLiveMetrics();
         setLiveFocus('');
         setLivePhase('');
         setRunStartedAt(null);
@@ -540,6 +551,9 @@ export function Chat() {
         if (typeof data.phase === 'string') setLivePhase(data.phase);
         if (typeof data.startedAt === 'string' && data.startedAt) setRunStartedAt(data.startedAt);
         setWaitInfo(data.waitInfo ?? null);
+        streamMetricsRef.current = { startedAt: 0, chunks: 0, chars: 0 };
+        setLiveTps(null);
+        setLivePrefill((data.prefill as LivePrefillState | null | undefined) ?? null);
         if (Array.isArray(data.messages) && data.run?.sessionId === currentRef.current) {
           setMessages((prev) => (data.messages.length >= prev.length ? keepIdentity(prev, data.messages as Message[]) : prev));
         }
@@ -548,6 +562,7 @@ export function Chat() {
         // Ended before this stream connected: the 'done' event is gone, so load the reply now.
         if (['completed', 'failed', 'stopped', 'interrupted'].includes(String(data.run?.status))) {
           setLoadingNote('');
+          resetLiveMetrics();
           const cur = currentRef.current;
           if (cur) void openSession(cur);
           void refreshLists().catch(() => undefined);
@@ -555,7 +570,13 @@ export function Chat() {
           return;
         }
       }
+      if (data.type === 'prefill') {
+        streamMetricsRef.current = { startedAt: 0, chunks: 0, chars: 0 };
+        setLiveTps(null);
+        setLivePrefill((data.prefill as LivePrefillState | null | undefined) ?? null);
+      }
       if (data.type === 'token' || data.type === 'thinking') {
+        setLivePrefill(null);
         const piece = String(data.text || '');
         const buffer = streamFlushRef.current;
         if (data.type === 'token') {
@@ -597,10 +618,11 @@ export function Chat() {
       if (data.type === 'computer_login_pause') {
         setBrowserNotice({ persona: String(data.personaName || 'Agent'), url: String(data.url || ''), needsLogin: true });
       }
-      if (data.type === 'error') setRunError(String(data.message || 'The reply failed.'));
+      if (data.type === 'error') { setRunError(String(data.message || 'The reply failed.')); resetLiveMetrics(); }
       if (data.type === 'step' && data.step) {
         setSteps((value) => [...value.filter((step) => step.id !== data.step.id), data.step]);
         if (data.step.kind === 'model' && data.step.name) setLastModel(String(data.step.name));
+        if (data.step.kind === 'model' && data.step.status === 'running') resetLiveMetrics();
         const cur = currentRef.current;
         if (['tasks', 'plan', 'enter_plan_mode', 'exit_plan_mode'].includes(data.step.name) && data.step.status === 'completed' && cur) void api<{ plan: Plan | null }>(`/api/sessions/${cur}?limit=1`).then((fresh) => setPlan(fresh.plan)).catch(() => undefined);
       }
@@ -616,7 +638,7 @@ export function Chat() {
         setMessages((value) => [...value.filter((m) => m.id !== data.message.id), data.message]);
         setStreaming('');
         setThinking('');
-        streamMetricsRef.current = { startedAt: 0, chunks: 0, chars: 0 };
+        resetLiveMetrics();
         // Auto-speak reply if the responding persona has Answer by voice enabled or Voice-First Mode is on.
         if (data.message?.role === 'assistant' && data.message?.content?.trim() && !(data.message.toolCalls?.length)) {
           const speaker = agentsRef.current.find((a) => a.id === data.message.agentId);
@@ -655,6 +677,7 @@ export function Chat() {
         setLiveFocus('');
         setLivePhase('');
         setRunStartedAt(null);
+        resetLiveMetrics();
         setStatus(data.run?.status || 'completed');
         if (data.run?.modelId) setLastModel(modelsRef.current.find((model) => model.id === data.run.modelId)?.name || String(data.run.modelId));
         if (data.run?.status === 'failed' && data.run?.error) setRunError(String(data.run.error));
@@ -705,6 +728,7 @@ export function Chat() {
     if (override === undefined) { setDraft(''); setQuotes([]); setMentions([]); }
     setRunError(null);
     setThinking('');
+    resetLiveMetrics();
     setMessages((value) => [...value, { id: 'local', role: 'user', content }]);
     const agentId = sessions.find((session) => session.id === target)?.agentId || agents[0]?.id;
     let result: { run: { id: string }; offers: Offer[] };
@@ -1071,7 +1095,7 @@ export function Chat() {
           </div>
         </div>
         {steps.length > 0 && (
-          <DecisionTimeline steps={steps} live={Boolean(active)} liveTokPerSec={liveTps} docked onStop={() => control('stop')} />
+          <DecisionTimeline steps={steps} live={Boolean(active)} liveTokPerSec={liveTps} livePrefill={livePrefill} docked onStop={() => control('stop')} />
         )}
         {(current || chatWs.roots.length > 0) && (
           <div className="ws-strip" aria-label={t('Workspaces in this chat')}>

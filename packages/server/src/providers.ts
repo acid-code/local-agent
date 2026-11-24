@@ -59,10 +59,59 @@ export function maxTokensFor(opts: { thinking: boolean; side?: boolean }): numbe
   return opts.thinking ? Number(process.env.LA_THINK_MAX_TOKENS || 12_288) : Number(process.env.LA_MAX_TOKENS || 6144);
 }
 
+export interface PromptProgress {
+  total: number;
+  cached: number;
+  processed: number;
+  timeMs: number;
+}
+
+export interface PrefillSnapshot {
+  total: number;
+  cached: number;
+  processed: number;
+  toEval: number;
+  evaluated: number;
+  prefillPct: number;
+  promptPct: number;
+  cacheHitPct: number;
+  timeMs: number;
+  prefillTokPerSec: number | null;
+  done: boolean;
+}
+
+/** Exact prefill snapshot from llama-server `prompt_progress` (`total`, `cache`, `processed`, `time_ms`). */
+export function computePrefillSnapshot(p: PromptProgress): PrefillSnapshot {
+  const total = Math.max(0, Math.round(p.total));
+  const cached = Math.min(total, Math.max(0, Math.round(p.cached)));
+  const processed = Math.min(total, Math.max(cached, Math.round(p.processed)));
+  const timeMs = Math.max(0, Math.round(p.timeMs));
+  const toEval = Math.max(0, total - cached);
+  const evaluated = Math.max(0, processed - cached);
+  const prefillPct = toEval > 0 ? Math.min(100, Math.round((evaluated / toEval) * 100)) : 100;
+  const promptPct = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 100;
+  const cacheHitPct = total > 0 ? Math.min(100, Math.round((cached / total) * 100)) : 0;
+  const prefillTokPerSec = timeMs >= 200 && evaluated > 0 ? Math.round((evaluated / (timeMs / 1000)) * 10) / 10 : null;
+  return {
+    total,
+    cached,
+    processed,
+    toEval,
+    evaluated,
+    prefillPct,
+    promptPct,
+    cacheHitPct,
+    timeMs,
+    prefillTokPerSec,
+    done: total > 0 && processed >= total,
+  };
+}
+
 export type ProviderEvent =
   | { type: 'token'; text: string }
   /** Reasoning text from thinking models. Never part of the answer. */
   | { type: 'thinking'; text: string }
+  | { type: 'progress'; progress: PromptProgress }
   | { type: 'done'; finishReason: string; toolCalls?: ToolCall[]; usage?: Usage; telemetry?: Telemetry };
 
 export interface ModelProvider {
@@ -125,9 +174,9 @@ export function providerFor(model: ModelRow, provider: ProviderRow, fetchImpl: t
   if (provider.kind !== 'openrouter' && (provider.id === 'prov_ollama' || provider.name === 'Ollama' || /:11434(\/|$)/.test(base))) {
     return new OllamaProvider(base.replace(/\/v1$/, ''), fetchImpl);
   }
-  // llama-server: keep the slot prefix cache on so a stable system prompt + tools are not re-prefilled each turn.
+  // llama-server: keep the slot prefix cache on and emit exact per-batch prompt_progress during prefill.
   const llama = isLlamaServerProvider(provider) || /uncensored|:8081(?:\/|$)/i.test(`${provider.name} ${provider.baseUrl || ''}`);
-  const extra = llama ? { cache_prompt: true } : undefined;
+  const extra = llama ? { cache_prompt: true, return_progress: true } : undefined;
   return new OpenAIProvider(base, key || '', fetchImpl, provider.kind === 'openrouter', extra, llama);
 }
 
@@ -545,6 +594,7 @@ interface OpenAIChunk {
   choices?: { finish_reason?: string | null; delta?: { content?: string; reasoning_content?: string; reasoning?: string; tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[] } }[];
   usage?: { prompt_tokens?: number; completion_tokens?: number };
   timings?: LlamaTimings;
+  prompt_progress?: { total?: number; cache?: number; processed?: number; time_ms?: number };
 }
 
 interface OpenAIResponse {
@@ -584,6 +634,17 @@ async function* readSSE(response: Response): AsyncIterable<ProviderEvent> {
       if (data === '[DONE]') { sawEnd = true; continue; }
       if (!data || !data.startsWith('{')) continue;
       const json = JSON.parse(data) as OpenAIChunk;
+      if (json.prompt_progress && typeof json.prompt_progress.total === 'number' && json.prompt_progress.total > 0) {
+        yield {
+          type: 'progress',
+          progress: {
+            total: Math.max(0, Math.round(json.prompt_progress.total)),
+            cached: Math.max(0, Math.round(json.prompt_progress.cache ?? 0)),
+            processed: Math.max(0, Math.round(json.prompt_progress.processed ?? 0)),
+            timeMs: Math.max(0, Math.round(json.prompt_progress.time_ms ?? 0)),
+          },
+        };
+      }
       const choice = json.choices?.[0];
       if (choice?.finish_reason) { sawEnd = true; finishReason = choice.finish_reason; }
       const delta = choice?.delta;

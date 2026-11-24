@@ -48,6 +48,7 @@ import { memoryFiles, rollbackRun, writeMemoryFile } from './learning.js';
 import { createWorkshop, getWorkshop, listWorkshops } from './workshops.js';
 import { ACCENT_DEFAULT, FACES, accentOk, avatarPath, saveAvatar } from './avatars.js';
 import type { Bus } from './bus.js';
+import type { PrefillSnapshot } from './providers.js';
 import type { Engine } from './engine.js';
 import { git, listSharedRepos, registerSharedRepo } from './repos.js';
 import { isInside } from '@local-agent/shared';
@@ -1328,6 +1329,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       focus: live?.focus ?? run.cursor.focus ?? '',
       phase: live?.phase ?? run.cursor.workPhase ?? '',
       startedAt: live?.startedAt ?? run.startedAt,
+      prefill: live?.prefill ?? null,
     });
     const off = bus.subscribeRun(id, send);
     const beat = setInterval(() => reply.raw.write(': ping\n\n'), 15000);
@@ -1762,45 +1764,19 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       } catch { /* ignore */ }
       return null;
     };
-    const probeSlot = async (baseUrl: string | undefined, label: string) => {
-      if (!baseUrl) return null;
+    const probeSlot = async (baseUrl: string | undefined, label: 'main' | 'uncensored') => {
+      const active = engine.activePrefill(label);
+      if (!baseUrl) return active ? buildLiveSlotStatus(null, label, active) : null;
       const root = baseUrl.replace(/\/v1\/?$/, '').replace(/\/+$/, '');
       try {
         const res = await fetchImpl(`${root}/slots`, { signal: AbortSignal.timeout(900) });
-        if (!res.ok) return null;
-        const slots = await res.json() as Array<{
-          id?: number; n_ctx?: number; is_processing?: boolean; speculative?: boolean;
-          n_prompt_tokens?: number; n_prompt_tokens_processed?: number; n_prompt_tokens_cache?: number;
-          next_token?: Array<{ has_next_token?: boolean; n_decoded?: number; n_remain?: number }>;
-          params?: { 'speculative.types'?: string };
-        }>;
+        if (!res.ok) return active ? buildLiveSlotStatus(null, label, active) : null;
+        const slots = await res.json() as LlamaRawSlot[];
         const slot = slots.find((s) => s.is_processing) ?? slots[0];
-        if (!slot) return null;
-        const total = Number(slot.n_prompt_tokens ?? 0);
-        const processed = Number(slot.n_prompt_tokens_processed ?? 0);
-        const cached = Number(slot.n_prompt_tokens_cache ?? 0);
-        const nDecoded = Number(slot.next_token?.[0]?.n_decoded ?? 0);
-        const isPrefilling = Boolean(slot.is_processing && nDecoded === 0 && total > 0 && processed < total);
-        const isGenerating = Boolean(slot.is_processing && !isPrefilling);
-        const prefillPct = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : null;
-        const cacheHitPct = total > 0 ? Math.min(100, Math.round((cached / total) * 100)) : null;
-        return {
-          server: label,
-          isProcessing: Boolean(slot.is_processing),
-          isPrefilling,
-          isGenerating,
-          nDecoded,
-          nCtx: Number(slot.n_ctx ?? 0),
-          promptTotal: total,
-          promptProcessed: processed,
-          promptCached: cached,
-          prefillPct,
-          cacheHitPct,
-          speculative: Boolean(slot.speculative),
-          speculativeType: slot.params?.['speculative.types'] || null,
-        };
+        if (!slot) return active ? buildLiveSlotStatus(null, label, active) : null;
+        return buildLiveSlotStatus(slot, label, active);
       } catch {
-        return null;
+        return active ? buildLiveSlotStatus(null, label, active) : null;
       }
     };
     const [mainSlot, uncSlot] = await Promise.all([
@@ -2460,4 +2436,107 @@ async function runSetup(action: string, model: string | undefined, jobId: string
     store.appendJob(jobId, `\n${error instanceof Error ? error.message : 'failed'}\n`);
     store.finishJob(jobId, 'failed');
   }
+}
+
+export interface LlamaRawSlot {
+  id?: number;
+  n_ctx?: number;
+  is_processing?: boolean;
+  speculative?: boolean;
+  n_prompt_tokens?: number;
+  n_prompt_tokens_processed?: number;
+  n_prompt_tokens_cache?: number;
+  next_token?: Array<{ has_next_token?: boolean; n_decoded?: number; n_remain?: number }>;
+  params?: { 'speculative.types'?: string };
+}
+
+/** Combines llama-server `/slots` with exact `prompt_progress` stream telemetry so prefill % never uses a shifting denominator. */
+export function buildLiveSlotStatus(slot: LlamaRawSlot | null | undefined, label: string, activePrefill: PrefillSnapshot | null) {
+  const rawPromptTokens = Number(slot?.n_prompt_tokens ?? 0);
+  const rawProcessed = Number(slot?.n_prompt_tokens_processed ?? 0);
+  const rawCached = Number(slot?.n_prompt_tokens_cache ?? 0);
+  const nDecoded = Number(slot?.next_token?.[0]?.n_decoded ?? 0);
+  const isProcessing = Boolean(slot?.is_processing);
+  const common = {
+    server: label,
+    nDecoded,
+    nCtx: Number(slot?.n_ctx ?? 0),
+    speculative: Boolean(slot?.speculative),
+    speculativeType: slot?.params?.['speculative.types'] || null,
+  };
+
+  if (activePrefill && nDecoded === 0) {
+    return {
+      ...common,
+      isProcessing: true,
+      isPrefilling: true,
+      isGenerating: false,
+      promptTotal: activePrefill.total,
+      promptProcessed: activePrefill.processed,
+      promptCached: activePrefill.cached,
+      promptNewTotal: activePrefill.toEval,
+      promptNewProcessed: activePrefill.evaluated,
+      prefillPct: activePrefill.prefillPct,
+      promptPct: activePrefill.promptPct,
+      cacheHitPct: activePrefill.cacheHitPct,
+      prefillTokPerSec: activePrefill.prefillTokPerSec,
+      exactProgress: true,
+    };
+  }
+
+  if (isProcessing && nDecoded > 0) {
+    const total = (rawCached + rawProcessed) || rawPromptTokens;
+    return {
+      ...common,
+      isProcessing: true,
+      isPrefilling: false,
+      isGenerating: true,
+      promptTotal: total,
+      promptProcessed: total,
+      promptCached: rawCached,
+      promptNewTotal: rawProcessed,
+      promptNewProcessed: rawProcessed,
+      prefillPct: 100,
+      promptPct: 100,
+      cacheHitPct: total > 0 ? Math.min(100, Math.round((rawCached / total) * 100)) : null,
+      prefillTokPerSec: null,
+      exactProgress: true,
+    };
+  }
+
+  if (isProcessing && nDecoded === 0) {
+    return {
+      ...common,
+      isProcessing: true,
+      isPrefilling: true,
+      isGenerating: false,
+      promptTotal: 0,
+      promptProcessed: rawPromptTokens,
+      promptCached: rawCached,
+      promptNewTotal: 0,
+      promptNewProcessed: rawProcessed,
+      prefillPct: null,
+      promptPct: null,
+      cacheHitPct: null,
+      prefillTokPerSec: null,
+      exactProgress: false,
+    };
+  }
+
+  return {
+    ...common,
+    isProcessing: false,
+    isPrefilling: false,
+    isGenerating: false,
+    promptTotal: rawPromptTokens,
+    promptProcessed: rawPromptTokens,
+    promptCached: rawCached,
+    promptNewTotal: 0,
+    promptNewProcessed: 0,
+    prefillPct: null,
+    promptPct: rawPromptTokens > 0 ? 100 : null,
+    cacheHitPct: (rawCached > 0 || rawProcessed > 0) && rawPromptTokens > 0 ? Math.min(100, Math.round((rawCached / rawPromptTokens) * 100)) : null,
+    prefillTokPerSec: null,
+    exactProgress: false,
+  };
 }

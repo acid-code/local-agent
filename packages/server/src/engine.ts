@@ -35,7 +35,7 @@ import type { Agent, ModelRow, ProviderRow, RunRow, Store } from './db.js';
 import { dispatchPersonaMessage } from './persona-messaging.js';
 import type { DockerCtl } from './docker.js';
 import { indexText, retrieve, type VectorIndex } from './embeddings.js';
-import { countGeminiTokens, maxTokensFor, ollamaNumCtx, providerFor, samplingFor, type ModelProvider } from './providers.js';
+import { computePrefillSnapshot, countGeminiTokens, maxTokensFor, ollamaNumCtx, providerFor, samplingFor, type ModelProvider, type PrefillSnapshot } from './providers.js';
 import type { Settings } from './settings.js';
 import { CODING_TOOLS, replacePlan } from './coding.js';
 import { formatCitations, searchKnowledge } from './kb.js';
@@ -81,7 +81,8 @@ const PLAN_READONLY_BLOCKED = new Set(['apply_patch', 'write_file', 'create_file
 
 export class Engine {
   private readonly inflight = new Map<string, { abort: AbortController; paused: boolean; resumePause: () => void }>();
-  private readonly liveStreams = new Map<string, { text: string; thinking: string; status: string; detail?: string; waitInfo?: unknown; focus?: string; phase?: WorkPhase; startedAt?: string }>();
+  private readonly liveStreams = new Map<string, { text: string; thinking: string; status: string; detail?: string; waitInfo?: unknown; focus?: string; phase?: WorkPhase; startedAt?: string; prefill?: PrefillSnapshot | null }>();
+  private readonly livePrefills = new Map<'main' | 'uncensored', { runId: string; snapshot: PrefillSnapshot; updatedAt: number }>();
   private readonly lastContext = new Map<string, ContextBreakdown>();
   private readonly compacting = new Set<string>();
   private readonly approvalWaiters = new Map<string, (status: 'approved' | 'denied') => void>();
@@ -562,6 +563,14 @@ export class Engine {
     } catch { /* best effort */ }
   }
 
+  /** Live exact prefill snapshot reported by llama-server's `prompt_progress` stream, if a turn is currently prefilling. */
+  activePrefill(server: 'main' | 'uncensored'): PrefillSnapshot | null {
+    const entry = this.livePrefills.get(server);
+    if (!entry) return null;
+    if (Date.now() - entry.updatedAt >= 60_000) return null;
+    return entry.snapshot;
+  }
+
   /** Runs in flight in this process (any chat). */
   busyRuns(): number { return this.inflight.size; }
 
@@ -569,6 +578,7 @@ export class Engine {
   forgetChats(sessionIds: string[]) {
     for (const id of sessionIds) this.autonomy.stopForSession(id);
     this.liveStreams.clear();
+    this.livePrefills.clear();
     this.lastContext.clear();
     this.dwell.clear();
   }
@@ -638,11 +648,15 @@ export class Engine {
 
   stopAll() {
     for (const id of [...this.inflight.keys()]) this.stop(id);
+    this.livePrefills.clear();
   }
 
   stop(runId: string) {
     // Stopping a reply also stops the helpers it started.
     this.autonomy.stopChildrenOf(runId);
+    for (const [k, v] of this.livePrefills.entries()) if (v.runId === runId) this.livePrefills.delete(k);
+    const live = this.liveStreams.get(runId);
+    if (live) live.prefill = null;
     const state = this.inflight.get(runId);
     state?.abort.abort();
     if (state?.paused) state.resumePause();
@@ -1107,7 +1121,23 @@ export class Engine {
       focus: prevLive?.focus ?? current.cursor.focus,
       phase: livePhase,
       startedAt: prevLive?.startedAt || current.startedAt || now(),
+      prefill: null,
     });
+    const llamaServerLabel: 'main' | 'uncensored' | null = providerRow
+      ? isUncensoredProvider(providerRow)
+        ? 'uncensored'
+        : isLlamaServerProvider(providerRow)
+          ? 'main'
+          : null
+      : null;
+    const clearLivePrefill = () => {
+      const live = this.liveStreams.get(run.id);
+      if (live) live.prefill = null;
+      for (const [k, v] of this.livePrefills.entries()) {
+        if (v.runId === run.id) this.livePrefills.delete(k);
+      }
+    };
+    clearLivePrefill();
     let toolCalls: ToolCall[] | undefined;
     let usage = { inputTokens: built.plan.estimatedTokens, outputTokens: 0 };
     let telemetry: import('./providers.js').Telemetry | undefined;
@@ -1120,47 +1150,59 @@ export class Engine {
       ? { temperature: 0.6, top_p: 0.85, top_k: 20, min_p: 0.05, presence_penalty: 0.3, repeat_penalty: 1.08 }
       : baseSampling;
     try {
-      for await (const event of provider.complete({
-        model: model.apiName, messages: built.messages, tools, signal: streamAbort.signal,
-        paceMs: model.profileId === 'rehearsal' && process.env.NODE_ENV !== 'test' ? 10 : 0,
-        numCtx,
-        keepAlive: model.local ? keepAliveFor(model) : undefined,
-        think: (Boolean(current.cursor.reasoning) || autoEffort === 'high') && !current.cursor.noThink && sessionEffort !== 'off',
-        noThink: Boolean(current.cursor.noThink),
-        effort: sessionEffort,
-        sampling: effectiveSampling,
-        maxTokens: maxTokensFor({ thinking: thinkingOn }),
-      })) {
-        if (signal.aborted) throw new StopError();
-        if (event.type === 'token') {
-          text += event.text;
-          const hit = detectDegenerateRepeat(text);
-          if (hit) {
-            degenerateMatch = hit;
-            text = text.slice(0, text.length - hit.length).trimEnd();
-            streamAbort.abort();
-            break;
+      try {
+        for await (const event of provider.complete({
+          model: model.apiName, messages: built.messages, tools, signal: streamAbort.signal,
+          paceMs: model.profileId === 'rehearsal' && process.env.NODE_ENV !== 'test' ? 10 : 0,
+          numCtx,
+          keepAlive: model.local ? keepAliveFor(model) : undefined,
+          think: (Boolean(current.cursor.reasoning) || autoEffort === 'high') && !current.cursor.noThink && sessionEffort !== 'off',
+          noThink: Boolean(current.cursor.noThink),
+          effort: sessionEffort,
+          sampling: effectiveSampling,
+          maxTokens: maxTokensFor({ thinking: thinkingOn }),
+        })) {
+          if (signal.aborted) throw new StopError();
+          if (event.type === 'progress') {
+            const snapshot = computePrefillSnapshot(event.progress);
+            const live = this.liveStreams.get(run.id);
+            if (live) live.prefill = snapshot;
+            if (llamaServerLabel) this.livePrefills.set(llamaServerLabel, { runId: run.id, snapshot, updatedAt: Date.now() });
+            this.bus.publish({ type: 'prefill', runId: run.id, prefill: snapshot });
+          } else if (event.type === 'token') {
+            clearLivePrefill();
+            text += event.text;
+            const hit = detectDegenerateRepeat(text);
+            if (hit) {
+              degenerateMatch = hit;
+              text = text.slice(0, text.length - hit.length).trimEnd();
+              streamAbort.abort();
+              break;
+            }
+            const live = this.liveStreams.get(run.id);
+            if (live) live.text = text;
+            this.bus.publish({ type: 'token', runId: run.id, text: event.text });
+          } else if (event.type === 'thinking') {
+            clearLivePrefill();
+            reasoningText += event.text;
+            const hit = detectDegenerateRepeat(reasoningText);
+            if (hit) {
+              degenerateMatch = hit;
+              reasoningText = reasoningText.slice(0, reasoningText.length - hit.length).trimEnd();
+              streamAbort.abort();
+              break;
+            }
+            const live = this.liveStreams.get(run.id);
+            if (live) live.thinking = reasoningText;
+            this.bus.publish({ type: 'thinking', runId: run.id, text: event.text });
+          } else if (event.type === 'done') {
+            toolCalls = event.toolCalls;
+            if (event.usage) usage = event.usage;
+            if (event.telemetry) telemetry = event.telemetry;
           }
-          const live = this.liveStreams.get(run.id);
-          if (live) live.text = text;
-          this.bus.publish({ type: 'token', runId: run.id, text: event.text });
-        } else if (event.type === 'thinking') {
-          reasoningText += event.text;
-          const hit = detectDegenerateRepeat(reasoningText);
-          if (hit) {
-            degenerateMatch = hit;
-            reasoningText = reasoningText.slice(0, reasoningText.length - hit.length).trimEnd();
-            streamAbort.abort();
-            break;
-          }
-          const live = this.liveStreams.get(run.id);
-          if (live) live.thinking = reasoningText;
-          this.bus.publish({ type: 'thinking', runId: run.id, text: event.text });
-        } else {
-          toolCalls = event.toolCalls;
-          if (event.usage) usage = event.usage;
-          if (event.telemetry) telemetry = event.telemetry;
         }
+      } finally {
+        clearLivePrefill();
       }
       if (degenerateMatch) {
         this.store.addLog('warn', `Stopped degenerate output loop from ${model.name} (snippet=${JSON.stringify(degenerateMatch.slice(0, 16))}).`, run.id, 'providers');
