@@ -68,7 +68,7 @@ import { disabledRules } from './rules.js';
 import { CONNECTOR_TOOLS, disabledConnectorTools } from './connectors.js';
 import { memoryBrief, memoryFileTool, projectRules, proposeSkillTool, searchChatsTool, skillNudge } from './learning.js';
 import { cleanText, fallbackTitle, hasHebrew, isNotice, needsTitle, parseTitle, titlePrompt } from './chat-titles.js';
-import { LlamaWatch, OLLAMA_SIDE_MAX_GIB, isLlamaServerProvider, isNonChatModel, isOllamaProvider, isUncensoredProvider, modelGiB } from './coexist.js';
+import { LlamaWatch, LocalGpuGate, OLLAMA_SIDE_MAX_GIB, isLlamaServerProvider, isNonChatModel, isOllamaProvider, isUncensoredProvider, modelGiB } from './coexist.js';
 
 /** A run in one of these states can still use the answer to a secret request or approval. */
 const WAITING_RUN_STATUSES = new Set(['running', 'paused', 'awaiting_approval', 'awaiting_secret']);
@@ -92,6 +92,7 @@ export class Engine {
   residentLarge: string[] = [];
   /** runId → which big GPU slot that run holds (llama-server or heavy Ollama). */
   private readonly llamaLeases = new Map<string, 'qwen' | 'uncensored' | 'ollama-large'>();
+  private readonly gpuGate = new LocalGpuGate();
   extraTools: Tool[] = [];
   /** Set by the routes once OCR is wired: reads an image file for the read_image_text tool. */
   ocrReader: ((fileId: string, mode: OcrMode, ownerId: string) => Promise<OcrResult>) | null = null;
@@ -121,6 +122,11 @@ export class Engine {
   ) {
     this.autonomy = new Autonomy(store, bus, vault, (input) => this.startTurn(input), (runId) => this.stop(runId), () => this.libraryDir);
     this.llama = new LlamaWatch(store, fetchImpl);
+  }
+
+  private localGpuLane(model: ModelRow, lane: 'foreground' | 'background'): 'foreground' | 'background' | null {
+    if (!model.local || Boolean(this.providerOverride) || process.env.LA_GPU_SERIALIZE === '0') return null;
+    return lane;
   }
   /**
    * One llama-server model owns the GPU at a time (Qwen on :8080 or the uncensored model on :8081).
@@ -900,10 +906,12 @@ export class Engine {
       })!;
       const steeringAgent = this.store.getAgent(current.agentId);
       if (steeringAgent && !current.cursor.helperId) {
-        const offered = this.tools(steeringAgent, sessionMode, current.cursor.stage, current.cursor.toolSubset, false, current);
+        const steerModel = current.modelId ? this.store.getModel(current.modelId) : null;
+        const steerStable = Boolean(steerModel && this.cacheFriendly(steerModel));
+        const offered = this.tools(steeringAgent, sessionMode, current.cursor.stage, current.cursor.toolSubset, false, current, false, steerStable);
         const offeredNames = new Set(offered.map((t) => t.name));
         const contract = contractForAgent(steeringAgent.name);
-        const { tools: allPermitted, servers } = this.allowedTools(steeringAgent, sessionMode, current.cursor.stage, current.cursor.toolSubset, false);
+        const { tools: allPermitted, servers } = this.allowedTools(steeringAgent, sessionMode, current.cursor.stage, current.cursor.toolSubset, false, steerStable);
         const discoverable = allPermitted.filter((t) => contractAllows(contract, t.name, servers) && !offeredNames.has(t.name));
         this.seedToolsFromText(current, steering.content, discoverable, servers);
         current = this.store.getRun(run.id) ?? current;
@@ -1096,7 +1104,7 @@ export class Engine {
     const toolless = Boolean(current.cursor.noTools) || this.toolSupportOf(model) === false;
     const tools = toolless
       ? []
-      : this.tools(agent, sessionForCtx?.mode, current.cursor.stage, current.cursor.toolSubset, Boolean(current.cursor.helperId), current)
+      : this.tools(agent, sessionForCtx?.mode, current.cursor.stage, current.cursor.toolSubset, Boolean(current.cursor.helperId), current, false, this.cacheFriendly(model))
           .filter((tool) => !(nativeThinking && tool.name === 'think'))
           .map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
     const repoTask = Boolean(sessionForCtx?.mode === 'code' || sessionForCtx?.workshopId || current.cursor.stage || turnRoots(this.store, current, this.libraryDir).length > 0);
@@ -1165,8 +1173,18 @@ export class Engine {
     const effectiveSampling = current.cursor.safeSampling
       ? { temperature: 0.6, top_p: 0.85, top_k: 20, min_p: 0.05, presence_penalty: 0.3, repeat_penalty: 1.08 }
       : baseSampling;
+    const gateLane = this.localGpuLane(model, current.cursor.helperId ? 'background' : 'foreground');
+    let releaseGpu: (() => void) | null = null;
     try {
       try {
+        if (gateLane) {
+          try {
+            releaseGpu = await this.gpuGate.acquire(gateLane, streamAbort.signal);
+          } catch (err) {
+            if (signal.aborted) throw new StopError();
+            throw err;
+          }
+        }
         for await (const event of provider.complete({
           model: model.apiName, messages: built.messages, tools, signal: streamAbort.signal,
           paceMs: model.profileId === 'rehearsal' && process.env.NODE_ENV !== 'test' ? 10 : 0,
@@ -1218,6 +1236,7 @@ export class Engine {
           }
         }
       } finally {
+        releaseGpu?.();
         clearLivePrefill();
       }
       if (degenerateMatch) {
@@ -1495,7 +1514,9 @@ export class Engine {
       if (completed.has(call.id)) continue;
       await this.waitIfPaused(run.id, signal);
       if (signal.aborted) throw new StopError();
-      const tools = this.tools(this.store.getAgent(run.agentId)!, this.store.getSession(run.sessionId)?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId), run, true);
+      const stepModelRow = run.modelId ? this.store.getModel(run.modelId) : null;
+      const stepStable = Boolean(stepModelRow && this.cacheFriendly(stepModelRow));
+      const tools = this.tools(this.store.getAgent(run.agentId)!, this.store.getSession(run.sessionId)?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId), run, true, stepStable);
       const tool = tools.find((item) => item.name === call.name);
       // A permitted tool called before find_tools surfaced it still runs, and stays on the menu from now on.
       if (tool && run.cursor.extraTools !== undefined && call.name !== 'find_tools' && !run.cursor.extraTools.includes(call.name)) this.addRunTools(run, [call.name]);
@@ -2039,7 +2060,8 @@ export class Engine {
     const memoryNote = agent.memoryEnabled ? memoryBrief(this.store, agent.id) : '';
     const rulesNote = session ? projectRules(chatWorkspacePaths(this.store, run.sessionId, session.ownerId || OWNER_ID), disabledRules(this.store, run.sessionId)) : '';
     // Everything this persona can reach (found or not): notes about skills and teammates name what find_tools can surface.
-    const offeredTools = this.tools(agent, session?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId), run, true);
+    const cacheFriendly = this.cacheFriendly(model);
+    const offeredTools = this.tools(agent, session?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId), run, true, cacheFriendly);
     const toolNames = offeredTools.map((tool) => tool.name);
     const toolSteps = run.cursor.helperId || run.cursor.turn < 4 ? [] : this.store.listSteps(run.id).filter((step) => step.kind === 'tool');
     const nudge = run.cursor.helperId ? '' : skillNudge(run.cursor.turn, toolNames, {
@@ -2086,7 +2108,6 @@ export class Engine {
     // it. So for these models the prompt only ever grows within a run: the preamble and the per-run context are frozen
     // at the first step, and notes (recovery, steering, nudges) are pinned once after the message that was last when
     // they appeared, instead of being rewritten into an earlier message each step.
-    const cacheFriendly = this.cacheFriendly(model);
     const system = cacheFriendly
       ? `${agent.systemPrompt}${dateNote}${sharedRepoNote}${rulesNote}${memoryNote}${teamNote}${searchFirstNote}${kbHint}${CITE_HINT}${HONESTY_RULE}${run.cursor.helperId ? '' : TASKS_HINT}${languageNote}`
       : `${agent.systemPrompt}${dateNote}${sharedRepoNote}${chatWorkspaces}${rulesNote}${memoryNote}${teamNote}${searchFirstNote}${stageNote}${roleNote}${kbHint}${CITE_HINT}${HONESTY_RULE}${run.cursor.helperId ? '' : TASKS_HINT}${nudge}${languageNote}${recoveryNote}`;
@@ -2242,7 +2263,7 @@ export class Engine {
     const covered = new Set(summaries.flatMap((summary) => summary.covers));
     const usableBudget = Math.min(model.contextWindow, model.practicalBudget) - settings.outputReserveTokens;
     const session = this.store.getSession(sessionId);
-    const activeTools = this.tools(agent, session?.mode || 'chat', undefined, undefined, false);
+    const activeTools = this.tools(agent, session?.mode || 'chat', undefined, undefined, false, undefined, false, this.cacheFriendly(model));
     const tok = model.tokenizer as 'approx';
     const toolTokens = activeTools.length ? estimateTokens(JSON.stringify(activeTools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }))), tok) : 0;
     const sysTokens = estimateTokens(agent.systemPrompt || '', tok);
@@ -2306,9 +2327,16 @@ export class Engine {
     const side = this.sideModel(model);
     const ask = async (target: ModelRow, prompt: string) => {
       const provider = this.provider(target);
+      const sig = AbortSignal.timeout(60_000);
+      const lane = this.localGpuLane(target, 'background');
+      const release = lane ? await this.gpuGate.acquire(lane, sig) : null;
       let out = '';
-      for await (const event of provider.complete({ model: target.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, signal: AbortSignal.timeout(60_000), noThink: true, sampling: samplingFor(`${target.apiName} ${target.name}`, { thinking: false, task: 'general' }), maxTokens: Math.max(1536, Math.ceil(prompt.length / 2)) })) {
-        if (event.type === 'token') out += event.text;
+      try {
+        for await (const event of provider.complete({ model: target.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, signal: sig, noThink: true, sampling: samplingFor(`${target.apiName} ${target.name}`, { thinking: false, task: 'general' }), maxTokens: Math.max(1536, Math.ceil(prompt.length / 2)) })) {
+          if (event.type === 'token') out += event.text;
+        }
+      } finally {
+        release?.();
       }
       return out;
     };
@@ -2376,9 +2404,16 @@ export class Engine {
       try {
         const provider = this.provider(model);
         const runTitleComplete = async (prompt: string): Promise<string> => {
+          const sig = AbortSignal.timeout(20_000);
+          const lane = this.localGpuLane(model, 'background');
+          const release = lane ? await this.gpuGate.acquire(lane, sig) : null;
           let out = '';
-          for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, noThink: true, sampling: samplingFor(`${model.apiName} ${model.name}`, { thinking: false, task: 'general' }), maxTokens: 40, signal: AbortSignal.timeout(20_000) })) {
-            if (event.type === 'token') out += event.text;
+          try {
+            for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, noThink: true, sampling: samplingFor(`${model.apiName} ${model.name}`, { thinking: false, task: 'general' }), maxTokens: 40, signal: sig })) {
+              if (event.type === 'token') out += event.text;
+            }
+          } finally {
+            release?.();
           }
           return out;
         };
@@ -2434,8 +2469,14 @@ export class Engine {
       const provider = this.provider(model);
       let text = '';
       const timer = AbortSignal.timeout(30_000);
-      for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, noThink: true, sampling: samplingFor(`${model.apiName} ${model.name}`, { thinking: false, task: 'general' }), maxTokens: Math.min(280, maxTokensFor({ thinking: false, side: true })), signal: timer })) {
-        if (event.type === 'token') text += event.text;
+      const lane = this.localGpuLane(model, 'background');
+      const release = lane ? await this.gpuGate.acquire(lane, timer) : null;
+      try {
+        for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, noThink: true, sampling: samplingFor(`${model.apiName} ${model.name}`, { thinking: false, task: 'general' }), maxTokens: Math.min(280, maxTokensFor({ thinking: false, side: true })), signal: timer })) {
+          if (event.type === 'token') text += event.text;
+        }
+      } finally {
+        release?.();
       }
       return text.trim().slice(0, 4000) || null;
     } catch {
@@ -2448,8 +2489,15 @@ export class Engine {
     try {
       const provider = this.provider(model);
       let text = '';
-      for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, noThink: true, sampling: samplingFor(`${model.apiName} ${model.name}`, { thinking: false, task: 'general' }), maxTokens: maxTokensFor({ thinking: false, side: true }) })) {
-        if (event.type === 'token') text += event.text;
+      const sig = AbortSignal.timeout(60_000);
+      const lane = this.localGpuLane(model, 'background');
+      const release = lane ? await this.gpuGate.acquire(lane, sig) : null;
+      try {
+        for await (const event of provider.complete({ model: model.apiName, messages: [{ role: 'user', content: prompt }], paceMs: 0, noThink: true, sampling: samplingFor(`${model.apiName} ${model.name}`, { thinking: false, task: 'general' }), maxTokens: maxTokensFor({ thinking: false, side: true }), signal: sig })) {
+          if (event.type === 'token') text += event.text;
+        }
+      } finally {
+        release?.();
       }
       return text.slice(0, 4000) || 'Summary stored.';
     } catch {
@@ -2547,8 +2595,8 @@ export class Engine {
    * essentials), find_tools, and whatever this run found or was seeded with, appended in order so the prefix holds.
    * `all` returns every permitted tool (for executing a call), plus find_tools.
    */
-  private tools(agent: Agent, sessionMode?: string, stage?: 'plan' | 'implement', subset?: string[], helper = false, run?: RunRow, all = false): Tool[] {
-    const { tools: allowed, servers } = this.allowedTools(agent, sessionMode, stage, subset, helper);
+  private tools(agent: Agent, sessionMode?: string, stage?: 'plan' | 'implement', subset?: string[], helper = false, run?: RunRow, all = false, stablePrefix = false): Tool[] {
+    const { tools: allowed, servers } = this.allowedTools(agent, sessionMode, stage, subset, helper, stablePrefix);
     // Tools the persona's contract would reject are never offered (they only cost tokens and a failed call).
     const contract = contractForAgent(agent.name);
     const permitted = allowed.filter((tool) => contractAllows(contract, tool.name, servers));
@@ -2557,9 +2605,9 @@ export class Engine {
       : list;
     if (!leanMenuEnabled() || permitted.length <= LEAN_MIN_TOOLS) return all ? permitted : hideDuplicateTasks(permitted);
     const core = new Set<string>([...agent.toolAllowlist, ...CORE_TOOLS]);
-    if (stage === 'plan') for (const name of ['plan', 'recall', 'consult_agent', 'enter_plan_mode', 'exit_plan_mode']) core.add(name);
+    if (stage === 'plan' || (stablePrefix && !helper && !subset)) for (const name of ['plan', 'recall', 'consult_agent', 'enter_plan_mode', 'exit_plan_mode']) core.add(name);
     if (core.has('make_slides')) core.add('slide_draft');
-    if (stage === 'implement' || sessionMode === 'code') for (const tool of CODING_TOOLS) core.add(tool.name);
+    if (stage === 'implement' || sessionMode === 'code' || (stablePrefix && !helper && !subset)) for (const tool of CODING_TOOLS) core.add(tool.name);
     if (permitted.some((tool) => tool.name === 'plan' && core.has('plan')) && !agent.toolAllowlist.includes('tasks')) core.delete('tasks');
     const base = permitted.filter((tool) => core.has(tool.name));
     const baseNames = new Set(base.map((tool) => tool.name));
@@ -2630,7 +2678,7 @@ export class Engine {
   }
 
   /** Every tool this persona may use in this run (allowlist, member and helper limits, disabled connectors). */
-  private allowedTools(agent: Agent, sessionMode?: string, stage?: 'plan' | 'implement', subset?: string[], helper = false): { tools: Tool[]; servers: Map<string, string> } {
+  private allowedTools(agent: Agent, sessionMode?: string, stage?: 'plan' | 'implement', subset?: string[], helper = false, stablePrefix = false): { tools: Tool[]; servers: Map<string, string> } {
     const names = new Set(agent.toolAllowlist);
     names.add('create_file');
     names.add('write_file');
@@ -2666,11 +2714,11 @@ export class Engine {
     if (this.imageAnalyzer) names.add('understand_image');
     for (const name of ['tasks', 'enter_plan_mode', 'exit_plan_mode', 'manage_timer', 'manage_trigger', 'spawn_agent', 'helpers', 'memory_file', 'search_chats', 'propose_skill', 'run_tool_script', 'time_now', 'think', 'set_focus']) names.add(name);
     if (this.store.getSettings().imageGen.mode !== 'off') names.add('generate_image');
-    if (stage === 'plan') {
+    if (stage === 'plan' || (stablePrefix && !helper && !subset)) {
       for (const name of ['web_search', 'web_fetch', 'read_file', 'list_dir', 'grep', 'glob', 'plan', 'recall', 'consult_agent', 'enter_plan_mode', 'exit_plan_mode']) names.add(name);
     }
-    if (stage === 'implement' || sessionMode === 'code') for (const tool of CODING_TOOLS) names.add(tool.name);
-    if (stage === 'plan') for (const blocked of PLAN_READONLY_BLOCKED) names.delete(blocked);
+    if (stage === 'implement' || sessionMode === 'code' || (stablePrefix && !helper && !subset)) for (const tool of CODING_TOOLS) names.add(tool.name);
+    if (stage === 'plan' && !stablePrefix) for (const blocked of PLAN_READONLY_BLOCKED) names.delete(blocked);
     // MCP connector tools: owner personas only (servers carry the owner's tokens). A persona gets a server's tools when its
     // allowlist names them (exact name, "mcp:<server>" or "mcp:*"), or when its gallery template lists that connector.
     const mcp = (agent.ownerId || OWNER_ID) === OWNER_ID ? this.mcpTools() : [];

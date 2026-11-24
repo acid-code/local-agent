@@ -179,3 +179,66 @@ export class LlamaWatch {
     return this.isActive();
   }
 }
+
+type GpuWaiter = {
+  resolve: (release: () => void) => void;
+  reject: (reason?: unknown) => void;
+  cleanup?: () => void;
+};
+
+/**
+ * Priority mutex serializing local GPU inference across llama-server and Ollama so 4B helpers/titles
+ * never compete with the main 35B model on the shared unified-memory AMD iGPU.
+ */
+export class LocalGpuGate {
+  private busy = false;
+  private readonly fg: GpuWaiter[] = [];
+  private readonly bg: GpuWaiter[] = [];
+
+  inUse(): boolean {
+    return this.busy;
+  }
+
+  queued(): { foreground: number; background: number } {
+    return { foreground: this.fg.length, background: this.bg.length };
+  }
+
+  private makeRelease(): () => void {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const next = this.fg.shift() ?? this.bg.shift();
+      if (next) {
+        next.cleanup?.();
+        next.resolve(this.makeRelease());
+      } else {
+        this.busy = false;
+      }
+    };
+  }
+
+  acquire(lane: 'foreground' | 'background', signal?: AbortSignal): Promise<() => void> {
+    if (signal?.aborted) {
+      return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error('Aborted'));
+    }
+    if (!this.busy) {
+      this.busy = true;
+      return Promise.resolve(this.makeRelease());
+    }
+    return new Promise<() => void>((resolve, reject) => {
+      const queue = lane === 'foreground' ? this.fg : this.bg;
+      const waiter: GpuWaiter = { resolve, reject };
+      if (signal) {
+        const onAbort = () => {
+          const idx = queue.indexOf(waiter);
+          if (idx >= 0) queue.splice(idx, 1);
+          reject(signal.reason instanceof Error ? signal.reason : new Error('Aborted'));
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+        waiter.cleanup = () => signal.removeEventListener('abort', onAbort);
+      }
+      queue.push(waiter);
+    });
+  }
+}

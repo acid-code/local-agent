@@ -10,7 +10,7 @@ import { DockerCtl } from '../src/docker.js';
 import { VectorIndex } from '../src/embeddings.js';
 import { Vault } from '../src/vault.js';
 import { ScriptedProvider, providerFor, LLAMA_TIMEOUT_MS } from '../src/providers.js';
-import { LlamaWatch, isLlamaServerProvider, isOllamaProvider, isUncensoredProvider, modelGiB } from '../src/coexist.js';
+import { LlamaWatch, LocalGpuGate, isLlamaServerProvider, isOllamaProvider, isUncensoredProvider, modelGiB } from '../src/coexist.js';
 import { isContextOverflowError } from '@local-agent/shared';
 import { clipToolOutput, toHostBindPath } from '../src/tools.js';
 import { checkFinalReply, falseInability } from '../src/recovery.js';
@@ -367,6 +367,113 @@ describe('llama-server and Ollama coexistence', () => {
     } finally {
       if (prevUrl === undefined) delete process.env.LLAMA_FALLBACK_CONTROL_URL;
       else process.env.LLAMA_FALLBACK_CONTROL_URL = prevUrl;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('serializes local GPU access with foreground priority, safe abort cleanup, and idempotent release', async () => {
+    const gate = new LocalGpuGate();
+    expect(gate.inUse()).toBe(false);
+    expect(gate.queued()).toEqual({ foreground: 0, background: 0 });
+
+    const order: string[] = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
+
+    const releaseFirst = await gate.acquire('background');
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    expect(gate.inUse()).toBe(true);
+
+    const abortCtrl = new AbortController();
+    const bg1 = gate.acquire('background').then((rel) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      order.push('bg1');
+      return rel;
+    });
+    const abortedBg = gate.acquire('background', abortCtrl.signal);
+    const fg1 = gate.acquire('foreground').then((rel) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      order.push('fg1');
+      return rel;
+    });
+    expect(gate.queued()).toEqual({ foreground: 1, background: 2 });
+
+    abortCtrl.abort(new Error('cancelled while waiting'));
+    await expect(abortedBg).rejects.toThrow(/cancelled while waiting/);
+    expect(gate.queued()).toEqual({ foreground: 1, background: 1 });
+
+    // Releasing twice is idempotent and must hand ownership only once, to fg1 before bg1.
+    inFlight -= 1;
+    releaseFirst();
+    releaseFirst();
+    const relFg1 = await fg1;
+    expect(order).toEqual(['fg1']);
+    inFlight -= 1;
+    relFg1();
+
+    const relBg1 = await bg1;
+    expect(order).toEqual(['fg1', 'bg1']);
+    inFlight -= 1;
+    relBg1();
+
+    expect(maxInFlight).toBe(1);
+    expect(gate.inUse()).toBe(false);
+    expect(gate.queued()).toEqual({ foreground: 0, background: 0 });
+  });
+
+  it('keeps llama-server tool menus byte-identical across plan/implement transitions while still blocking mutating calls in plan mode', async () => {
+    const { dir, store, health } = setup(true);
+    try {
+      const engine = new Engine(store, new Bus(), new DockerCtl('/nonexistent.sock'), new VectorIndex(store.db), new Vault(store, Buffer.alloc(32, 7)), 'inst_cache', health);
+      const agent = store.createAgent({
+        name: 'Assistant', description: 'Helpful assistant', systemPrompt: 'You help.', modelId: 'llama_qwen3_6',
+        routing: 'auto', strategy: 'rolling', toolAllowlist: [], memoryEnabled: false, workspacePath: dir,
+      });
+      fs.writeFileSync(path.join(dir, 'note.txt'), 'original\n');
+      const session = store.createSession({ agentId: agent.id, title: 'cache-test' });
+      const userMsg = store.insertMessage({
+        sessionId: session.id, agentId: agent.id, role: 'user', content: 'Plan an edit to note.txt',
+        toolCallId: null, toolName: null, toolCalls: null, runId: null, imageUrl: null, routingNote: null,
+      });
+      const run = store.createRun({
+        sessionId: session.id,
+        agentId: agent.id,
+        configVersion: 1,
+        cursor: { turn: 0, phase: 'tool', userMessageId: userMsg.id, completedToolIds: [] } as any,
+      });
+      store.updateRun(run.id, { modelId: 'llama_qwen3_6' });
+
+      const serialize = (list: { name: string; description: string; parameters: unknown }[]) =>
+        JSON.stringify(list.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters })));
+
+      const menuDefault = (engine as any).tools(agent, 'chat', undefined, undefined, false, run, false, true);
+      const menuPlan = (engine as any).tools(agent, 'chat', 'plan', undefined, false, run, false, true);
+      const menuImpl = (engine as any).tools(agent, 'chat', 'implement', undefined, false, run, false, true);
+
+      expect(serialize(menuPlan)).toBe(serialize(menuDefault));
+      expect(serialize(menuImpl)).toBe(serialize(menuDefault));
+      expect(menuPlan.map((t: { name: string }) => t.name)).toContain('write_file');
+      expect(menuPlan.map((t: { name: string }) => t.name)).toContain('plan');
+
+      // Even though write_file remains in the schema under stablePrefix, plan mode still mechanically blocks it at runtime.
+      const planRun = store.updateRun(run.id, {
+        modelId: 'llama_qwen3_6',
+        cursor: {
+          ...run.cursor,
+          stage: 'plan',
+          toolCalls: [{ id: 'tc_plan_write', name: 'write_file', arguments: JSON.stringify({ path: 'note.txt', content: 'overwritten' }) }],
+          completedToolIds: [],
+        },
+      })!;
+      await (engine as any).stepTools(planRun, new AbortController().signal);
+      const toolReply = store.listMessages(session.id).find((m) => m.role === 'tool' && m.toolCallId === 'tc_plan_write');
+      expect(toolReply?.content).toMatch(/Blocked by plan mode \(read-only\)/);
+      expect(fs.readFileSync(path.join(dir, 'note.txt'), 'utf8')).toBe('original\n');
+    } finally {
+      store.close();
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
