@@ -86,12 +86,19 @@ export async function buildApp(options: {
     ? options.workbench
     : new Workbench(docker, path.join(config.dataDir, 'workspaces'), () => engine.memory, toHostBindPath);
   engine.workbench = workbench;
+  const computer = new ComputerControl(bus, { dataDir: config.dataDir, store });
+  engine.computer = computer;
+  const activeRunStatuses = new Set(['queued', 'running', 'loading', 'waiting', 'paused', 'awaiting_approval', 'awaiting_secret']);
   const browser = options.browser !== undefined
     ? options.browser
-    : new ManagedBrowser(docker, config.dataDir, () => engine.memory, toHostBindPath);
+    : new ManagedBrowser(docker, config.dataDir, () => engine.memory, toHostBindPath, undefined, {
+        isRunActive: (runId) => {
+          const row = store.getRun(runId);
+          return Boolean(row && activeRunStatuses.has(row.status));
+        },
+        onFrame: (info) => computer.notifyFrame(info),
+      });
   engine.browser = browser;
-  const computer = new ComputerControl(bus);
-  engine.computer = computer;
   const triggers = new TriggerRuntime(store, engine, vault, bus);
   const mcp = new McpRuntime(store, docker, { secretsFor: (id) => vault.mcpEnv(id), cacheDir: path.join(config.dataDir, 'mcp-cache') });
   engine.mcpTools = () => mcp.agentTools();
@@ -122,7 +129,7 @@ export async function buildApp(options: {
   app.addHook('onRequest', async (req, reply) => {
     reply.header('x-content-type-options', 'nosniff');
     reply.header('referrer-policy', 'no-referrer');
-    reply.header('x-frame-options', 'DENY');
+    reply.header('x-frame-options', req.url.startsWith('/api/computer/novnc/') ? 'SAMEORIGIN' : 'DENY');
     const origin = req.headers.origin;
     if (typeof origin === 'string') {
       reply.header('access-control-allow-origin', origin);

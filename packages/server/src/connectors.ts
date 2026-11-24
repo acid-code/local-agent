@@ -216,7 +216,9 @@ export function sqliteTool(): Tool {
 }
 
 interface BrowseAction {
-  type: 'navigate' | 'reload' | 'back' | 'click' | 'fill' | 'select' | 'hover' | 'press' | 'scroll' | 'wait' | 'submit';
+  type?: 'navigate' | 'reload' | 'back' | 'click' | 'fill' | 'type' | 'select' | 'hover' | 'press' | 'scroll' | 'wait' | 'submit';
+  action?: string;
+  url?: string;
   selector?: string;
   text?: string;
   value?: string;
@@ -224,6 +226,11 @@ interface BrowseAction {
   y?: number;
   ms?: number;
 }
+
+const actionKind = (a: unknown): string => {
+  const row = a as { type?: unknown; action?: unknown } | null | undefined;
+  return String(row?.type || row?.action || '').toLowerCase();
+};
 
 const browserProfiles = new Map<string, { profile: string; expiresAt: number }>();
 const BROWSER_PROFILE_TTL = 30 * 60_000;
@@ -307,8 +314,9 @@ async function runCdpSession(chrome: string, url: string, actions: BrowseAction[
       await new Promise((r) => setTimeout(r, 2500));
 
       const log: string[] = [];
-      for (const act of actions.slice(0, 12)) {
+      for (const rawAct of actions.slice(0, 12)) {
         if (signal.aborted) throw new Error('Aborted.');
+        const act = { ...rawAct, type: actionKind(rawAct) };
         if (act.type === 'navigate') {
           const target = String(act.value || act.selector || url);
           const blocked = isBlockedUrl(target);
@@ -456,7 +464,7 @@ export function browseTool(): Tool {
       },
     }, ['url']),
     mutates: (args) => Array.isArray(args.actions) && args.actions.some((a) => {
-      const t = String((a as { type?: string })?.type || '');
+      const t = actionKind(a);
       return ['navigate', 'click', 'fill', 'select', 'press', 'submit'].includes(t);
     }),
     approval: (args) => {
@@ -465,9 +473,9 @@ export function browseTool(): Tool {
       if (isPaymentAction(url, actions as unknown as BrowserAction[])) {
         return `Payment or purchase action on ${url.slice(0, 120)} requires your approval.`;
       }
-      const interactive = actions.filter((a) => ['navigate', 'click', 'fill', 'select', 'press', 'submit'].includes(a?.type));
+      const interactive = actions.filter((a) => ['navigate', 'click', 'fill', 'select', 'press', 'submit'].includes(actionKind(a)));
       if (!interactive.length) return null;
-      return `Interact with web page ${url.slice(0, 120)} (${interactive.map((a) => `${a.type} ${a.selector || a.text || a.key || ''}`.trim()).join(', ').slice(0, 140)})`;
+      return `Interact with web page ${url.slice(0, 120)} (${interactive.map((a) => `${actionKind(a)} ${a.selector || a.text || a.key || ''}`.trim()).join(', ').slice(0, 140)})`;
     },
     async execute(args, ctx) {
       if (ctx.agent.ownerId !== OWNER_ID) throw new Error('The browser is only available to the owner.');
@@ -482,65 +490,102 @@ export function browseTool(): Tool {
       }
       const wantShot = Boolean(args.screenshot) || actions.length > 0;
       const vaultValues = Object.values(ctx.secretEnv?.() ?? {});
+      const actionLabels = actions.map((a) => `${actionKind(a)}${a.selector ? ` ${a.selector}` : a.url ? ` ${a.url}` : ''}`.trim());
+      const stepId = ctx.computer?.recordBrowseStart({ runId: ctx.runId ?? null, persona: ctx.agent.name, url, actions: actionLabels });
 
-      if (ctx.browser && realBrowserEnabled() && ctx.docker.available()) {
-        try {
-          ctx.computer?.notifyBrowserActive(ctx.runId ?? null, ctx.agent.name, url);
-          const result = await ctx.browser.browse({
-            personaSlug: ctx.agent.slug || ctx.agent.id,
-            runId: ctx.runId,
-            url,
-            actions: actions as unknown as BrowserAction[],
-            screenshot: wantShot,
-            signal: ctx.signal,
-            vaultValues,
-          });
-          let fileRef = '';
-          if (result.png && ctx.libraryDir) {
-            const host = (() => { try { return new URL(result.href || url).hostname.replace(/[^a-z0-9.-]+/gi, '_'); } catch { return 'page'; } })();
-            const saved = saveFile(ctx.store, ctx.libraryDir, {
-              name: `page-${host}-${Date.now().toString(36)}.png`,
-              bytes: result.png,
-              sessionId: ctx.sessionId ?? null,
-              agentId: ctx.agent.id,
-              source: 'agent',
-              mime: 'image/png',
-              ownerId: ctx.agent.ownerId || 'owner',
+      try {
+        if (ctx.browser && realBrowserEnabled() && ctx.docker.available()) {
+          try {
+            ctx.computer?.notifyBrowserActive(ctx.runId ?? null, ctx.agent.name, url);
+            const result = await ctx.browser.browse({
+              personaSlug: ctx.agent.slug || ctx.agent.id,
+              runId: ctx.runId,
+              url,
+              actions: actions as unknown as BrowserAction[],
+              screenshot: wantShot,
+              signal: ctx.signal,
+              vaultValues,
             });
-            fileRef = `Screenshot saved: [file:${saved.id}] (call understand_image with file_id="${saved.id}" to inspect its visual look, layout, and colors).\n`;
+            let fileRef = '';
+            if (result.png && ctx.libraryDir) {
+              const host = (() => { try { return new URL(result.href || url).hostname.replace(/[^a-z0-9.-]+/gi, '_'); } catch { return 'page'; } })();
+              const saved = saveFile(ctx.store, ctx.libraryDir, {
+                name: `page-${host}-${Date.now().toString(36)}.png`,
+                bytes: result.png,
+                sessionId: ctx.sessionId ?? null,
+                agentId: ctx.agent.id,
+                source: 'agent',
+                mime: 'image/png',
+                ownerId: ctx.agent.ownerId || 'owner',
+              });
+              fileRef = `Screenshot saved: [file:${saved.id}] (call understand_image with file_id="${saved.id}" to inspect its visual look, layout, and colors).\n`;
+            }
+            ctx.computer?.recordScreen({
+              png: result.png,
+              url: result.href || url,
+              title: result.title || '',
+              persona: ctx.agent.name,
+              runId: ctx.runId ?? null,
+            });
+            ctx.computer?.finishBrowseStep(stepId, {
+              status: 'completed',
+              url: result.href || url,
+              title: result.title || '',
+              actions: result.log.length ? result.log : actionLabels,
+            });
+            const actionSummary = result.log.length ? `Actions: ${result.log.join(' → ')}\n` : '';
+            if (result.loginDetected && ctx.computer && ctx.runId) {
+              await ctx.computer.pauseForLogin(ctx.runId, ctx.agent.name, result.href || url, ctx.signal);
+            }
+            const loginHint = result.loginDetected ? '\n[Note: a password field is on this page. Owner took over to sign in and returned control.]' : '';
+            return `Title: ${result.title || '(untitled)'}\nURL: ${result.href || url}\n${fileRef}${actionSummary}\n${result.text || '(empty page)'}${loginHint}`;
+          } catch (error) {
+            if (/Refused:|blocked|private|loopback|Password/i.test((error as Error).message)) throw error;
+            ctx.store.addLog('warn', `Managed browser unavailable, falling back to headless: ${(error as Error).message}`, undefined, 'browser');
           }
-          const actionSummary = result.log.length ? `Actions: ${result.log.join(' → ')}\n` : '';
-          if (result.loginDetected && ctx.computer && ctx.runId) {
-            await ctx.computer.pauseForLogin(ctx.runId, ctx.agent.name, result.href || url, ctx.signal);
-          }
-          const loginHint = result.loginDetected ? '\n[Note: a password field is on this page. Owner took over to sign in and returned control.]' : '';
-          return `Title: ${result.title || '(untitled)'}\nURL: ${result.href || url}\n${fileRef}${actionSummary}\n${result.text || '(empty page)'}${loginHint}`;
-        } catch (error) {
-          if (/Refused:|blocked|private|loopback|Password/i.test((error as Error).message)) throw error;
-          ctx.store.addLog('warn', `Managed browser unavailable, falling back to headless: ${(error as Error).message}`, undefined, 'browser');
         }
-      }
 
-      const chrome = chromePath();
-      if (!chrome) return `(no browser installed; plain fetch)\n${redactVaultValues(await fetchPublicText(url, ctx.fetchImpl, ctx.signal), vaultValues)}`;
-      const result = await runCdpSession(chrome, url, actions, wantShot, ctx.signal, ctx.sessionId || ctx.agent.id);
-      let fileRef = '';
-      if (result.png && ctx.libraryDir) {
-        const host = (() => { try { return new URL(result.href || url).hostname.replace(/[^a-z0-9.-]+/gi, '_'); } catch { return 'page'; } })();
-        const saved = saveFile(ctx.store, ctx.libraryDir, {
-          name: `page-${host}-${Date.now().toString(36)}.png`,
-          bytes: result.png,
-          sessionId: ctx.sessionId ?? null,
-          agentId: ctx.agent.id,
-          source: 'agent',
-          mime: 'image/png',
-          ownerId: ctx.agent.ownerId || 'owner',
+        const chrome = chromePath();
+        if (!chrome) {
+          const text = redactVaultValues(await fetchPublicText(url, ctx.fetchImpl, ctx.signal), vaultValues);
+          ctx.computer?.finishBrowseStep(stepId, { status: 'completed', url, title: '', actions: actionLabels });
+          return `(no browser installed; plain fetch)\n${text}`;
+        }
+        const result = await runCdpSession(chrome, url, actions, wantShot, ctx.signal, ctx.sessionId || ctx.agent.id);
+        let fileRef = '';
+        if (result.png && ctx.libraryDir) {
+          const host = (() => { try { return new URL(result.href || url).hostname.replace(/[^a-z0-9.-]+/gi, '_'); } catch { return 'page'; } })();
+          const saved = saveFile(ctx.store, ctx.libraryDir, {
+            name: `page-${host}-${Date.now().toString(36)}.png`,
+            bytes: result.png,
+            sessionId: ctx.sessionId ?? null,
+            agentId: ctx.agent.id,
+            source: 'agent',
+            mime: 'image/png',
+            ownerId: ctx.agent.ownerId || 'owner',
+          });
+          fileRef = `Screenshot saved: [file:${saved.id}] (call understand_image with file_id="${saved.id}" to inspect its visual look, layout, and colors).\n`;
+        }
+        ctx.computer?.recordScreen({
+          png: result.png,
+          url: result.href || url,
+          title: result.title || '',
+          persona: ctx.agent.name,
+          runId: ctx.runId ?? null,
         });
-        fileRef = `Screenshot saved: [file:${saved.id}] (call understand_image with file_id="${saved.id}" to inspect its visual look, layout, and colors).\n`;
+        ctx.computer?.finishBrowseStep(stepId, {
+          status: 'completed',
+          url: result.href || url,
+          title: result.title || '',
+          actions: result.log.length ? result.log : actionLabels,
+        });
+        const actionSummary = result.log.length ? `Actions: ${result.log.join(' → ')}\n` : '';
+        const controls = result.elements.length ? `\nInteractive elements:\n${result.elements.join('\n')}` : '';
+        return redactVaultValues(`Title: ${result.title || '(untitled)'}\nURL: ${result.href || url}\n${fileRef}${actionSummary}\n${result.text || '(empty page)'}${controls}`, vaultValues);
+      } catch (error) {
+        ctx.computer?.finishBrowseStep(stepId, { status: 'failed', error: (error as Error).message });
+        throw error;
       }
-      const actionSummary = result.log.length ? `Actions: ${result.log.join(' → ')}\n` : '';
-      const controls = result.elements.length ? `\nInteractive elements:\n${result.elements.join('\n')}` : '';
-      return redactVaultValues(`Title: ${result.title || '(untitled)'}\nURL: ${result.href || url}\n${fileRef}${actionSummary}\n${result.text || '(empty page)'}${controls}`, vaultValues);
     },
   };
 }

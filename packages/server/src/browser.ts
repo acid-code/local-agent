@@ -17,7 +17,8 @@ export function realBrowserEnabled(env: NodeJS.ProcessEnv = process.env): boolea
 }
 
 export interface BrowserAction {
-  type: 'navigate' | 'click' | 'type' | 'fill' | 'scroll' | 'screenshot' | 'extract' | 'press' | 'select' | 'wait' | 'submit' | 'back' | 'reload';
+  type?: 'navigate' | 'click' | 'type' | 'fill' | 'hover' | 'scroll' | 'screenshot' | 'extract' | 'press' | 'select' | 'wait' | 'submit' | 'back' | 'reload';
+  action?: string;
   url?: string;
   selector?: string;
   text?: string;
@@ -46,6 +47,9 @@ export interface BrowserStatus {
   lastUsedAt: string | null;
   activePersona: string | null;
   activeRunId: string | null;
+  activeTabOpen?: boolean;
+  lastUrl?: string | null;
+  lastTitle?: string | null;
 }
 
 export interface CdpDriver {
@@ -183,29 +187,49 @@ const { chromium } = require('playwright');
   }
   const page = await ctx.newPage();
   const log = [];
+  const liveTmp = '/profiles/.last-screen.tmp.png';
+  const liveDest = '/profiles/.last-screen.png';
+  const snapLive = async () => {
+    try {
+      await page.screenshot({ path: liveTmp, type: 'png' });
+      fs.renameSync(liveTmp, liveDest);
+    } catch {}
+  };
   try {
     await page.goto(cfg.url, { waitUntil: 'domcontentloaded', timeout: 25000 });
     log.push('navigate ' + cfg.url);
+    await snapLive();
     for (const a of cfg.actions || []) {
-      if (a.type === 'navigate' && a.url) { await page.goto(a.url, { waitUntil: 'domcontentloaded', timeout: 25000 }); log.push('navigate ' + a.url); }
-      else if (a.type === 'click' && a.selector) { await page.click(a.selector, { timeout: 10000 }); log.push('click ' + a.selector); }
-      else if ((a.type === 'fill' || a.type === 'type') && a.selector) {
+      const kind = String((a && (a.type || a.action)) || '').toLowerCase();
+      if (kind === 'navigate' && a.url) { await page.goto(a.url, { waitUntil: 'domcontentloaded', timeout: 25000 }); log.push('navigate ' + a.url); }
+      else if (kind === 'reload') { await page.reload({ waitUntil: 'domcontentloaded', timeout: 25000 }); log.push('reload'); }
+      else if (kind === 'back') { await page.goBack({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => {}); log.push('back'); }
+      else if (kind === 'click' && a.selector) { await page.click(a.selector, { timeout: 10000 }); log.push('click ' + a.selector); }
+      else if (kind === 'hover' && (a.selector || a.text)) {
+        const target = a.selector || 'text=' + a.text;
+        await page.locator(target).first().hover({ timeout: 10000 });
+        log.push('hover ' + target);
+      }
+      else if ((kind === 'fill' || kind === 'type') && a.selector) {
         const isPw = await page.locator(a.selector).first().evaluate((el) => (el.type || '').toLowerCase() === 'password').catch(() => false);
         if (isPw) throw new Error('Password field detected: ask the user to take over to sign in.');
         await page.fill(a.selector, String(a.value ?? a.text ?? ''), { timeout: 10000 });
         log.push('type ' + a.selector);
       }
-      else if (a.type === 'scroll') { await page.evaluate((dy) => window.scrollBy(0, dy), Number(a.y ?? 500)); log.push('scroll ' + (a.y ?? 500)); }
-      else if (a.type === 'press' && a.key) { await page.keyboard.press(a.key); log.push('press ' + a.key); }
-      else if (a.type === 'submit' && a.selector) { await page.click(a.selector, { timeout: 10000 }); log.push('submit ' + a.selector); }
-      else if (a.type === 'wait') { await page.waitForTimeout(Math.min(5000, Number(a.ms ?? 1000))); log.push('wait'); }
-      else if (a.type === 'extract') { log.push('extract'); }
+      else if (kind === 'select' && a.selector) { await page.selectOption(a.selector, String(a.value ?? a.text ?? ''), { timeout: 10000 }); log.push('select ' + a.selector); }
+      else if (kind === 'scroll') { await page.evaluate((dy) => window.scrollBy(0, dy), Number(a.y ?? 500)); log.push('scroll ' + (a.y ?? 500)); }
+      else if (kind === 'press' && a.key) { await page.keyboard.press(a.key); log.push('press ' + a.key); }
+      else if (kind === 'submit' && a.selector) { await page.click(a.selector, { timeout: 10000 }); log.push('submit ' + a.selector); }
+      else if (kind === 'wait') { await page.waitForTimeout(Math.min(5000, Number(a.ms ?? 1000))); log.push('wait'); }
+      else if (kind === 'extract') { log.push('extract'); }
+      await snapLive();
     }
     const title = await page.title().catch(() => '');
     const href = page.url();
     const text = (await page.evaluate(() => document.body?.innerText || '').catch(() => '')).slice(0, 10000);
     const loginDetected = await page.locator('input[type="password"]').count().then((n) => n > 0).catch(() => false);
     if (cfg.shotPath) await page.screenshot({ path: cfg.shotPath, type: 'png' }).catch(() => {});
+    await snapLive();
     process.stdout.write(JSON.stringify({ title, href, text, elements: [], log, loginDetected }));
   } finally {
     await page.close().catch(() => {});
@@ -241,6 +265,11 @@ const { chromium } = require('playwright');
   };
 }
 
+export interface ManagedBrowserOpts {
+  isRunActive?: (runId: string) => boolean;
+  onFrame?: (info: { url: string; title: string; persona: string; runId: string | null; at: string }) => void;
+}
+
 export class ManagedBrowser {
   private lease: Lease | null = null;
   private starting: Promise<void> | null = null;
@@ -248,6 +277,10 @@ export class ManagedBrowser {
   private activeTabs = 0;
   private activePersona: string | null = null;
   private activeRunId: string | null = null;
+  private lastPersona: string | null = null;
+  private lastRunId: string | null = null;
+  private lastUrl: string | null = null;
+  private lastTitle: string | null = null;
   private idleTimer: ReturnType<typeof setInterval> | null = null;
   private readonly driver: CdpDriver;
 
@@ -257,6 +290,7 @@ export class ManagedBrowser {
     private readonly memory: () => MemoryBudget | null,
     private readonly hostPath: (p: string) => string = (p) => p,
     driver?: CdpDriver,
+    private readonly opts?: ManagedBrowserOpts,
   ) {
     this.driver = driver ?? dockerCdpDriver(docker, dataDir);
   }
@@ -333,13 +367,46 @@ export class ManagedBrowser {
     this.activeTabs += 1;
     this.activePersona = input.personaSlug;
     this.activeRunId = input.runId ?? null;
+    this.lastPersona = input.personaSlug;
+    if (input.runId) this.lastRunId = input.runId;
+    this.lastUrl = input.url;
+    const liveShotPath = path.resolve(this.dataDir, 'browser', '.last-screen.png');
+    let lastMtime = (() => { try { return fs.statSync(liveShotPath).mtimeMs; } catch { return 0; } })();
+    const frameWatch = this.opts?.onFrame
+      ? setInterval(() => {
+          try {
+            const mt = fs.statSync(liveShotPath).mtimeMs;
+            if (mt > lastMtime) {
+              lastMtime = mt;
+              this.lastUsed = Date.now();
+              this.opts?.onFrame?.({
+                url: this.lastUrl || input.url,
+                title: this.lastTitle || '',
+                persona: input.personaSlug,
+                runId: input.runId ?? null,
+                at: new Date().toISOString(),
+              });
+            }
+          } catch { /* no frame yet */ }
+        }, 250)
+      : null;
+    frameWatch?.unref?.();
     try {
       const raw = await this.driver.runTab({
         profileDir,
         url: input.url,
         actions,
-        screenshot: Boolean(input.screenshot) || actions.some((a) => a.type === 'screenshot'),
+        screenshot: Boolean(input.screenshot) || actions.some((a) => (a.type || a.action) === 'screenshot'),
         signal: input.signal,
+      });
+      this.lastUrl = raw.href || input.url;
+      this.lastTitle = raw.title || '';
+      this.opts?.onFrame?.({
+        url: this.lastUrl,
+        title: this.lastTitle,
+        persona: input.personaSlug,
+        runId: input.runId ?? null,
+        at: new Date().toISOString(),
       });
       const secrets = input.vaultValues ?? [];
       return {
@@ -350,8 +417,10 @@ export class ManagedBrowser {
         log: raw.log.map((entry) => redactVaultValues(entry, secrets)),
       };
     } finally {
+      if (frameWatch) clearInterval(frameWatch);
       this.activeTabs = Math.max(0, this.activeTabs - 1);
-      if (this.activeTabs === 0) {
+      const runStillActive = Boolean(this.lastRunId && this.opts?.isRunActive?.(this.lastRunId));
+      if (this.activeTabs === 0 && !runStillActive) {
         this.activePersona = null;
         this.activeRunId = null;
       }
@@ -377,19 +446,25 @@ export class ManagedBrowser {
   }
 
   async status(): Promise<BrowserStatus> {
+    const runStillActive = Boolean(this.lastRunId && this.opts?.isRunActive?.(this.lastRunId));
+    const inFlight = this.activeTabs > 0;
+    const isRunning = inFlight || runStillActive;
     const base = {
       enabled: realBrowserEnabled(),
       image: IMAGE(),
       memoryLimitBytes: BROWSER_MEMORY_BYTES,
       lastUsedAt: this.lastUsed ? new Date(this.lastUsed).toISOString() : null,
-      activePersona: this.activePersona,
-      activeRunId: this.activeRunId,
+      activePersona: isRunning ? (this.activePersona || this.lastPersona) : null,
+      activeRunId: isRunning ? (this.activeRunId || this.lastRunId) : null,
+      activeTabOpen: inFlight,
+      lastUrl: this.lastUrl,
+      lastTitle: this.lastTitle,
     };
-    if (!this.docker.available()) return { ...base, state: 'unavailable', memoryBytes: null };
+    if (!this.docker.available()) return { ...base, state: 'unavailable', memoryBytes: null, activeTabOpen: false };
     const state = await this.docker.containerState(BROWSER_NAME).catch(() => null);
-    if (!state) return { ...base, state: 'missing', memoryBytes: null };
-    if (state.state !== 'running') return { ...base, state: 'stopped', memoryBytes: null };
+    if (!state) return { ...base, state: 'missing', memoryBytes: null, activeTabOpen: false };
+    if (state.state !== 'running') return { ...base, state: 'stopped', memoryBytes: null, activeTabOpen: false, activePersona: null, activeRunId: null };
     const stats = await this.docker.stats?.(BROWSER_NAME).catch(() => null);
-    return { ...base, state: this.activeTabs > 0 ? 'running' : 'idle', memoryBytes: stats?.memoryBytes ?? null };
+    return { ...base, state: isRunning ? 'running' : 'idle', memoryBytes: stats?.memoryBytes ?? null };
   }
 }

@@ -1618,4 +1618,11 @@ export const he: Record<string, string> = {
   "coder": "קוד",
   "Now: {0}": "כעת: {0}",
   "Worktree": "ענף עבודה מבודד",
+  "Last captured screen": "מסך אחרון שנקלט",
+  "Agent is reasoning between steps…": "הסוכן חושב בין שלבים…",
+  "Last seen {0}": "נצפה לאחרונה {0}",
+  "Recent browse steps": "שלבי גלישה אחרונים",
+  "No recent browse steps yet.": "עדיין אין שלבי גלישה אחרונים.",
+  "Done": "הושלם",
+  "Failed": "נכשל",
 };
