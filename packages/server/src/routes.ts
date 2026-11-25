@@ -996,7 +996,8 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     const effort = body.effort !== undefined ? (body.effort === 'auto' ? null : body.effort) : undefined;
     const { effort: _ignored, ...rest } = body;
     const patch = effort !== undefined ? { ...rest, effort } : rest;
-    return { session: store.updateSession(id, patch) };
+    const session = store.updateSession(id, patch);
+    return { session, breakdown: engine.getSessionContextBreakdown(id) };
   });
   /** The workspaces this chat works in (its context), sets expanded, with branch and uncommitted count. */
   app.get('/api/sessions/:id/workspaces', async (req) => {

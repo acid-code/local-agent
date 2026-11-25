@@ -306,3 +306,50 @@ describe('Pi/Cline compact coding prompt mode', () => {
     }
   });
 });
+
+describe('per-model context window breakdown', () => {
+  it('updates breakdown immediately when pinning a 256K local model vs an 8K model', async () => {
+    const built = await setupCoder();
+    try {
+      const prov = built.store.upsertProvider({ id: 'prov_llama_test', kind: 'openai_compat', name: 'Llama Test', baseUrl: 'http://127.0.0.1:8080/v1', enabled: true });
+      const big = built.store.upsertModel({
+        id: 'm_big_256k', providerId: prov.id, name: 'qwen-256k', apiName: 'qwen-256k', profileId: 'qwen36-35b-a3b',
+        tokenizer: 'approx', contextWindow: 262_144, practicalBudget: 262_144, strategy: 'hierarchical', sizeClass: 'large',
+        local: true, modalities: ['text'], strengths: ['code'], typicalQ4GiB: 22, priceIn: 0, priceOut: 0,
+        notes: '', parameterSize: '35B', family: 'qwen', source: 'discovered', embedding: false, freeTier: null, enabled: true,
+      });
+      const small = built.store.upsertModel({
+        id: 'm_small_8k', providerId: prov.id, name: 'gemma-8k', apiName: 'gemma-8k', profileId: 'gemma3-4b',
+        tokenizer: 'approx', contextWindow: 8192, practicalBudget: 8192, strategy: 'sliding', sizeClass: 'small',
+        local: true, modalities: ['text'], strengths: ['chat'], typicalQ4GiB: 3, priceIn: 0, priceOut: 0,
+        notes: '', parameterSize: '4B', family: 'gemma3', source: 'discovered', embedding: false, freeTier: null, enabled: true,
+      });
+
+      const pinBig = await built.app.inject({
+        method: 'PATCH',
+        url: `/api/sessions/${built.session.id}`,
+        cookies: built.cookies,
+        payload: { modelPin: big.id },
+      });
+      expect(pinBig.statusCode).toBe(200);
+      const reserve = built.store.getSettings().outputReserveTokens;
+      expect(pinBig.json().breakdown.budget).toBe(262_144 - reserve);
+
+      // Run one turn so lastContext caches the 256K breakdown, then switch down to 8K
+      built.provider.steps = [{ text: 'Cached on 256k.' }];
+      await built.engine.startTurn({ sessionId: built.session.id, agentId: built.agent.id, content: 'hi', wait: true });
+      expect(built.engine.getSessionContextBreakdown(built.session.id)?.budget).toBe(262_144 - reserve);
+
+      const pinSmall = await built.app.inject({
+        method: 'PATCH',
+        url: `/api/sessions/${built.session.id}`,
+        cookies: built.cookies,
+        payload: { modelPin: small.id },
+      });
+      expect(pinSmall.statusCode).toBe(200);
+      expect(pinSmall.json().breakdown.budget).toBe(8192 - reserve);
+    } finally {
+      await built.app.close();
+    }
+  });
+});

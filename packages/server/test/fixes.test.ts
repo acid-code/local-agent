@@ -92,6 +92,10 @@ describe('persistence, networking, models, memory, and agent fixes', () => {
     expect(roleContextBudget('coder', model, { repoTask: true })).toBe(65_536);
     expect(roleContextBudget('coder', model, { repoTask: true, extended: true })).toBe(131_072);
 
+    const model256k = { local: true, contextWindow: 262_144, practicalBudget: 262_144, sizeClass: 'large' as const };
+    expect(roleContextBudget('main', model256k)).toBe(262_144);
+    expect(roleContextBudget('coder', model256k, { repoTask: true })).toBe(262_144);
+
     const decision = decideAuto({
       text: 'fix the bug in auth.ts',
       map: DEFAULT_AUTO_MAP,

@@ -84,7 +84,7 @@ export class Engine {
   private readonly inflight = new Map<string, { abort: AbortController; paused: boolean; resumePause: () => void }>();
   private readonly liveStreams = new Map<string, { text: string; thinking: string; status: string; detail?: string; waitInfo?: unknown; focus?: string; phase?: WorkPhase; startedAt?: string; prefill?: PrefillSnapshot | null }>();
   private readonly livePrefills = new Map<'main' | 'uncensored', { runId: string; snapshot: PrefillSnapshot; updatedAt: number }>();
-  private readonly lastContext = new Map<string, ContextBreakdown>();
+  private readonly lastContext = new Map<string, { modelId: string; breakdown: ContextBreakdown }>();
   private readonly compacting = new Set<string>();
   private readonly approvalWaiters = new Map<string, (status: 'approved' | 'denied') => void>();
   private readonly secretWaiters = new Map<string, (status: 'provided' | 'denied') => void>();
@@ -376,17 +376,26 @@ export class Engine {
       || this.store.listModels().find((m) => m.enabled && m.local && m.sizeClass === 'large' && m.providerId !== 'prov_rehearsal')
       || this.store.listModels().find((m) => m.enabled && m.local && m.providerId !== 'prov_rehearsal')
       || this.store.listModels().find((m) => m.enabled);
-    const cached = this.lastContext.get(sessionId);
-    if (cached && (!model || cached.budget + cached.outputReserve >= Math.min(model.contextWindow, model.practicalBudget))) return cached;
-    if (!model) return null;
     const role = agent ? (contractForAgent(agent.name)?.modelRole || 'main') : 'main';
     const repoTask = session.mode === 'code' || Boolean(session.workshopId);
-    const budget = roleContextBudget(role, model, { repoTask });
+    const budget = model ? roleContextBudget(role, model, { repoTask }) : 0;
+    const expectedUsable = model ? Math.max(0, Math.min(model.contextWindow, budget) - settings.outputReserveTokens) : 0;
+    const cached = this.lastContext.get(sessionId);
+    if (cached && (!model || (cached.modelId === model.id && cached.breakdown.budget === expectedUsable))) return cached.breakdown;
+    if (!model) return null;
     const messages = this.store.listMessages(sessionId);
     const notes = agent?.memoryEnabled ? this.store.listNotes(agent.id) : [];
     const memoryNote = agent?.memoryEnabled ? memoryBrief(this.store, agent.id) : '';
     const summaries = this.store.listSummaries(sessionId).map((s) => ({ id: s.id, level: s.level, content: s.content, covers: s.covers, foldedInto: s.foldedInto }));
-    const tools = agent ? this.tools(agent, session.mode, undefined, undefined, false) : [];
+    const compact = Boolean(
+      model.local
+      && settings.compactCodingPrompt !== false
+      && process.env.LA_COMPACT_CODING !== '0'
+      && contractForAgent(agent?.name || '')?.slug !== 'researcher'
+      && agent?.templateId !== 'researcher'
+      && (session.mode === 'code' || contractForAgent(agent?.name || '')?.slug === 'coder' || agent?.templateId === 'coder'),
+    );
+    const tools = agent ? this.tools(agent, session.mode, undefined, undefined, false, undefined, false, this.cacheFriendly(model), compact) : [];
     const tok = (model.tokenizer || 'approx') as 'gemma4';
     const toolToks = tools.length ? estimateTokens(JSON.stringify(tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }))), tok) : 0;
     const baseSys = agent?.systemPrompt || '';
@@ -2230,7 +2239,7 @@ export class Engine {
       budget: fullUsableBudget,
       remaining: Math.max(0, fullUsableBudget - plan.breakdown.used),
     };
-    this.lastContext.set(run.sessionId, uiBreakdown);
+    this.lastContext.set(run.sessionId, { modelId: model.id, breakdown: uiBreakdown });
     this.bus.publish({ type: 'context', runId: run.id, sessionId: run.sessionId, used: uiBreakdown.used, budget: uiBreakdown.budget, breakdown: uiBreakdown });
     const recent = new Map(messages.map((message) => [message.id, message]));
     const runIds = new Set(runMessageIds);

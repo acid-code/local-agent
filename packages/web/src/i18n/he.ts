@@ -1631,4 +1631,13 @@ export const he: Record<string, string> = {
   "Plan first — investigate read-only and save a plan before editing (or prefix with /plan)": "תכנון תחילה — חקירה לקריאה בלבד ושמירת תוכנית לפני עריכה (או התחל ב-/plan)",
   "Describe the task to plan first (read-only research before edits)…": "תאר את המשימה לתכנון תחילה (חקירה לקריאה בלבד לפני עריכות)…",
   "Jump to latest": "קפיצה לאחרון",
+  "Automations": "אוטומציות",
+  "Overview": "סקירה",
+  "Review": "סקירת שינויים",
+  "Subagents": "תת-סוכנים",
+  "Terminal": "טרמינל",
+  "Workspace navigation": "ניווט סביבת עבודה",
+  "Workspace view": "תצוגת סביבת עבודה",
+  "line": "שורה",
+  "lines": "שורות",
 };

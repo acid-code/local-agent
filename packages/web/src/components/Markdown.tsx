@@ -4,13 +4,13 @@ import rehypeHighlight from 'rehype-highlight';
 import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
-import { AtSign, Check, Copy, CornerUpLeft, FileText, Quote } from 'lucide-react';
+import { AtSign, Check, ChevronDown, ChevronRight, Code2, Copy, CornerUpLeft, FileText, Quote } from 'lucide-react';
 import { fileMeta, linkCitations, parseCiteHref, type Cite } from '../lib/files';
 import { copyText } from '../lib/files';
 import { t } from '../i18n';
 
 /** How citation chips and code-block quotes reach the chat. */
-export interface CiteHandlers { open: (cite: Cite) => void; quoteCode?: (code: string, sourceId: string) => void }
+export interface CiteHandlers { open: (cite: Cite) => void; quoteCode?: (code: string, sourceId: string) => void; compactCode?: boolean }
 export const CiteContext = createContext<CiteHandlers | null>(null);
 
 function FileName({ id, fallback }: { id: string; fallback: string }) {
@@ -68,18 +68,33 @@ export function Markdown({ text, streaming = false, sourceId }: { text: string; 
 }
 
 function CodeBlock({ children, sourceId, onQuote }: { children: ReactNode; sourceId?: string; onQuote?: (code: string, sourceId: string) => void }) {
+  const handlers = useContext(CiteContext);
+  const compact = Boolean(handlers?.compactCode);
   const [copied, setCopied] = useState(false);
+  const [expanded, setExpanded] = useState(!compact);
+  useEffect(() => { setExpanded(!compact); }, [compact]);
   const child = (Array.isArray(children) ? children[0] : children) as { props?: { className?: string } } | undefined;
   const lang = /language-([\w+#-]+)/.exec(child?.props?.className || '')?.[1] || 'text';
+  const raw = textOf(children);
+  const lines = raw.trimEnd() ? raw.trimEnd().split('\n').length : 0;
   return (
-    <div className="code-block">
+    <div className={`code-block${compact && !expanded ? ' collapsed' : ''}`}>
       <div className="code-head">
-        <span className="code-lang">{lang}</span>
+        {compact ? (
+          <button type="button" className="code-toggle" aria-expanded={expanded} onClick={() => setExpanded((v) => !v)}>
+            {expanded ? <ChevronDown size={13} aria-hidden /> : <ChevronRight size={13} aria-hidden />}
+            <Code2 size={13} aria-hidden />
+            <span className="code-lang">{lang}</span>
+            <span className="faint mono">· {lines} {lines === 1 ? t('line') : t('lines')}</span>
+          </button>
+        ) : (
+          <span className="code-lang">{lang}</span>
+        )}
         <span className="spacer" />
-        {onQuote && sourceId && <button type="button" className="code-btn" title={t('Quote this code in your reply')} onClick={() => onQuote(textOf(children), sourceId)}><Quote size={13} aria-hidden />{' '}{t('Quote')}</button>}
-        <button type="button" className="code-btn" title={t('Copy code')} onClick={() => { void copyText(textOf(children)).then((ok) => { if (ok) { setCopied(true); setTimeout(() => setCopied(false), 1500); } }); }}>{copied ? <Check size={13} aria-hidden /> : <Copy size={13} aria-hidden />} {copied ? t('Copied') : t('Copy')}</button>
+        {onQuote && sourceId && <button type="button" className="code-btn" title={t('Quote this code in your reply')} onClick={() => onQuote(raw, sourceId)}><Quote size={13} aria-hidden />{' '}{t('Quote')}</button>}
+        <button type="button" className="code-btn" title={t('Copy code')} onClick={() => { void copyText(raw).then((ok) => { if (ok) { setCopied(true); setTimeout(() => setCopied(false), 1500); } }); }}>{copied ? <Check size={13} aria-hidden /> : <Copy size={13} aria-hidden />} {copied ? t('Copied') : t('Copy')}</button>
       </div>
-      <pre>{children}</pre>
+      {(!compact || expanded) && <pre>{children}</pre>}
     </div>
   );
 }

@@ -5,7 +5,7 @@ import { createPortal } from 'react-dom';
 import { Menu as DropMenu } from '../components/ui';
 import { ModelPicker, useUsableModels } from '../lib/models';
 import { browserDictationSupported, startDictation } from '../lib/dictation';
-import { Archive, ArrowLeft, ScanText, AtSign, Info, Layers, ListChecks, Brain, Check, ChevronDown, Code2, Copy, Download, Eye, FileText, Folder, FolderGit2, GitBranch, Headphones, ListTree, Menu, MessageSquare, MessageSquarePlus, Pin, PinOff, Plus, Search, Mic, PanelRight, Paperclip, Pencil, Quote, RotateCcw, Send, Share, Square, Trash2, Volume2, Wrench, X } from 'lucide-react';
+import { Archive, ArrowLeft, ScanText, AtSign, Info, Layers, ListChecks, Brain, Check, ChevronDown, Clock, Code2, Copy, Download, Eye, FileText, Folder, FolderGit2, GitBranch, Headphones, ListTree, Menu, MessageSquare, MessageSquarePlus, Pin, PinOff, Plus, Search, Settings, Mic, PanelRight, Paperclip, Pencil, Quote, RotateCcw, Send, Share, Square, Trash2, Volume2, Wrench, X } from 'lucide-react';
 import { CiteContext, type CiteHandlers } from '../components/Markdown';
 import { FileViewer, type QuotePick, type ViewerSource } from '../components/FileViewer';
 import { MentionPicker, type MentionPick } from '../components/MentionPicker';
@@ -13,6 +13,7 @@ import { CONTEXT_MARK, citationsIn, fileMeta, humanSize, kindOf, quoteBlock, raw
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { PullModel } from '../components/PullModel';
 import { WorkspaceBrowser, type ChatRoot } from '../components/WorkspaceBrowser';
+import { CodeOverviewPanel } from '../components/CodeOverviewPanel';
 import { PersonaStatePanel } from '../components/PersonaStatePanel';
 import { PersonaPanel, useWorkspaces, type PanelAgent } from '../components/PersonaPanel';
 import { PersonaChip, greetingFor, startersFor } from '../components/ChatChips';
@@ -144,6 +145,7 @@ export function Chat() {
   const [panel, setPanel] = useState<null | 'persona' | 'settings' | 'workspace' | 'files' | 'context' | 'state'>(null);
   // The persona status panel sits on the right on wide screens unless closed; on narrow ones it opens on demand.
   const [stateOpen, setStateOpen] = useState(() => localStorage.getItem('la-state-pane') !== 'closed');
+  const [viewMode, setViewMode] = useState<'chat' | 'code'>(() => (localStorage.getItem('la-view-mode') === 'code' ? 'code' : 'chat'));
   const [wide, setWide] = useState(() => window.matchMedia('(min-width: 981px)').matches);
   useEffect(() => {
     const query = window.matchMedia('(min-width: 981px)');
@@ -152,8 +154,18 @@ export function Chat() {
     return () => query.removeEventListener('change', onChange);
   }, []);
   useEffect(() => { localStorage.setItem('la-state-pane', stateOpen ? 'open' : 'closed'); }, [stateOpen]);
-  const showState = panel === 'state' || (!panel && wide && stateOpen);
-  const toggleState = () => { if (showState) { setStateOpen(false); if (panel === 'state') setPanel(null); } else { setStateOpen(true); setPanel(wide ? null : 'state'); } };
+  useEffect(() => { localStorage.setItem('la-view-mode', viewMode); }, [viewMode]);
+  const isPhone = !wide;
+  const effectiveView: 'chat' | 'code' = wide ? viewMode : 'chat';
+  const showCodeOverview = effectiveView === 'code' && !panel;
+  const showState = panel === 'state' || (!panel && wide && stateOpen && effectiveView === 'chat');
+  const toggleState = () => {
+    if (effectiveView === 'code') {
+      setPanel((value) => (value === 'state' ? null : 'state'));
+      return;
+    }
+    if (showState) { setStateOpen(false); if (panel === 'state') setPanel(null); } else { setStateOpen(true); setPanel(wide ? null : 'state'); }
+  };
   // Bumps when a background helper finishes, so the chat and its context panel refresh.
   const [helperTick, setHelperTick] = useState(0);
   // Tool calls waiting for a yes/no (e.g. creating a timer). Shown as a card above the composer.
@@ -913,6 +925,7 @@ export function Chat() {
   const citeHandlers: CiteHandlers = {
     open: (cite) => void openCite(cite),
     quoteCode: (code, sourceId) => addQuote({ ref: `msg:${sourceId}`, text: code.slice(0, 2000), label: t('code block') }),
+    compactCode: isPhone,
   };
   function onSelectText() {
     const sel = window.getSelection();
@@ -1044,7 +1057,7 @@ export function Chat() {
 
   return (
     <CiteContext.Provider value={citeHandlers}>
-    <div className={`chat v2${trace ? ' with-trace' : ''}${panel || showState ? ' with-panel' : ''}`} style={persona?.accent ? { ['--persona' as string]: persona.accent } : undefined}>
+    <div className={`chat v2${trace ? ' with-trace' : ''}${panel || showState || showCodeOverview ? ' with-panel' : ''}${effectiveView === 'code' ? ' code-view' : ''}${isPhone ? ' phone-chat' : ''}`} style={persona?.accent ? { ['--persona' as string]: persona.accent } : undefined}>
       {viewer && <FileViewer source={viewer.source} anchor={viewer.anchor} onClose={() => setViewer(null)} onQuote={addQuote} />}
       {selQuote && <button className="sel-quote" style={{ left: selQuote.x, top: selQuote.y }} onMouseDown={(event) => event.preventDefault()} onClick={() => { addQuote({ ref: `msg:${selQuote.id}`, text: selQuote.text, label: 'selection' }); setSelQuote(null); window.getSelection()?.removeAllRanges(); }}><Quote size={14} />{' '}{t('Quote')}</button>}
       {(rail || trace || panel) && <div className="scrim" onClick={() => { setRail(false); setTrace(false); setPanel(null); }} />}
@@ -1063,6 +1076,12 @@ export function Chat() {
             ]} />
           </span>
         </div>
+        {effectiveView === 'code' && (
+          <nav className="rail-quick-nav" aria-label={t('Workspace navigation')}>
+            <Link className="rail-nav-link" to="/schedules"><Clock size={14} aria-hidden /><span>{t('Automations')}</span></Link>
+            <Link className="rail-nav-link" to="/settings"><Settings size={14} aria-hidden /><span>{t('Settings')}</span></Link>
+          </nav>
+        )}
         <label className="rail-search"><Search size={15} aria-hidden /><input type="search" placeholder={t('Search chats')} aria-label={t('Search chats')} value={chatQuery} onChange={(event) => setChatQuery(event.target.value)} /></label>
         <div className="session-list">
           {pinnedRows.length > 0 && <><p className="list-heading">{t('Pinned')}</p>{pinnedRows.map(renderSession)}</>}
@@ -1078,7 +1097,14 @@ export function Chat() {
       <section className="thread">
         <div className="thread-head">
           <button className="icon-btn round chats-btn" aria-label={t('Show chats')} title={t('Chats')} onClick={() => { if (window.matchMedia('(max-width: 980px)').matches) window.dispatchEvent(new Event('la:open-sidebar')); else setRail(true); }}><Menu size={17} /></button>
-          <span className="head-spacer" />
+          {effectiveView === 'code' ? (
+            <span className="code-head-crumb ellipsis" dir="auto">
+              {chatWs.roots[0]?.label && <><span className="faint">{chatWs.roots[0].label}</span><span className="faint"> / </span></>}
+              <strong>{currentSession?.title || t('New chat')}</strong>
+            </span>
+          ) : (
+            <span className="head-spacer" />
+          )}
           {persona && <button className="persona-name head-pill" title={t('{0} · persona info (Ctrl+Shift+I)', [currentSession?.title || 'New chat'])} aria-expanded={panel === 'persona' || panel === 'settings'} onClick={() => setPanel(panel === 'persona' || panel === 'settings' ? null : 'persona')}>
             <Face agent={persona} size={22} /><span className="persona-label ellipsis" dir="auto">{persona.name}{(persona as { title?: string }).title ? ` · ${(persona as { title?: string }).title}` : ''}</span>
             {active && <span className="head-live" aria-label="working" />}
@@ -1086,6 +1112,16 @@ export function Chat() {
           <strong className="thread-title sr-only" dir="auto">{currentSession?.title || t('No chat open')}</strong>
           <span className="head-spacer" />
           <div className="head-actions">
+            {wide && (
+              <div className="view-switch" role="group" aria-label={t('Workspace view')}>
+                <button type="button" className={effectiveView === 'chat' ? 'active' : undefined} aria-pressed={effectiveView === 'chat'} onClick={() => setViewMode('chat')}>
+                  <MessageSquare size={13} aria-hidden /><span>{t('Chat')}</span>
+                </button>
+                <button type="button" className={effectiveView === 'code' ? 'active' : undefined} aria-pressed={effectiveView === 'code'} onClick={() => setViewMode('code')}>
+                  <Code2 size={13} aria-hidden /><span>{t('Code')}</span>
+                </button>
+              </div>
+            )}
             {status && status !== 'completed' && !active && <span className={`badge ${status === 'failed' ? 'bad' : ''}`}>{status}</span>}
             {mode === 'code' && <span className="badge warn">{currentSession?.workshopId ? 'workshop' : 'coding'}</span>}
             {currentSession && <button className="icon-btn round" aria-label={t('Export chat')} title={t('Export this chat as Markdown')} onClick={exportChat}><Share size={17} /></button>}
@@ -1334,7 +1370,7 @@ export function Chat() {
               } : undefined}
             />
           )}
-          {edits.length > 0 && <BulkDiffCard edits={edits} onChanged={() => { if (current) void openSession(current); }} />}
+          {!isPhone && edits.length > 0 && <BulkDiffCard edits={edits} onChanged={() => { if (current) void openSession(current); }} />}
           </div>
           {!nearBottom && (
             <button type="button" className="scroll-bottom-pill" onClick={() => { nearBottomRef.current = true; setNearBottom(true); box.current?.scrollTo({ top: box.current.scrollHeight, behavior: 'smooth' }); }}>
@@ -1427,7 +1463,10 @@ export function Chat() {
                   const previous = modelPin;
                   setModelPin(value);
                   try {
-                    if (current) await api(`/api/sessions/${current}`, { method: 'PATCH', body: JSON.stringify({ modelPin: value }) });
+                    if (current) {
+                      const res = await api<{ breakdown?: ContextBreakdown | null }>(`/api/sessions/${current}`, { method: 'PATCH', body: JSON.stringify({ modelPin: value }) });
+                      if (res.breakdown) setBreakdown(res.breakdown);
+                    }
                   } catch (error) { toast(errorText(error), 'error'); setModelPin(previous); }
                 }} />
               </span>
@@ -1540,6 +1579,29 @@ export function Chat() {
       {showState && persona && !['persona', 'settings', 'workspace', 'files', 'context'].includes(panel || '') && (
         <PersonaStatePanel agent={persona} sessions={sessions} tick={messages.length + helperTick} onClose={toggleState}
           onOpenSession={(id) => { void openSession(id); if (!wide) setPanel(null); }} onOpenFile={(id) => setViewer({ source: { kind: 'file', id } })} onOpenPersona={() => setPanel('persona')} />
+      )}
+      {showCodeOverview && (
+        <CodeOverviewPanel
+          edits={edits}
+          roots={chatWs.roots}
+          helpers={miniAgents}
+          plan={plan}
+          stepCount={steps.length}
+          onOpenFiles={() => {
+            const firstRoot = chatWs.roots[0]?.id;
+            if (firstRoot) { setWsRoot(firstRoot); setPanel('files'); }
+            else setPanel('workspace');
+          }}
+          onOpenContext={() => setPanel('context')}
+          onOpenWorkspace={() => setPanel('workspace')}
+          onToggleTrace={() => setTrace((value) => !value)}
+          onOpenTerminal={() => navigate('/computer')}
+          onJumpToReview={() => {
+            const diffEl = box.current?.querySelector('.bulk-diff-list');
+            if (diffEl) diffEl.scrollIntoView({ behavior: 'smooth', block: 'end' });
+            else setPanel('context');
+          }}
+        />
       )}
       <aside className={trace ? 'trace open' : 'trace'} aria-label={t('Trace')}>
         <div className="sheet-head trace-head">
