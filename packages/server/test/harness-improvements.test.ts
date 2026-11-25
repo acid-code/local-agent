@@ -252,6 +252,7 @@ describe('OpenCode automatic post-edit diagnostics', () => {
 describe('Pi/Cline compact coding prompt mode', () => {
   it('keeps COMPACT_CODING_TOOLS lean and cuts local coding prompt/menu bloat unless turned off', async () => {
     expect(COMPACT_CODING_TOOLS.length).toBeLessThanOrEqual(16);
+    expect(COMPACT_CODING_TOOLS).toContain('share_file');
 
     const built = await setupCoder();
     try {

@@ -2149,7 +2149,9 @@ export class Engine {
       ? '\n\nWeb lookup rule: call web_search (SearXNG) first to discover real URLs and facts; never invent URLs. When opening a website, store/shopping page (AliExpress, Amazon, eBay, etc.), product listing, live prices, JS-heavy page, or whenever the user asks to browse/surf/open a site, prefer browse (live browser) instead of web_fetch. Reserve web_fetch for lightweight static articles, manuals, or docs. If web_fetch returns nav chrome, missing prices, empty text, or a block/403, switch immediately to browse — do not keep calling web_fetch.'
       : '';
     const sharedRepoNote = compactCoding && chatWorkspaces.trim() ? '' : sharedRepoBrief(this.store);
-    const citeHint = compactCoding && !hasKb ? '' : CITE_HINT;
+    const citeHint = compactCoding && !hasKb
+      ? '\n\nTo deliver a created file to the user with a preview/download card, call share_file({ path }) and cite the returned [file:<id>] (do not start python http.server or give raw /workspaces paths).'
+      : CITE_HINT;
     const fencedHint = compactCoding ? `\n\n${FENCED_EDIT_HINT}` : '';
     const todayIso = (run.startedAt || new Date().toISOString()).slice(0, 10);
     const dateNote = `\n\nCurrent date: ${todayIso} (current year is ${todayIso.slice(0, 4)}; use ${todayIso.slice(0, 4)} when searching for current news, models, prices, or releases).`;

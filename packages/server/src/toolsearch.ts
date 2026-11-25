@@ -16,7 +16,7 @@ export const CORE_TOOLS = [
 /** Lean coding-first core toolset for Pi/Cline-style compact coding mode (discoverable tools stay reachable via find_tools). */
 export const COMPACT_CODING_TOOLS = [
   'read_file', 'write_file', 'apply_patch', 'list_dir', 'grep', 'glob', 'shell', 'git',
-  'plan', 'enter_plan_mode', 'exit_plan_mode', 'read_output', 'set_focus', 'spawn_agent', 'helpers',
+  'plan', 'enter_plan_mode', 'exit_plan_mode', 'read_output', 'set_focus', 'spawn_agent', 'helpers', 'share_file',
 ];
 
 /** Below this many allowed tools the whole list is offered and find_tools is not needed. */
@@ -47,6 +47,7 @@ const SYNONYMS: Record<string, string[]> = {
   text: ['ocr', 'scan', 'receipt'],
   tweet: ['twitter', 'x', 'post'],
   vpn: ['vpn', 'proxy', 'wireguard', 'ip', 'geoblock', 'region'],
+  share: ['share_file', 'download', 'send', 'deliver', 'attach'],
 };
 
 const STOP = new Set(['the', 'a', 'an', 'to', 'for', 'of', 'and', 'or', 'in', 'on', 'my', 'me', 'i', 'it', 'is', 'with', 'tool', 'tools', 'please', 'can', 'you', 'that', 'this', 'be', 'from', 'at', 'by', 'do', 'what', 'how']);
