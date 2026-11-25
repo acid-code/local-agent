@@ -88,18 +88,35 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
   }, [apps]);
   useEffect(() => { localStorage.setItem('la-sidebar', collapsed ? 'collapsed' : 'open'); }, [collapsed]);
   const isWide = () => window.matchMedia('(min-width: 981px)').matches;
-  const toggleSidebar = () => { if (isWide()) setCollapsed((value) => !value); else setOpen((value) => !value); };
   const navigate = useNavigate();
   const location = useLocation();
   const chatRoute = location.pathname === '/';
+  const [codeMode, setCodeMode] = useState(false);
+  const codeOverlayRef = useRef(false);
+  codeOverlayRef.current = codeMode && chatRoute;
+  const toggleSidebar = () => {
+    if (isWide() && !codeOverlayRef.current) setCollapsed((value) => !value);
+    else setOpen((value) => !value);
+  };
+  useEffect(() => { if (!chatRoute) setCodeMode(false); }, [chatRoute]);
   // The chat page reports whose chat is open, so that persona's row reads as selected.
   const [activePersona, setActivePersona] = useState<string | null>(null);
   useEffect(() => {
     const onActive = (event: Event) => setActivePersona((event as CustomEvent<string | null>).detail ?? null);
     const onOpen = () => setOpen(true);
+    const onCodeView = (event: Event) => {
+      const next = Boolean((event as CustomEvent<boolean>).detail);
+      setCodeMode(next);
+      if (next) setOpen(false);
+    };
     window.addEventListener('la:active-persona', onActive);
     window.addEventListener('la:open-sidebar', onOpen);
-    return () => { window.removeEventListener('la:active-persona', onActive); window.removeEventListener('la:open-sidebar', onOpen); };
+    window.addEventListener('la:code-view', onCodeView);
+    return () => {
+      window.removeEventListener('la:active-persona', onActive);
+      window.removeEventListener('la:open-sidebar', onOpen);
+      window.removeEventListener('la:code-view', onCodeView);
+    };
   }, []);
 
   async function loadPersonas() {
@@ -202,7 +219,7 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
   const initials = username.split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase();
 
   return (
-    <div className={`app${collapsed ? ' collapsed' : ''}${chatRoute ? ' route-chat' : ''}`}>
+    <div className={`app${collapsed && !(codeMode && chatRoute) ? ' collapsed' : ''}${chatRoute ? ' route-chat' : ''}${codeMode && chatRoute ? ' code-mode' : ''}`}>
       <div className="win-titlebar" aria-hidden="true">
         <span className="win-titlebar-label">local-agent</span>
       </div>

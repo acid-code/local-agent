@@ -157,6 +157,10 @@ export function Chat() {
   useEffect(() => { localStorage.setItem('la-view-mode', viewMode); }, [viewMode]);
   const isPhone = !wide;
   const effectiveView: 'chat' | 'code' = wide ? viewMode : 'chat';
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent('la:code-view', { detail: effectiveView === 'code' }));
+    return () => { window.dispatchEvent(new CustomEvent('la:code-view', { detail: false })); };
+  }, [effectiveView]);
   const showCodeOverview = effectiveView === 'code' && !panel;
   const showState = panel === 'state' || (!panel && wide && stateOpen && effectiveView === 'chat');
   const toggleState = () => {
@@ -1067,8 +1071,19 @@ export function Chat() {
           <button className="icon-btn" aria-label={t('Close chats')} onClick={() => setRail(false)}><X size={18} /></button>
         </div>
         <div className="row rail-actions">
+          {effectiveView === 'code' && (
+            <button
+              type="button"
+              className="icon-btn"
+              aria-label={t('Open main menu')}
+              title={t('Open main menu')}
+              onClick={() => window.dispatchEvent(new Event('la:open-sidebar'))}
+            >
+              <Menu size={16} aria-hidden />
+            </button>
+          )}
           <span className="split">
-            <button className="btn primary" title={t('Start a new chat with the first agent')} onClick={() => { void createChat('chat'); setRail(false); }}><MessageSquarePlus size={16} aria-hidden />{' '}{t('New chat')}</button>
+            <button className="btn primary" title={t('Start a new chat with the first agent')} onClick={() => { void createChat(effectiveView === 'code' ? 'code' : 'chat'); setRail(false); }}><MessageSquarePlus size={16} aria-hidden />{' '}{t('New chat')}</button>
             <DropMenu label={t('More ways to start')} icon={ChevronDown} align="start" items={[
               { label: t('New chat'), icon: MessageSquarePlus, hint: t('Talk'), onSelect: () => { void createChat('chat'); setRail(false); } },
               { label: t('New coding session'), icon: Code2, hint: t('Edits files'), onSelect: () => { void createChat('code'); setRail(false); } },
@@ -1077,10 +1092,133 @@ export function Chat() {
           </span>
         </div>
         {effectiveView === 'code' && (
-          <nav className="rail-quick-nav" aria-label={t('Workspace navigation')}>
-            <Link className="rail-nav-link" to="/schedules"><Clock size={14} aria-hidden /><span>{t('Automations')}</span></Link>
-            <Link className="rail-nav-link" to="/settings"><Settings size={14} aria-hidden /><span>{t('Settings')}</span></Link>
-          </nav>
+          <>
+            <nav className="rail-quick-nav" aria-label={t('Workspace navigation')}>
+              <Link className="rail-nav-link" to="/schedules"><Clock size={14} aria-hidden /><span>{t('Automations')}</span></Link>
+              <Link className="rail-nav-link" to="/workspace"><FolderGit2 size={14} aria-hidden /><span>{t('Workspaces')}</span></Link>
+              <Link className="rail-nav-link" to="/settings"><Settings size={14} aria-hidden /><span>{t('Settings')}</span></Link>
+            </nav>
+            <div className="code-rail-section">
+              <div className="code-rail-head">
+                <span>{t('Workspaces')}</span>
+                {canManage && (
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    aria-label={t('Add folder, repo or clone…')}
+                    title={t('Add folder, repo or clone…')}
+                    onClick={() => setPanel('workspace')}
+                  >
+                    <Plus size={14} aria-hidden />
+                  </button>
+                )}
+              </div>
+              <div className="code-ws-list">
+                {ws.workspaces.map((row) => {
+                  const attachedRoot = chatWs.roots.find((root) => root.id === row.id);
+                  if (attachedRoot) {
+                    return (
+                      <div key={row.id} className={wsRoot === row.id && panel === 'files' ? 'code-ws-row attached viewing' : 'code-ws-row attached'}>
+                        <button
+                          type="button"
+                          className="code-ws-main"
+                          title={`${row.path}${attachedRoot.via ? ` · ${attachedRoot.via}` : ''}`}
+                          onClick={() => { if (panel === 'files' && wsRoot === row.id) setPanel(null); else { setWsRoot(row.id); setPanel('files'); } }}
+                        >
+                          {row.kind === 'repo' ? <GitBranch size={13} aria-hidden /> : <Folder size={13} aria-hidden />}
+                          <span className="ellipsis">{row.label}</span>
+                          {row.branch && <span className="faint mono code-ws-branch">{row.branch}</span>}
+                          {row.dirty > 0 && <span className="dirty-dot" aria-label={`${row.dirty} uncommitted`} />}
+                        </button>
+                        <button
+                          type="button"
+                          className="code-ws-action"
+                          aria-label={t('Remove {0} from this chat', [row.label])}
+                          title={t('Remove from this chat')}
+                          onClick={() => removeWorkspace(attachedRoot)}
+                        >
+                          <X size={12} aria-hidden />
+                        </button>
+                      </div>
+                    );
+                  }
+                  return (
+                    <div key={row.id} className="code-ws-row">
+                      <button
+                        type="button"
+                        className="code-ws-main"
+                        title={t('Attach {0} to this chat', [row.label])}
+                        onClick={() => addWorkspace({ kind: 'root', id: row.id }, row.label)}
+                      >
+                        {row.kind === 'repo' ? <GitBranch size={13} aria-hidden /> : <Folder size={13} aria-hidden />}
+                        <span className="ellipsis">{row.label}</span>
+                        {row.branch && <span className="faint mono code-ws-branch">{row.branch}</span>}
+                      </button>
+                      <button
+                        type="button"
+                        className="code-ws-action"
+                        aria-label={t('Attach {0} to this chat', [row.label])}
+                        title={t('Attach to this chat')}
+                        onClick={() => addWorkspace({ kind: 'root', id: row.id }, row.label)}
+                      >
+                        <Plus size={12} aria-hidden />
+                      </button>
+                    </div>
+                  );
+                })}
+                {ws.sets.map((set) => {
+                  const activeSet = chatWs.items.some((item) => item.kind === 'set' && item.id === set.id);
+                  return (
+                    <div key={`set:${set.id}`} className={activeSet ? 'code-ws-row attached' : 'code-ws-row'}>
+                      <button
+                        type="button"
+                        className="code-ws-main"
+                        title={set.projects.join(' + ')}
+                        onClick={() => { if (!activeSet) addWorkspace({ kind: 'set', id: set.id }, set.name); }}
+                      >
+                        <Layers size={13} aria-hidden />
+                        <span className="ellipsis">{set.name}</span>
+                      </button>
+                      {!activeSet && (
+                        <button
+                          type="button"
+                          className="code-ws-action"
+                          aria-label={t('Attach {0} to this chat', [set.name])}
+                          onClick={() => addWorkspace({ kind: 'set', id: set.id }, set.name)}
+                        >
+                          <Plus size={12} aria-hidden />
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+                {ws.workspaces.length === 0 && ws.sets.length === 0 && (
+                  <button type="button" className="btn ghost small" onClick={() => setPanel('workspace')}>
+                    {t('Add folder or repo…')}
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="code-rail-section">
+              <div className="code-rail-head">
+                <span>{t('Personas')}</span>
+              </div>
+              <div className="code-persona-chips">
+                {agents.filter((agent) => !(agent as { hidden?: boolean }).hidden).map((agent) => (
+                  <button
+                    key={agent.id}
+                    type="button"
+                    className={persona?.id === agent.id ? 'code-persona-chip active' : 'code-persona-chip'}
+                    title={agent.title ? `${agent.name} · ${agent.title}` : agent.name}
+                    onClick={() => navigate(`/?persona=${agent.id}`)}
+                  >
+                    <Face agent={agent} size={18} />
+                    <span className="ellipsis" dir="auto">{agent.name}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </>
         )}
         <label className="rail-search"><Search size={15} aria-hidden /><input type="search" placeholder={t('Search chats')} aria-label={t('Search chats')} value={chatQuery} onChange={(event) => setChatQuery(event.target.value)} /></label>
         <div className="session-list">
@@ -1143,7 +1281,7 @@ export function Chat() {
         {steps.length > 0 && (
           <DecisionTimeline steps={steps} live={Boolean(active)} liveTokPerSec={liveTps} livePrefill={livePrefill} docked onStop={() => control('stop')} />
         )}
-        {(current || chatWs.roots.length > 0) && (
+        {((effectiveView === 'code' && chatWs.roots.length > 0) || (effectiveView !== 'code' && (current || chatWs.roots.length > 0))) && (
           <div className="ws-strip" aria-label={t('Workspaces in this chat')}>
             {chatWs.roots.map((root) => (
               <span key={root.id} className={wsRoot === root.id && panel === 'files' ? 'ws-pill on' : 'ws-pill'}>
