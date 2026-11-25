@@ -23,6 +23,7 @@ export interface ToolContext {
   workbench?: import('./workbench.js').Workbench | null;
   browser?: import('./browser.js').ManagedBrowser | null;
   computer?: import('./live-computer.js').ComputerControl | null;
+  vpn?: import('./vpn.js').VpnManager | null;
   fetchImpl: typeof fetch;
   searxngUrl: string;
   sandbox: Settings['sandbox'];
@@ -395,6 +396,7 @@ export const BUILTIN_TOOLS: Tool[] = [
     parameters: obj({
       command: { type: 'string' },
       cwd: { type: 'string', description: 'Project label when multiple projects are attached, or "workspace" for files in your own workspace.' },
+      use_vpn: { type: 'boolean', description: 'Route this command through the isolated VPN proxy (if configured in Settings -> VPN) without affecting local services.' },
       why: { type: 'string', description: 'Optional 3-8 word intent shown in the step log.' },
     }, ['command']),
     mutates: (args) => assessCommand(String(args.command || '')) !== 'ok',
@@ -415,9 +417,19 @@ export const BUILTIN_TOOLS: Tool[] = [
       if (!(await fs.access(cwd).then(() => true).catch(() => false))) {
         throw new Error(`Directory ${cwd} does not exist. Use your sandbox workspace (${ctx.workspace}) or create/clone a project under /data/workspaces/projects.`);
       }
+      let effectiveCommand = command;
+      if (args.use_vpn) {
+        const proxy = await ctx.vpn?.proxyUrlFor('workbench');
+        if (!proxy) {
+          throw new Error('VPN is not connected. Configure a WireGuard config or proxy in Settings → VPN first.');
+        }
+        const safeProxy = proxy.replace(/'/g, "'\\''");
+        const noProxy = 'localhost,127.0.0.1,host.docker.internal,.local';
+        effectiveCommand = `export HTTP_PROXY='${safeProxy}' HTTPS_PROXY='${safeProxy}' http_proxy='${safeProxy}' https_proxy='${safeProxy}' NO_PROXY='${noProxy}' no_proxy='${noProxy}'; ${command}`;
+      }
       if (ctx.sandbox !== 'host' && ctx.docker.available() && ctx.workbench && workbenchEnabled()) {
         try {
-          const result = await ctx.workbench.run(command, cwd, shellTimeoutMs());
+          const result = await ctx.workbench.run(effectiveCommand, cwd, shellTimeoutMs());
           if (result) {
             ctx.computer?.recordShell({ runId: ctx.runId ?? null, persona: ctx.agent.name, command, output: result.output, code: result.code });
             return `exit ${result.code}\n${clipToolOutput(result.output)}`;
@@ -427,6 +439,9 @@ export const BUILTIN_TOOLS: Tool[] = [
         }
       }
       if (ctx.sandbox !== 'host' && ctx.docker.available()) {
+        if (args.use_vpn) {
+          throw new Error('VPN routing for shell requires the shared workbench container.');
+        }
         const hostCwd = toHostBindPath(cwd);
         const image = await pickShellImage(cwd, ctx.docker);
         const shellBin = image.startsWith('alpine') ? 'sh' : 'bash';
@@ -450,7 +465,34 @@ export const BUILTIN_TOOLS: Tool[] = [
         return `exit ${result.code}\n${clipToolOutput(result.output)}`;
       }
       if (ctx.sandbox === 'docker-only') throw new Error('Docker sandbox is required and the Docker socket is not available.');
-      return clipToolOutput(await hostJail(command, ctx, cwd));
+      return clipToolOutput(await hostJail(effectiveCommand, ctx, cwd));
+    },
+  },
+  {
+    name: 'vpn',
+    description: 'Check the isolated VPN status/exit IP or fetch a public URL through the VPN sidecar without affecting local models, SearXNG, or LAN access.',
+    parameters: obj({
+      action: { type: 'string', enum: ['status', 'fetch'], description: 'status: check whether VPN is connected and show its exit IP; fetch: GET a public http/https URL through the VPN proxy.' },
+      url: { type: 'string', description: 'Public http:// or https:// URL to fetch when action="fetch".' },
+    }, ['action']),
+    mutates: () => false,
+    approval: () => null,
+    async execute(args, ctx) {
+      if (!ctx.vpn) throw new Error('VPN manager is not configured.');
+      const action = String(args.action || 'status');
+      if (action === 'status') {
+        const s = await ctx.vpn.status(true);
+        if (!s.configured) return 'VPN is not configured. Ask the user to add a WireGuard .conf or HTTP proxy in Settings → VPN.';
+        if (!s.running) return `VPN (${s.mode}) is configured but stopped.${s.error ? ` ${s.error}` : ''} Ask the user to connect it in Settings → VPN.`;
+        if (!s.proxyReady) return `VPN (${s.mode}) is running, proxy not ready yet.${s.error ? ` ${s.error}` : ''}`;
+        return `VPN connected (${s.mode}) · Exit IP: ${s.ip ?? 'unknown'}${s.country ? ` (${s.country})` : ''}${s.org ? ` · ${s.org}` : ''}${s.error ? ` · Note: ${s.error}` : ''}`;
+      }
+      if (action === 'fetch') {
+        const url = String(args.url || '').trim();
+        if (!url) throw new Error('Missing url for vpn fetch.');
+        return await ctx.vpn.fetch(url, ctx.signal);
+      }
+      throw new Error(`Unknown vpn action "${action}". Use "status" or "fetch".`);
     },
   },
   {

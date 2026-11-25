@@ -198,6 +198,25 @@ export class DockerCtl {
     }
   }
 
+  /** Ensure a Docker bridge network exists (idempotent). */
+  async ensureNetwork(name: string): Promise<boolean> {
+    if (!this.available()) return false;
+    try {
+      await this.api().getNetwork(name).inspect();
+      return true;
+    } catch (error) {
+      if ((error as { statusCode?: number }).statusCode !== 404) return false;
+      try {
+        await this.api().createNetwork({ Name: name, Driver: 'bridge', CheckDuplicate: true });
+        return true;
+      } catch (err2) {
+        const msg = err2 instanceof Error ? err2.message : String(err2);
+        if (/already exists/i.test(msg)) return true;
+        return false;
+      }
+    }
+  }
+
   /** Attach an existing container to a Docker network (idempotent). */
   async connectToNetwork(containerIdOrName: string, networkName: string): Promise<boolean> {
     try {

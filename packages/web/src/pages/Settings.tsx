@@ -23,6 +23,7 @@ interface ProviderItem { id: string; kind: string; name: string; baseUrl: string
 interface ModelItem { id: string; name: string; apiName: string; local: boolean; enabled: boolean; providerId: string; parameterSize?: string | null; practicalBudget?: number }
 interface AutoRoleRow { role: string; wanted: string; modelName?: string; providerName?: string; fallback: boolean; available: boolean; note: string }
 interface AutoRoles { ok: boolean; detail: string; roles: AutoRoleRow[] }
+interface VpnStatusShape { configured: boolean; mode: 'wireguard' | 'proxy' | null; running: boolean; proxyReady: boolean; ip: string | null; country: string | null; org: string | null; error: string | null }
 function autoRoleLabel(role: string) {
   if (role === 'fast') return tr('Fast');
   if (role === 'main') return tr('Main');
@@ -194,6 +195,19 @@ function SystemBlock({ owner, settings, patchSettings }: { owner: boolean; setti
   const [searxNote, setSearxNote] = useState('');
   const [testingSearx, setTestingSearx] = useState(false);
   const [sysInfo, setSysInfo] = useState<{ version: string; commit: string | null; backupsCount: number; inDocker: boolean } | null>(null);
+  const [vpnStatus, setVpnStatus] = useState<VpnStatusShape | null>(null);
+  const [vpnMode, setVpnMode] = useState<'wireguard' | 'proxy'>('wireguard');
+  const [vpnConf, setVpnConf] = useState('');
+  const [vpnProxyUrl, setVpnProxyUrl] = useState('');
+  const [vpnBusy, setVpnBusy] = useState(false);
+
+  const loadVpn = (check = false) => {
+    if (!owner) return;
+    void api<VpnStatusShape>(`/api/vpn${check ? '?check=1' : ''}`).then((s) => {
+      setVpnStatus(s);
+      if (s.mode) setVpnMode(s.mode);
+    }).catch(() => undefined);
+  };
 
   useEffect(() => {
     if (settings?.searxngUrl !== undefined) setSearxUrl(settings.searxngUrl || '');
@@ -213,6 +227,7 @@ function SystemBlock({ owner, settings, patchSettings }: { owner: boolean; setti
 
   useEffect(() => {
     loadModels();
+    loadVpn(false);
     if (owner) void api<{ version: string; commit: string | null; backupsCount: number; inDocker: boolean }>('/api/system/update-status').then(setSysInfo).catch(() => undefined);
   }, [owner]);
 
@@ -337,6 +352,123 @@ function SystemBlock({ owner, settings, patchSettings }: { owner: boolean; setti
       )}
 
       <ImageRole />
+
+      {owner && (
+        <div className="card" id="vpn">
+          <div className="card-head">
+            <h3><Globe size={15} aria-hidden />{' '}{tr('Agent VPN')}</h3>
+            {vpnStatus && (
+              <span className={`badge ${vpnStatus.running && vpnStatus.proxyReady ? 'ok' : vpnStatus.configured ? 'warn' : ''}`}>
+                {vpnStatus.running && vpnStatus.proxyReady
+                  ? (vpnStatus.ip ? `${tr('Connected')} · ${vpnStatus.ip}${vpnStatus.country ? ` (${vpnStatus.country})` : ''}` : tr('Connected'))
+                  : vpnStatus.configured ? tr('Stopped') : tr('Not configured')}
+              </span>
+            )}
+          </div>
+          <p className="faint">{tr('Runs in an isolated sidecar (la-vpn). Only the vpn tool and shell commands with use_vpn=true route through it — local models, SearXNG, and LAN access stay untouched.')}</p>
+          <div className="row" style={{ marginBottom: 8 }}>
+            <button type="button" className={vpnMode === 'wireguard' ? 'btn small primary' : 'btn small ghost'} onClick={() => setVpnMode('wireguard')}>{tr('WireGuard .conf')}</button>
+            <button type="button" className={vpnMode === 'proxy' ? 'btn small primary' : 'btn small ghost'} onClick={() => setVpnMode('proxy')}>{tr('HTTP Proxy URL')}</button>
+          </div>
+          {vpnMode === 'wireguard' ? (
+            <textarea
+              className="mono"
+              rows={5}
+              value={vpnConf}
+              onChange={(e) => setVpnConf(e.target.value)}
+              placeholder={'[Interface]\nPrivateKey = ...\nAddress = 10.2.0.2/32\n\n[Peer]\nPublicKey = ...\nEndpoint = 1.2.3.4:51820'}
+              aria-label={tr('WireGuard configuration')}
+              style={{ width: '100%', fontFamily: 'var(--mono)' }}
+            />
+          ) : (
+            <input
+              className="mono"
+              type="url"
+              value={vpnProxyUrl}
+              onChange={(e) => setVpnProxyUrl(e.target.value)}
+              placeholder="http://user:pass@proxy-host:8080"
+              aria-label={tr('HTTP proxy URL')}
+              style={{ width: '100%' }}
+            />
+          )}
+          <div className="row wrap" style={{ marginTop: 10 }}>
+            <button
+              type="button"
+              className="btn primary small"
+              disabled={vpnBusy || (vpnMode === 'wireguard' ? (!vpnConf.trim() && !(vpnStatus?.configured && vpnStatus.mode === 'wireguard')) : !vpnProxyUrl.trim())}
+              onClick={async () => {
+                setVpnBusy(true);
+                try {
+                  const body = vpnMode === 'wireguard'
+                    ? (vpnConf.trim() ? { mode: 'wireguard', config: vpnConf.trim() } : { mode: 'wireguard' })
+                    : { mode: 'proxy', proxyUrl: vpnProxyUrl.trim() };
+                  const next = await post<VpnStatusShape>('/api/vpn', body);
+                  setVpnStatus(next);
+                  setVpnConf('');
+                  setVpnProxyUrl('');
+                  toast(next.ip ? tr('VPN connected ({0}).', [next.ip]) : tr('VPN saved.'), next.error ? 'info' : 'ok');
+                } catch (err) { toast(errorText(err), 'error'); } finally { setVpnBusy(false); }
+              }}
+            >
+              {vpnBusy ? tr('Connecting…') : tr('Save & Connect')}
+            </button>
+            <button
+              type="button"
+              className="btn small"
+              disabled={vpnBusy || !vpnStatus?.configured}
+              onClick={async () => {
+                setVpnBusy(true);
+                try {
+                  const next = await api<VpnStatusShape>('/api/vpn?check=1');
+                  setVpnStatus(next);
+                  if (next.ip) toast(`${next.ip}${next.country ? ` (${next.country})` : ''}`, 'ok');
+                  else if (next.error) toast(next.error, 'error');
+                } catch (err) { toast(errorText(err), 'error'); } finally { setVpnBusy(false); }
+              }}
+            >
+              {tr('Check IP')}
+            </button>
+            {vpnStatus?.running && vpnStatus.mode === 'wireguard' && (
+              <button
+                type="button"
+                className="btn ghost small"
+                disabled={vpnBusy}
+                onClick={async () => {
+                  setVpnBusy(true);
+                  try {
+                    const next = await post<VpnStatusShape>('/api/vpn/stop', {});
+                    setVpnStatus(next);
+                    toast(tr('VPN stopped.'), 'info');
+                  } catch (err) { toast(errorText(err), 'error'); } finally { setVpnBusy(false); }
+                }}
+              >
+                {tr('Stop')}
+              </button>
+            )}
+            {vpnStatus?.configured && (
+              <button
+                type="button"
+                className="btn ghost danger small"
+                disabled={vpnBusy}
+                onClick={async () => {
+                  setVpnBusy(true);
+                  try {
+                    const next = await api<VpnStatusShape>('/api/vpn', { method: 'DELETE' });
+                    setVpnStatus(next);
+                    setVpnConf('');
+                    setVpnProxyUrl('');
+                    toast(tr('VPN cleared.'), 'info');
+                  } catch (err) { toast(errorText(err), 'error'); } finally { setVpnBusy(false); }
+                }}
+              >
+                {tr('Clear')}
+              </button>
+            )}
+          </div>
+          {vpnStatus?.error && <p className="faint" style={{ marginTop: 6 }}>{vpnStatus.error}</p>}
+        </div>
+      )}
+
       {sysInfo && (
         <p className="faint mono" style={{ marginTop: 8 }}>
           v{sysInfo.version}{sysInfo.commit ? ` (${sysInfo.commit})` : ''} · {sysInfo.inDocker ? 'Docker' : 'Native'} · {sysInfo.backupsCount} backup{sysInfo.backupsCount === 1 ? '' : 's'}

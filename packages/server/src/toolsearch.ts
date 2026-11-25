@@ -46,6 +46,7 @@ const SYNONYMS: Record<string, string[]> = {
   memory: ['remember', 'recall', 'note'],
   text: ['ocr', 'scan', 'receipt'],
   tweet: ['twitter', 'x', 'post'],
+  vpn: ['vpn', 'proxy', 'wireguard', 'ip', 'geoblock', 'region'],
 };
 
 const STOP = new Set(['the', 'a', 'an', 'to', 'for', 'of', 'and', 'or', 'in', 'on', 'my', 'me', 'i', 'it', 'is', 'with', 'tool', 'tools', 'please', 'can', 'you', 'that', 'this', 'be', 'from', 'at', 'by', 'do', 'what', 'how']);

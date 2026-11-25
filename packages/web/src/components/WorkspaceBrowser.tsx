@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { AtSign, ChevronDown, ChevronRight, ExternalLink, FileText, Folder, GitBranch, GitCommitHorizontal, Download, RefreshCw, Save, X } from 'lucide-react';
+import { AtSign, ChevronDown, ChevronRight, Download, ExternalLink, Eye, FileText, Folder, GitBranch, GitCommitHorizontal, RefreshCw, Save, X } from 'lucide-react';
 import { api, post } from '../lib/api';
+import { pathRawUrl, saveFile } from '../lib/files';
 import { errorText, toast } from '../lib/toast';
 import { Menu } from './ui';
 import { t, fmt } from '../i18n';
@@ -42,8 +43,8 @@ function RuleChips({ sessionId, rootPath }: { sessionId: string; rootPath: strin
   );
 }
 
-export function WorkspaceBrowser({ root, live, onClose, onChanged, onMention, sessionId }: {
-  root: ChatRoot; live: boolean; onClose: () => void; onChanged: () => void; onMention: (path: string) => void; sessionId?: string | null;
+export function WorkspaceBrowser({ root, live, onClose, onChanged, onMention, onPreview, sessionId }: {
+  root: ChatRoot; live: boolean; onClose: () => void; onChanged: () => void; onMention: (path: string) => void; onPreview?: (path: string) => void; sessionId?: string | null;
 }) {
   const [view, setView] = useState<'files' | 'changes'>(root.dirty ? 'changes' : 'files');
   const [tree, setTree] = useState<Record<string, Entry[]>>({});
@@ -151,6 +152,8 @@ export function WorkspaceBrowser({ root, live, onClose, onChanged, onMention, se
             <div className="ws-editor">
               <div className="ws-editor-head">
                 <span className="mono ellipsis grow" title={file.path}>{file.path}{edited ? ' •' : ''}</span>
+                {onPreview && <button className="icon-btn" title={t('Preview / run HTML')} aria-label={t('Preview file')} onClick={() => onPreview(file.path)}><Eye size={15} /></button>}
+                <button className="icon-btn" title={t('Download / save')} aria-label={t('Download')} onClick={() => saveFile(pathRawUrl(root.id, file.path, true), file.path.split('/').pop() || file.path)}><Download size={15} /></button>
                 <button className="icon-btn" title={t('Mention in the message (@)')} aria-label={t('Mention this file')} onClick={() => onMention(file.path)}><AtSign size={15} /></button>
                 <button className="btn small primary" disabled={!edited || busy || file.data.truncated} onClick={() => void save()} title={t('Save (Ctrl+S)')}><Save size={13} aria-hidden />{' '}{t('Save')}</button>
                 <button className="icon-btn" aria-label={t('Close file')} onClick={() => { if (!edited || window.confirm(t('Discard unsaved changes?'))) setFile(null); }}><X size={15} /></button>

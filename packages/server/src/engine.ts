@@ -108,6 +108,8 @@ export class Engine {
   workbench: import('./workbench.js').Workbench | null = null;
   /** Managed real browser container (la-browser). Set by buildApp. */
   browser: import('./browser.js').ManagedBrowser | null = null;
+  /** Isolated opt-in VPN sidecar (la-vpn). Set by buildApp. */
+  vpn: import('./vpn.js').VpnManager | null = null;
   /** Live Computer view + take-over + shell tail controller. Set by buildApp. */
   computer: import('./live-computer.js').ComputerControl | null = null;
 
@@ -2774,6 +2776,7 @@ export class Engine {
       names.add('create_project');
       names.add('vercel');
       names.add('turbo_inspect');
+      names.add('vpn');
     }
     if (this.ocrReader) names.add('read_image_text');
     if (this.imageAnalyzer) names.add('understand_image');
@@ -2813,7 +2816,7 @@ export class Engine {
     const settings = this.store.getSettings();
     const member = agent.ownerId !== OWNER_ID;
     return {
-      agent, workspace: run.cursor.worktreePath || agent.workspacePath, signal, docker: this.docker, workbench: this.workbench, browser: this.browser, computer: this.computer, fetchImpl: this.fetchImpl, searxngUrl: settings.searxngUrl || process.env.SEARXNG_URL || '',
+      agent, workspace: run.cursor.worktreePath || agent.workspacePath, signal, docker: this.docker, workbench: this.workbench, browser: this.browser, computer: this.computer, vpn: this.vpn, fetchImpl: this.fetchImpl, searxngUrl: settings.searxngUrl || process.env.SEARXNG_URL || '',
       sandbox: settings.sandbox, store: this.store, depth: run.cursor.depth ?? 0,
       sessionId: run.sessionId, runId: run.id, codeApproval: settings.codeApproval,
       autoDiagnostics: settings.autoDiagnostics !== false && process.env.LA_POST_EDIT_DIAGNOSTICS !== '0',
@@ -3599,7 +3602,7 @@ const CONTRACT_ALWAYS = new Set([
   'request_secret', 'kb_search', 'load_skill', 'manage_timer', 'manage_trigger',
   'time_now', 'tasks', 'plan', 'enter_plan_mode', 'exit_plan_mode', 'set_focus', 'think', 'memory_file', 'search_chats', 'web_search', 'web_fetch',
   'spawn_agent', 'helpers', 'propose_skill', 'read_output', 'run_skill_script',
-  'find_context', 'share_file', 'make_slides', 'read_slides', 'slide_draft', 'fetch_image', 'browse', 'create_project', 'vercel', 'turbo_inspect', 'read_image_text', 'understand_image', 'generate_image', 'repo_sync',
+  'find_context', 'share_file', 'make_slides', 'read_slides', 'slide_draft', 'fetch_image', 'browse', 'vpn', 'create_project', 'vercel', 'turbo_inspect', 'read_image_text', 'understand_image', 'generate_image', 'repo_sync',
   'create_file', 'write_file', 'read_file', 'list_dir', 'grep', 'glob', 'apply_patch', 'shell', 'git', 'find_tools',
 ]);
 
@@ -3684,7 +3687,7 @@ export function deriveStepPhase(toolName: string, _args: Record<string, unknown>
   if (stage === 'plan' || ['plan', 'tasks', 'enter_plan_mode'].includes(toolName)) return 'planning';
   if (['apply_patch', 'write_file', 'create_file'].includes(toolName)) return 'editing';
   if (['shell'].includes(toolName)) return 'verifying';
-  if (['read_file', 'list_dir', 'grep', 'glob', 'web_search', 'browse', 'web_fetch', 'kb_search', 'search_chats', 'find_context'].includes(toolName)) return 'investigating';
+  if (['read_file', 'list_dir', 'grep', 'glob', 'web_search', 'browse', 'web_fetch', 'vpn', 'kb_search', 'search_chats', 'find_context'].includes(toolName)) return 'investigating';
   return undefined;
 }
 
@@ -3700,6 +3703,7 @@ export function deriveStepFocus(toolName: string, args: Record<string, unknown>)
     case 'web_search': return `Searching web: ${String(args.query || '').slice(0, 32)}`;
     case 'browse': return `Browsing ${String(args.url || 'page').replace(/^https?:\/\//, '').slice(0, 36)}`;
     case 'web_fetch': return `Fetching ${String(args.url || 'page').replace(/^https?:\/\//, '').slice(0, 36)}`;
+    case 'vpn': return 'Using VPN…';
     case 'plan': case 'tasks': return 'Updating plan steps';
     case 'spawn_agent': return `Spawning helper${args.role ? ` (${String(args.role)})` : ''}`;
     default: return `Running ${toolName.replace(/_/g, ' ')}`;

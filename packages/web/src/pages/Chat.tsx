@@ -9,7 +9,7 @@ import { Archive, ArrowLeft, ScanText, AtSign, Info, Layers, ListChecks, Brain, 
 import { CiteContext, type CiteHandlers } from '../components/Markdown';
 import { FileViewer, type QuotePick, type ViewerSource } from '../components/FileViewer';
 import { MentionPicker, type MentionPick } from '../components/MentionPicker';
-import { CONTEXT_MARK, citationsIn, fileMeta, humanSize, kindOf, quoteBlock, rawUrl, saveFile, uploadFile, type Cite, type FileMeta } from '../lib/files';
+import { CONTEXT_MARK, citationsIn, fileMeta, humanSize, kindOf, pathRawUrl, quoteBlock, rawUrl, saveFile, uploadFile, type Cite, type FileMeta } from '../lib/files';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { PullModel } from '../components/PullModel';
 import { WorkspaceBrowser, type ChatRoot } from '../components/WorkspaceBrowser';
@@ -897,6 +897,24 @@ export function Chat() {
   const lastAssistant = [...messages].reverse().find((message) => message.role === 'assistant')?.id;
   const setupLeft = checklist.filter((item) => !item.optional && !item.ok);
   const agentRoot = (currentSession?.agentId || agents[0]?.id) ? `ws:${currentSession?.agentId || agents[0]?.id}` : null;
+  function resolveEditTarget(rawLabel: string): { root: string; path: string } | null {
+    const clean = rawLabel.trim();
+    if (!clean) return null;
+    const candidates: { id: string; prefixes: string[] }[] = [
+      ...chatWs.roots.map((r) => ({ id: r.id, prefixes: [r.label, r.id.startsWith('prj:') ? r.id.slice(4) : ''].filter(Boolean) })),
+      ...ws.workspaces.map((w) => ({ id: w.id, prefixes: [w.label, w.id.startsWith('prj:') ? w.id.slice(4) : ''].filter(Boolean) })),
+    ];
+    for (const c of candidates) {
+      for (const prefix of c.prefixes) {
+        if (clean.startsWith(`${prefix}/`) || clean.toLowerCase().startsWith(`${prefix.toLowerCase()}/`)) {
+          return { root: c.id, path: clean.slice(prefix.length + 1) };
+        }
+      }
+    }
+    if (chatWs.roots[0]) return { root: chatWs.roots[0].id, path: clean };
+    if (agentRoot) return { root: agentRoot, path: clean };
+    return null;
+  }
 
   function addQuote(pick: QuotePick) {
     setQuotes((rows) => [...rows.filter((row) => !(row.ref === pick.ref && row.text === pick.text)), { ...pick, key: `${pick.ref}-${Date.now()}` }].slice(-6));
@@ -951,6 +969,19 @@ export function Chat() {
   }
 
   const persona = agents.find((agent) => agent.id === currentSession?.agentId) || agents[0];
+  const activeFilesRoot: ChatRoot | null = (() => {
+    if (!wsRoot) return null;
+    const attached = chatWs.roots.find((root) => root.id === wsRoot);
+    if (attached) return attached;
+    const known = ws.workspaces.find((w) => w.id === wsRoot);
+    if (known) {
+      return { id: known.id, label: known.label, path: known.path, kind: known.kind, via: null, branch: known.branch, dirty: known.dirty, isRepo: known.kind === 'repo' };
+    }
+    if (wsRoot === agentRoot && persona) {
+      return { id: wsRoot, label: persona.name, path: wsRoot, kind: 'folder', via: null, branch: null, dirty: 0, isRepo: false };
+    }
+    return null;
+  })();
   useEffect(() => {
     window.dispatchEvent(new CustomEvent('la:active-persona', { detail: persona?.id ?? null }));
   }, [persona?.id]);
@@ -1701,9 +1732,10 @@ export function Chat() {
           {(voiceNote || loadingNote) ? <p className="composer-hint faint">{voiceNote || loadingNote}</p> : <p className="composer-hint faint"><span className="kbd-hint">{t('Enter to send · Shift+Enter for a new line · Esc to stop')}</span></p>}
         </div>
       </section>
-      {panel === 'files' && wsRoot && chatWs.roots.find((root) => root.id === wsRoot) && (
-        <WorkspaceBrowser sessionId={current} root={chatWs.roots.find((root) => root.id === wsRoot)!} live={active} onClose={() => setPanel(null)} onChanged={() => void loadChatWs(current)}
-          onMention={(path) => addMention({ kind: 'path', root: wsRoot, path, dir: false, label: path })} />
+      {panel === 'files' && activeFilesRoot && (
+        <WorkspaceBrowser sessionId={current} root={activeFilesRoot} live={active} onClose={() => setPanel(null)} onChanged={() => void loadChatWs(current)}
+          onPreview={(filePath) => setViewer({ source: { kind: 'path', root: activeFilesRoot.id, path: filePath } })}
+          onMention={(path) => addMention({ kind: 'path', root: activeFilesRoot.id, path, dir: false, label: path })} />
       )}
       {panel === 'context' && current && <ContextPanel sessionId={current} tick={messages.length + helperTick} onClose={() => setPanel(null)}
         onOpenFile={(id) => setViewer({ source: { kind: 'file', id } })} onRolledBack={() => void openSession(current)} />}
@@ -1726,9 +1758,20 @@ export function Chat() {
           plan={plan}
           stepCount={steps.length}
           onOpenFiles={() => {
-            const firstRoot = chatWs.roots[0]?.id;
-            if (firstRoot) { setWsRoot(firstRoot); setPanel('files'); }
+            const latestEditLabel = [...edits].reverse()[0]?.label.split(',')[0]?.trim();
+            const resolvedEditRoot = latestEditLabel ? resolveEditTarget(latestEditLabel)?.root : undefined;
+            const targetRoot = chatWs.roots[0]?.id || resolvedEditRoot || agentRoot;
+            if (targetRoot) { setWsRoot(targetRoot); setPanel('files'); }
             else setPanel('workspace');
+          }}
+          onOpenEditFile={(filePath) => {
+            const target = resolveEditTarget(filePath);
+            if (target) setViewer({ source: { kind: 'path', root: target.root, path: target.path } });
+            else setPanel('workspace');
+          }}
+          onDownloadEditFile={(filePath) => {
+            const target = resolveEditTarget(filePath);
+            if (target) saveFile(pathRawUrl(target.root, target.path, true), target.path.split('/').pop() || target.path);
           }}
           onOpenContext={() => setPanel('context')}
           onOpenWorkspace={() => setPanel('workspace')}

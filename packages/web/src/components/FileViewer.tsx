@@ -153,10 +153,29 @@ function TextView({ url, kind, name, anchor, quote }: { url: string; kind: FileK
   if (data === undefined) return <p className="faint viewer-pad">{tr('Loading…')}</p>;
   const cut = data.length > 1_000_000;
   const text = cut ? data.slice(0, 1_000_000) : data;
+  const ext = extOf(name);
   if (kind === 'markdown') return <div className="viewer-pad prose-wrap" dir="auto"><Markdown text={text} /></div>;
-  if (kind === 'csv') return <CsvTable text={text} tab={extOf(name) === 'tsv'} />;
+  if (kind === 'csv') return <CsvTable text={text} tab={ext === 'tsv'} />;
   if (kind === 'json') return <JsonView text={text} />;
-  return <CodeLines text={text} lang={extOf(name)} first={first} last={last} quote={quote} cut={cut} />;
+  if (ext === 'html' || ext === 'htm') return <HtmlPreview text={text} name={name} first={first} last={last} quote={quote} cut={cut} />;
+  return <CodeLines text={text} lang={ext} first={first} last={last} quote={quote} cut={cut} />;
+}
+
+function HtmlPreview({ text, name, first, last, quote, cut }: { text: string; name: string; first: number; last: number; quote?: QuoteFn; cut: boolean }) {
+  const [mode, setMode] = useState<'preview' | 'code'>(first ? 'code' : 'preview');
+  return (
+    <div className="viewer-html">
+      <div className="viewer-html-bar">
+        <button type="button" className={mode === 'preview' ? 'active' : undefined} onClick={() => setMode('preview')}>{tr('Live preview')}</button>
+        <button type="button" className={mode === 'code' ? 'active' : undefined} onClick={() => setMode('code')}>{tr('Source code')}</button>
+      </div>
+      {mode === 'preview' ? (
+        <iframe className="viewer-html-frame" title={name} sandbox="allow-scripts" srcDoc={text} />
+      ) : (
+        <CodeLines text={text} lang="html" first={first} last={last} quote={quote} cut={cut} />
+      )}
+    </div>
+  );
 }
 
 function CodeLines({ text, lang, first, last, quote, cut }: { text: string; lang: string; first: number; last: number; quote?: QuoteFn; cut: boolean }) {

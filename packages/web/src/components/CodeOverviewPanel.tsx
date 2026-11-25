@@ -1,4 +1,4 @@
-import { Bot, FileCode2, Files, FolderGit2, GitBranch, ListChecks, ListTree, Terminal } from 'lucide-react';
+import { Bot, Download, FileCode2, Files, FolderGit2, GitBranch, ListChecks, ListTree, Terminal } from 'lucide-react';
 import { diffStats } from '../lib/work-steps';
 import type { DiffEdit, MiniAgentRow } from './ChatUpgrades';
 import { t } from '../i18n';
@@ -18,6 +18,8 @@ export function CodeOverviewPanel({
   plan,
   stepCount,
   onOpenFiles,
+  onOpenEditFile,
+  onDownloadEditFile,
   onOpenContext,
   onOpenWorkspace,
   onToggleTrace,
@@ -30,6 +32,8 @@ export function CodeOverviewPanel({
   plan: { items: { status: string }[] } | null;
   stepCount: number;
   onOpenFiles: () => void;
+  onOpenEditFile?: (filePath: string) => void;
+  onDownloadEditFile?: (filePath: string) => void;
   onOpenContext: () => void;
   onOpenWorkspace: () => void;
   onToggleTrace: () => void;
@@ -37,7 +41,17 @@ export function CodeOverviewPanel({
   onJumpToReview: () => void;
 }) {
   const stats = edits.length ? diffStats(edits.map((e) => e.diff)) : { added: 0, removed: 0 };
-  const changedFiles = new Set(edits.flatMap((e) => e.label.split(',').map((s) => s.trim()).filter(Boolean))).size;
+  const changedFileList: string[] = [];
+  const seenFiles = new Set<string>();
+  for (let i = edits.length - 1; i >= 0; i -= 1) {
+    for (const part of edits[i]!.label.split(',').map((s) => s.trim()).filter(Boolean)) {
+      if (!seenFiles.has(part)) {
+        seenFiles.add(part);
+        changedFileList.push(part);
+      }
+    }
+  }
+  const changedFiles = changedFileList.length;
   const runningHelpers = helpers.filter((h) => h.status === 'running' || h.status === 'queued' || h.status === 'waiting').length;
   const donePlan = plan?.items.filter((i) => i.status === 'done').length ?? 0;
 
@@ -61,7 +75,7 @@ export function CodeOverviewPanel({
             )}
           </button>
 
-          <button type="button" className="overview-item" onClick={roots.length ? onOpenFiles : onOpenWorkspace}>
+          <button type="button" className="overview-item" onClick={onOpenFiles}>
             <Files size={15} className="overview-ico" aria-hidden />
             <span className="overview-title">{t('Files')}</span>
             <span className="overview-badge faint">{changedFiles || roots.length}</span>
@@ -78,6 +92,41 @@ export function CodeOverviewPanel({
             <span className="overview-badge faint">{roots.length}</span>
           </button>
         </div>
+
+        {changedFileList.length > 0 && (
+          <>
+            <div className="overview-sep" />
+            <div className="overview-files" aria-label={t('Changed files')}>
+              {changedFileList.map((filePath) => {
+                const base = filePath.split('/').pop() || filePath;
+                return (
+                  <div key={filePath} className="overview-file-row">
+                    <button
+                      type="button"
+                      className="overview-file-open"
+                      title={filePath}
+                      onClick={() => onOpenEditFile?.(filePath)}
+                    >
+                      <FileCode2 size={14} className="overview-ico" aria-hidden />
+                      <span className="ellipsis" dir="auto">{base}</span>
+                    </button>
+                    {onDownloadEditFile && (
+                      <button
+                        type="button"
+                        className="overview-file-dl"
+                        aria-label={t('Download {0}', [base])}
+                        title={t('Download {0}', [filePath])}
+                        onClick={() => onDownloadEditFile(filePath)}
+                      >
+                        <Download size={13} aria-hidden />
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
 
         <div className="overview-sep" />
 

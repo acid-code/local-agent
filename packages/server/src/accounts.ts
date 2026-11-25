@@ -203,6 +203,7 @@ export const MEMBER_DENIED_TOOLS = new Set([
   // Skills are one shared catalog the owner curates.
   'propose_skill',
   'browse',
+  'vpn',
 ]);
 
 /**

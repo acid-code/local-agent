@@ -141,6 +141,26 @@ export class Vault {
     return (this.store.db.prepare(`SELECT name FROM secrets WHERE revoked_at IS NULL AND scope = 'mcp' AND scope_id = ?`).all(serverId) as { name: string }[]).map((row) => row.name);
   }
 
+  /** Read a scoped secret (e.g. scope='vpn') directly from the encrypted vault without exposing it in envFor(). */
+  readScoped(name: string, scope: string, scopeId: string | null = null): string | null {
+    const row = this.findRow(normalizeName(name), scope, scopeId);
+    if (!row || row.revoked_at) return null;
+    try {
+      return open(this.key, String(row.nonce), String(row.ciphertext));
+    } catch {
+      return null;
+    }
+  }
+
+  /** Delete/revoke a scoped secret cleanly by name and scope. */
+  clearScoped(name: string, scope: string, actor: string, scopeId: string | null = null): void {
+    const clean = normalizeName(name);
+    const row = this.findRow(clean, scope, scopeId);
+    if (!row || row.revoked_at) return;
+    this.store.db.prepare('UPDATE secrets SET revoked_at = ? WHERE id = ?').run(now(), String(row.id));
+    this.audit(String(row.id), 'revoke', actor);
+  }
+
   sealText(value: string) {
     return seal(this.key, value);
   }

@@ -2922,6 +2922,94 @@ button.state-card:hover, a.state-card:hover { background: var(--bg-3); }
 }
 .overview-repo-chip:hover { border-color: var(--line-strong); }
 
+.overview-files {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: calc(12px * var(--round));
+  padding: 5px;
+}
+.overview-file-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: calc(8px * var(--round));
+  min-width: 0;
+}
+.overview-file-row:hover { background: var(--bg-2); }
+.overview-file-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: calc(12.5px * var(--fs));
+  text-align: start;
+  cursor: pointer;
+}
+.overview-file-dl {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  margin-inline-end: 2px;
+  border: 0;
+  border-radius: calc(7px * var(--round));
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.overview-file-dl:hover {
+  background: var(--bg-3);
+  color: var(--text);
+}
+
+.viewer-html {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.viewer-html-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-1);
+  flex: none;
+}
+.viewer-html-bar button {
+  padding: 5px 12px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: calc(12.5px * var(--fs));
+  cursor: pointer;
+}
+.viewer-html-bar button:hover { color: var(--text); }
+.viewer-html-bar button.active {
+  background: var(--bg-3);
+  border-color: var(--line);
+  color: var(--text);
+  font-weight: 500;
+}
+.viewer-html-frame {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: 0;
+  background: #fff;
+}
+
 .code-block.collapsed .code-head { border-bottom: 0; }
 .code-toggle {
   display: inline-flex;

@@ -75,6 +75,7 @@ import { budgetConfig, budgetReport, readGtt, type MemoryBudget } from './memory
 import { isLlamaServerProvider } from './coexist.js';
 import { localStatus } from './images.js';
 import { activeRunOf, sessionEventFilter } from './session-events.js';
+import { VpnManager } from './vpn.js';
 
 type Ctx = {
   autoConnectors?: boolean;
@@ -84,6 +85,7 @@ type Ctx = {
   docker: DockerCtl;
   mcp: McpRuntime;
   vault: Vault;
+  vpn?: VpnManager;
   notifier: Notifier;
   config: { dataDir: string };
   fetchImpl: typeof fetch;
@@ -93,6 +95,7 @@ let lastScan: Awaited<ReturnType<typeof scanMachine>> | null = null;
 
 export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   const { store, engine, bus, docker, mcp, vault, notifier, config, fetchImpl } = ctx;
+  const vpn = ctx.vpn ?? new VpnManager(docker, vault);
 
   app.get('/api/health', async () => ({ ok: true, version: VERSION }));
   registerAccounts(app, { store, config });
@@ -1754,6 +1757,33 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
   });
   app.get('/api/workbench', async () => ({ workbench: engine.workbench ? await engine.workbench.status() : null }));
   app.get('/api/browser', async () => ({ browser: engine.browser ? await engine.browser.status() : null }));
+  app.get('/api/vpn', async (req) => {
+    if (accountOf(req).role !== 'owner') throw http(403, 'Only the owner can manage the VPN.');
+    const check = (req.query as { check?: string }).check === '1';
+    return await vpn.status(check);
+  });
+  app.post('/api/vpn', async (req) => {
+    if (accountOf(req).role !== 'owner') throw http(403, 'Only the owner can manage the VPN.');
+    const body = parse(z.union([
+      z.object({ mode: z.literal('wireguard'), config: z.string().min(1) }),
+      z.object({ mode: z.literal('wireguard') }),
+      z.object({ mode: z.literal('proxy'), proxyUrl: z.string().min(1) }),
+    ]), req.body);
+    const actor = accountOf(req).username;
+    if ('config' in body) return await vpn.saveWireGuard(body.config, actor);
+    if (body.mode === 'wireguard') return await vpn.connectSaved();
+    return await vpn.saveProxy(body.proxyUrl, actor);
+  });
+  app.post('/api/vpn/stop', async (req) => {
+    if (accountOf(req).role !== 'owner') throw http(403, 'Only the owner can manage the VPN.');
+    await vpn.stop();
+    return await vpn.status(false);
+  });
+  app.delete('/api/vpn', async (req) => {
+    if (accountOf(req).role !== 'owner') throw http(403, 'Only the owner can manage the VPN.');
+    await vpn.clear(accountOf(req).username);
+    return await vpn.status(false);
+  });
   app.get('/api/llm/live', async () => {
     const readGpuBusy = (): number | null => {
       try {

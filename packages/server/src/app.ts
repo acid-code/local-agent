@@ -33,6 +33,7 @@ import { backupIfDue, watchOnce } from './ops.js';
 import { loadMasterKey, Vault } from './vault.js';
 import { ollamaEmbedder, reindexRoots } from './kb.js';
 import { TriggerRuntime } from './triggers.js';
+import { VpnManager } from './vpn.js';
 
 import { checkMonitorToken, MONITOR_PREFIX } from './monitor.js';
 const PUBLIC = new Set(['GET /api/health', 'GET /api/auth/me', 'POST /api/auth/login', 'POST /api/setup']);
@@ -48,6 +49,7 @@ export interface BuiltApp {
   workbench: Workbench | null;
   browser: ManagedBrowser | null;
   computer: ComputerControl;
+  vpn: VpnManager;
   config: ReturnType<typeof loadConfig>;
 }
 
@@ -86,6 +88,8 @@ export async function buildApp(options: {
     ? options.workbench
     : new Workbench(docker, path.join(config.dataDir, 'workspaces'), () => engine.memory, toHostBindPath);
   engine.workbench = workbench;
+  const vpn = new VpnManager(docker, vault);
+  engine.vpn = vpn;
   const computer = new ComputerControl(bus, { dataDir: config.dataDir, store });
   engine.computer = computer;
   const activeRunStatuses = new Set(['queued', 'running', 'loading', 'waiting', 'paused', 'awaiting_approval', 'awaiting_secret']);
@@ -178,7 +182,7 @@ export async function buildApp(options: {
     reply.code(status || 500).send({ error: status >= 500 && status !== 507 ? 'Internal error' : message });
   });
 
-  registerRoutes(app, { store, engine, bus, docker, mcp, vault, notifier, config, fetchImpl: options.fetchImpl ?? fetch, autoConnectors: options.startScheduler !== false && !process.env.VITEST });
+  registerRoutes(app, { store, engine, bus, docker, mcp, vault, vpn, notifier, config, fetchImpl: options.fetchImpl ?? fetch, autoConnectors: options.startScheduler !== false && !process.env.VITEST });
   registerLiveComputer(app, { control: computer, browser });
 
   if (options.serveWeb !== false && fs.existsSync(config.webDist)) {
@@ -232,5 +236,5 @@ export async function buildApp(options: {
     store.close();
   });
 
-  return { app, store, engine, bus, vault, scheduler, config, mcp, workbench, browser, computer };
+  return { app, store, engine, bus, vault, scheduler, config, mcp, workbench, browser, computer, vpn };
 }
