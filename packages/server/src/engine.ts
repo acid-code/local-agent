@@ -1112,11 +1112,15 @@ export class Engine {
         ? true
         : (Boolean(current.cursor.reasoning) || autoEffort === 'high' || autoEffort === 'medium' || Boolean(providerRow && (isLlamaServerProvider(providerRow) || isUncensoredProvider(providerRow))));
     const nativeThinking = thinkingOn || (/(?:qwen3|flint|deepseek[-_]?r1|qwq|\bo[134]\b)/i.test(`${model.apiName} ${model.name}`) && !/-instruct\b/i.test(model.apiName));
-    const toolless = Boolean(current.cursor.noTools) || this.toolSupportOf(model) === false;
+    const cacheFriendly = this.cacheFriendly(model);
+    // On llama-server (cacheFriendly), dropping `tools` to [] on `noTools` / `finalSynthesis` turns invalidates
+    // token 0 of the entire KV cache (forcing a full 48K+ token re-prefill). Keep tool schemas stable for prefix reuse
+    // and discard any returned tool calls below when `current.cursor.noTools` is set.
+    const toolless = (!cacheFriendly && Boolean(current.cursor.noTools)) || this.toolSupportOf(model) === false;
     const compactCoding = this.isCompactCoding(agent, sessionForCtx?.mode, current, model, settings);
     const tools = toolless
       ? []
-      : this.tools(agent, sessionForCtx?.mode, current.cursor.stage, current.cursor.toolSubset, Boolean(current.cursor.helperId), current, false, this.cacheFriendly(model), compactCoding)
+      : this.tools(agent, sessionForCtx?.mode, current.cursor.stage, current.cursor.toolSubset, Boolean(current.cursor.helperId), current, false, cacheFriendly, compactCoding)
           .filter((tool) => !(nativeThinking && tool.name === 'think'))
           .map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
     const repoTask = Boolean(sessionForCtx?.mode === 'code' || sessionForCtx?.workshopId || current.cursor.stage || turnRoots(this.store, current, this.libraryDir).length > 0);
@@ -1382,6 +1386,7 @@ export class Engine {
     const split = splitThinking(text);
     text = split.answer;
     reasoningText = [reasoningText, split.reasoning].filter(Boolean).join('\n');
+    if (current.cursor.noTools && toolCalls?.length) toolCalls = undefined;
     // Fallback parser for raw Qwen3/XML <tool_call> blocks when llama-server's peg-native parser misses whitespace variants.
     // On tool-free / finalSynthesis turns, strip leaked <tool_call> markup (including unclosed blocks) instead of executing more tools.
     if (!toolCalls?.length && /<tool_call>/i.test(text)) {
@@ -2097,7 +2102,7 @@ export class Engine {
     const compactCoding = this.isCompactCoding(agent, session?.mode, run, model, settings);
     const offeredTools = this.tools(agent, session?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId), run, true, cacheFriendly, compactCoding);
     const toolNames = offeredTools.map((tool) => tool.name);
-    const menuTools = (run.cursor.noTools || this.toolSupportOf(model) === false)
+    const menuTools = ((!cacheFriendly && run.cursor.noTools) || this.toolSupportOf(model) === false)
       ? []
       : this.tools(agent, session?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId), run, false, cacheFriendly, compactCoding);
     const toolSteps = run.cursor.helperId || run.cursor.turn < 4 ? [] : this.store.listSteps(run.id).filter((step) => step.kind === 'tool');
