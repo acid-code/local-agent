@@ -750,6 +750,14 @@ export function Chat() {
     setStatus('running');
   }
 
+  async function stopMiniAgent(id: string) {
+    try {
+      await post(`/api/helpers/${id}/stop`, {});
+      setHelperTick((v) => v + 1);
+      toast(t('Stopped mini-agent.'));
+    } catch (error) { toast(errorText(error), 'error'); }
+  }
+
   const appendSpoken = (text: string) => setDraft((value) => `${value} ${text}`.trim());
   const noVoiceHelp = t('No speech model on this machine. Start Whisper from Setup → Voice, or use Chrome/Edge for built-in dictation.');
   async function holdTalk(start: boolean) {
@@ -1179,8 +1187,9 @@ export function Chat() {
             if (item.kind === 'work') {
               const live = Boolean(active) && itemIndex === items.length - 1;
               const runs = new Set(item.runIds);
+              const runHelpers = miniAgents.filter((h) => h.parentRunId && runs.has(h.parentRunId));
               const skills = live ? [] : savedSkills(item);
-              const view = <WorkGroupView key={item.id} group={item} live={live} liveThought={live && thoughtInGroup ? thinking : undefined} liveFocus={live ? liveFocus : undefined} livePhase={live ? livePhase : undefined} diffs={edits.filter((edit) => edit.runId && runs.has(edit.runId)).map((edit) => edit.diff)} />;
+              const view = <WorkGroupView key={item.id} group={item} live={live} liveThought={live && thoughtInGroup ? thinking : undefined} liveFocus={live ? liveFocus : undefined} livePhase={live ? livePhase : undefined} diffs={edits.filter((edit) => edit.runId && runs.has(edit.runId)).map((edit) => edit.diff)} helpers={runHelpers} onStopHelper={stopMiniAgent} />;
               if (!skills.length) return view;
               return <div key={item.id}>{view}{skills.map((skill) => <SkillSavedNotice key={skill.slug} slug={skill.slug} version={skill.version} />)}</div>;
             }
@@ -1346,13 +1355,7 @@ export function Chat() {
           )}
           <MiniAgentStrip
             helpers={miniAgents}
-            onStop={async (id) => {
-              try {
-                await post(`/api/helpers/${id}/stop`, {});
-                setHelperTick((v) => v + 1);
-                toast(t('Stopped mini-agent.'));
-              } catch (error) { toast(errorText(error), 'error'); }
-            }}
+            onStop={stopMiniAgent}
           />
           <ContextNudgeBanner
             breakdown={breakdown}

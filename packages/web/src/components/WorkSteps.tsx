@@ -1,5 +1,6 @@
 import { memo, useEffect, useState, type CSSProperties } from 'react';
-import { AlertCircle, Brain, CheckCircle2, ChevronRight, Container, FileCode2, FilePen, FileText, Globe, Pause, RotateCcw, Search, Sparkles, SquareTerminal, Users, Wrench, X } from 'lucide-react';
+import { AlertCircle, Bot, Brain, CheckCircle2, ChevronRight, Container, FileCode2, FilePen, FileText, Globe, Pause, RotateCcw, Search, Sparkles, SquareTerminal, Users, Wrench, X } from 'lucide-react';
+import { MiniAgentCard, type MiniAgentRow } from './ChatUpgrades';
 import { Markdown } from './Markdown';
 import { clockDelay } from '../lib/anim-clock';
 import { diffStats, formatDuration, sameGroup, sameRow, type StepIcon, type WorkGroup, type WorkRow, type WorkStep } from '../lib/work-steps';
@@ -198,16 +199,23 @@ export function PlanProgressPill({
   );
 }
 
-type GroupProps = { group: WorkGroup; live: boolean; diffs: string[]; defaultOpen?: boolean; liveThought?: string; liveFocus?: string; livePhase?: string };
+type GroupProps = { group: WorkGroup; live: boolean; diffs: string[]; helpers?: MiniAgentRow[]; onStopHelper?: (id: string) => Promise<void> | void; defaultOpen?: boolean; liveThought?: string; liveFocus?: string; livePhase?: string };
 const sameDiffs = (a: string[], b: string[]) => a.length === b.length && a.every((d, i) => d === b[i]);
+const sameHelpers = (a: MiniAgentRow[] = [], b: MiniAgentRow[] = []) => a.length === b.length
+  && a.every((h, i) => {
+    const o = b[i]!;
+    return h.id === o.id && h.status === o.status && h.stepCount === o.stepCount
+      && h.currentStep === o.currentStep && h.endedAt === o.endedAt
+      && h.result === o.result && h.error === o.error;
+  });
 
 /** Memoised: the chat re-renders on every streamed token, but a group only re-renders when its rows change. */
 export const WorkGroupView = memo(WorkGroupViewInner, (a: GroupProps, b: GroupProps) =>
   a.live === b.live && a.defaultOpen === b.defaultOpen && a.liveThought === b.liveThought
   && (a.liveFocus ?? '') === (b.liveFocus ?? '') && (a.livePhase ?? '') === (b.livePhase ?? '')
-  && sameGroup(a.group, b.group) && sameDiffs(a.diffs, b.diffs));
+  && sameGroup(a.group, b.group) && sameDiffs(a.diffs, b.diffs) && sameHelpers(a.helpers, b.helpers));
 
-function WorkGroupViewInner({ group, live, diffs, defaultOpen, liveThought, liveFocus, livePhase }: GroupProps) {
+function WorkGroupViewInner({ group, live, diffs, helpers, onStopHelper, defaultOpen, liveThought, liveFocus, livePhase }: GroupProps) {
   const [open, setOpen] = useState(Boolean(defaultOpen || live));
   const stats = diffs.length ? diffStats(diffs) : null;
   const duration = formatDuration(group.durationMs);
@@ -232,6 +240,17 @@ function WorkGroupViewInner({ group, live, diffs, defaultOpen, liveThought, live
           {group.rows.map((row) => <WorkRowView key={row.id} row={row} live={live} />)}
           {liveThought && <LiveThoughtRow text={liveThought} />}
         </ol>
+      )}
+      {open && helpers && helpers.length > 0 && (
+        <div className="work-helpers" aria-label={t('Mini-agents')}>
+          <span className="work-helpers-label">
+            <Bot size={12} aria-hidden />
+            <span>{t('Mini-agents')}</span>
+          </span>
+          {[...helpers].sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '')).map((h) => (
+            <MiniAgentCard key={h.id} helper={h} onStop={onStopHelper} />
+          ))}
+        </div>
       )}
     </section>
   );

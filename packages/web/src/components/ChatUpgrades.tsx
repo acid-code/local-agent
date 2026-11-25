@@ -15,6 +15,7 @@ export interface HelperStepNote {
 
 export interface MiniAgentRow {
   id: string;
+  parentRunId?: string | null;
   childRunId?: string | null;
   agentName: string;
   role?: string;
@@ -71,7 +72,76 @@ function fmtElapsed(createdAt?: string, endedAt?: string | null, nowMs = Date.no
   return `${Math.floor(s / 60)}m ${s % 60}s`;
 }
 
-/** Visible Mini-Agent Activity Strip right above the composer. */
+/** Reusable expandable mini-agent card (shown live above composer and archived under its parent command flow). */
+export function MiniAgentCard({
+  helper: h,
+  nowMs = Date.now(),
+  onStop,
+}: {
+  helper: MiniAgentRow;
+  nowMs?: number;
+  onStop?: (id: string) => Promise<void> | void;
+}) {
+  const [open, setOpen] = useState(false);
+  const isLive = h.status === 'running' || h.status === 'queued' || h.status === 'waiting';
+  return (
+    <div className={`mini-card ${h.status}`}>
+      <div className="mini-card-row">
+        <button type="button" className="mini-card-toggle" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+          <span className={`mini-dot ${isLive ? 'live' : h.status}`} aria-hidden />
+          <span className="mini-name">{h.agentName}</span>
+          {h.role && h.role !== 'general' && (
+            <span className={`mini-role role-${h.role}`}>
+              {h.role === 'research' ? t('research') : h.role === 'verify' ? t('verify') : t('coder')}
+            </span>
+          )}
+          {h.modelName && <span className="mini-model">{h.modelName}</span>}
+          <span className="mini-task ellipsis" dir="auto">
+            {isLive && h.currentStep ? `${h.stepCount ? `#${h.stepCount} ` : ''}${h.currentStep}` : h.task}
+          </span>
+          <span className="mini-time mono faint">{fmtElapsed(h.createdAt, h.endedAt, nowMs)}</span>
+          {open ? <ChevronDown size={13} aria-hidden /> : <ChevronRight size={13} aria-hidden />}
+        </button>
+        {isLive && onStop && (
+          <button type="button" className="icon-btn mini-stop" title={t('Stop mini-agent')} aria-label={t('Stop mini-agent')} onClick={() => void onStop(h.id)}>
+            <Square size={12} />
+          </button>
+        )}
+      </div>
+      {open && (
+        <div className="mini-card-body">
+          {h.currentStep && isLive && (
+            <div className="mini-live-step faint" dir="auto">
+              <span>{t('Now: {0}', [h.currentStep])}</span>
+            </div>
+          )}
+          {h.worktreePath && (
+            <div className="mini-worktree mono faint">
+              <GitBranch size={11} aria-hidden />
+              <span>{t('Worktree')}: {h.worktreePath}</span>
+            </div>
+          )}
+          {Array.isArray(h.recentSteps) && h.recentSteps.length > 0 && (
+            <div className="mini-steps">
+              {h.recentSteps.map((step, idx) => (
+                <div key={`${h.id}-s-${idx}`} className={`mini-step-row ${step.status}`}>
+                  <span className={`mini-dot ${step.status === 'running' ? 'live' : step.status === 'completed' ? 'done' : 'failed'}`} aria-hidden />
+                  <span className="mini-step-tool mono">{step.tool}</span>
+                  <span className="mini-step-sum ellipsis" dir="auto">{step.summary}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {h.result && <pre className="mini-out" dir="auto">{h.result.slice(0, 2000)}</pre>}
+          {h.error && <pre className="mini-out err">{h.error}</pre>}
+          {!h.result && !h.error && !(Array.isArray(h.recentSteps) && h.recentSteps.length) && <span className="faint">{t('Working on workspace…')}</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Visible Mini-Agent Activity Strip right above the composer (live mini-agents only; finished ones live in their command flow). */
 export function MiniAgentStrip({
   helpers,
   onStop,
@@ -80,10 +150,7 @@ export function MiniAgentStrip({
   onStop: (id: string) => Promise<void> | void;
 }) {
   const [nowMs, setNowMs] = useState(() => Date.now());
-  const [expanded, setExpanded] = useState<string | null>(null);
   const running = helpers.filter((h) => h.status === 'running' || h.status === 'queued' || h.status === 'waiting');
-  const recent = helpers.filter((h) => h.status === 'done' || h.status === 'failed').slice(0, 2);
-  const shown = [...running, ...recent];
 
   useEffect(() => {
     if (!running.length) return;
@@ -91,76 +158,20 @@ export function MiniAgentStrip({
     return () => clearInterval(id);
   }, [running.length]);
 
-  if (!shown.length) return null;
+  if (!running.length) return null;
 
   return (
     <div className="mini-strip" aria-label={t('Mini-agents')}>
       <div className="mini-strip-head">
         <span className="row" style={{ gap: 6 }}>
           <Bot size={14} aria-hidden />
-          <strong>{running.length ? t('{0} mini-agent(s) running', [running.length]) : t('Recent mini-agents')}</strong>
+          <strong>{t('{0} mini-agent(s) running', [running.length])}</strong>
         </span>
       </div>
       <div className="mini-strip-list">
-        {shown.map((h) => {
-          const isLive = h.status === 'running' || h.status === 'queued' || h.status === 'waiting';
-          const open = expanded === h.id;
-          return (
-            <div key={h.id} className={`mini-card ${h.status}`}>
-              <div className="mini-card-row">
-                <button type="button" className="mini-card-toggle" onClick={() => setExpanded(open ? null : h.id)}>
-                  <span className={`mini-dot ${isLive ? 'live' : h.status}`} aria-hidden />
-                  <span className="mini-name">{h.agentName}</span>
-                  {h.role && h.role !== 'general' && (
-                    <span className={`mini-role role-${h.role}`}>
-                      {h.role === 'research' ? t('research') : h.role === 'verify' ? t('verify') : t('coder')}
-                    </span>
-                  )}
-                  {h.modelName && <span className="mini-model">{h.modelName}</span>}
-                  <span className="mini-task ellipsis" dir="auto">
-                    {isLive && h.currentStep ? `${h.stepCount ? `#${h.stepCount} ` : ''}${h.currentStep}` : h.task}
-                  </span>
-                  <span className="mini-time mono faint">{fmtElapsed(h.createdAt, h.endedAt, nowMs)}</span>
-                  {open ? <ChevronDown size={13} aria-hidden /> : <ChevronRight size={13} aria-hidden />}
-                </button>
-                {isLive && (
-                  <button type="button" className="icon-btn mini-stop" title={t('Stop mini-agent')} aria-label={t('Stop mini-agent')} onClick={() => void onStop(h.id)}>
-                    <Square size={12} />
-                  </button>
-                )}
-              </div>
-              {open && (
-                <div className="mini-card-body">
-                  {h.currentStep && isLive && (
-                    <div className="mini-live-step faint" dir="auto">
-                      <span>{t('Now: {0}', [h.currentStep])}</span>
-                    </div>
-                  )}
-                  {h.worktreePath && (
-                    <div className="mini-worktree mono faint">
-                      <GitBranch size={11} aria-hidden />
-                      <span>{t('Worktree')}: {h.worktreePath}</span>
-                    </div>
-                  )}
-                  {Array.isArray(h.recentSteps) && h.recentSteps.length > 0 && (
-                    <div className="mini-steps">
-                      {h.recentSteps.map((step, idx) => (
-                        <div key={`${h.id}-s-${idx}`} className={`mini-step-row ${step.status}`}>
-                          <span className={`mini-dot ${step.status === 'running' ? 'live' : step.status === 'completed' ? 'done' : 'failed'}`} aria-hidden />
-                          <span className="mini-step-tool mono">{step.tool}</span>
-                          <span className="mini-step-sum ellipsis" dir="auto">{step.summary}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {h.result && <pre className="mini-out" dir="auto">{h.result.slice(0, 2000)}</pre>}
-                  {h.error && <pre className="mini-out err">{h.error}</pre>}
-                  {!h.result && !h.error && !(Array.isArray(h.recentSteps) && h.recentSteps.length) && <span className="faint">{t('Working on workspace…')}</span>}
-                </div>
-              )}
-            </div>
-          );
-        })}
+        {running.map((h) => (
+          <MiniAgentCard key={h.id} helper={h} nowMs={nowMs} onStop={onStop} />
+        ))}
       </div>
     </div>
   );

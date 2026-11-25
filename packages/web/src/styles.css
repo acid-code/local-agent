@@ -2111,6 +2111,8 @@ button.state-card:hover, a.state-card:hover { background: var(--bg-3); }
 .mini-step-sum { flex: 1; min-width: 0; }
 .mini-out { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: calc(11.5px * var(--fs)); max-height: 200px; overflow: auto; }
 .mini-out.err { color: var(--danger); }
+.work-helpers { margin: 6px 0 2px; margin-inline-start: 11px; padding: 8px 0 2px; padding-inline-start: 16px; border-top: 1px dashed var(--line); display: flex; flex-direction: column; gap: 5px; }
+.work-helpers-label { display: inline-flex; align-items: center; gap: 5px; font-size: calc(11.5px * var(--fs)); color: var(--muted); }
 
 .ctx-nudge {
   display: flex;
