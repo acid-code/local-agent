@@ -21,25 +21,28 @@ afterEach(async () => {
 
 describe('VPN config, SSRF guard, proxy fetch, and vault isolation', () => {
   it('parses valid WireGuard configs with and without PresharedKey', () => {
+    const privKey = Buffer.from('fixture-wg-private-key-material!').toString('base64');
+    const pubKey = Buffer.from('fixture-wg-public-key-material!!').toString('base64');
+    const pskKey = Buffer.from('fixture-wg-preshared-key-data!!').toString('base64');
     const withPsk = parseWireGuardConf(`
       # ProtonVPN / WireGuard config
       [Interface]
-      PrivateKey = cHJpdmF0ZWtleWV4YW1wbGUxMjM0NTY3ODkwMTIzNDU2=
+      PrivateKey = ${privKey}
       Address = 10.2.0.2/32, fd00::2/128
       DNS = 10.2.0.1
 
       [Peer]
-      PublicKey = cHVibGlja2V5ZXhhbXBsZTEyMzQ1Njc4OTAxMjM0NTY3ODk=
-      PresharedKey = cHNrZXhhbXBsZTEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI=
+      PublicKey = ${pubKey}
+      PresharedKey = ${pskKey}
       Endpoint = 185.159.158.10:51820
       AllowedIPs = 0.0.0.0/0
     `);
     expect(withPsk).toEqual({
-      privateKey: 'cHJpdmF0ZWtleWV4YW1wbGUxMjM0NTY3ODkwMTIzNDU2=',
+      privateKey: privKey,
       addresses: '10.2.0.2/32,fd00::2/128',
       dns: '10.2.0.1',
-      publicKey: 'cHVibGlja2V5ZXhhbXBsZTEyMzQ1Njc4OTAxMjM0NTY3ODk=',
-      presharedKey: 'cHNrZXhhbXBsZTEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI=',
+      publicKey: pubKey,
+      presharedKey: pskKey,
       endpointIp: '185.159.158.10',
       endpointPort: 51820,
     });
@@ -107,10 +110,12 @@ describe('VPN config, SSRF guard, proxy fetch, and vault isolation', () => {
     const addr = proxyServer.address();
     if (!addr || typeof addr === 'string') throw new Error('Expected TCP port');
 
-    const proxyUrl = `http://vpnuser:vpnpass@127.0.0.1:${addr.port}`;
+    const user = 'fixture-user';
+    const pass = 'fixture-pass';
+    const proxyUrl = `http://${user}:${pass}@127.0.0.1:${addr.port}`;
     const result = await fetchViaHttpProxy(proxyUrl, 'http://example.com/status');
     expect(seenUrl).toBe('http://example.com/status');
-    expect(seenProxyAuth).toBe(`Basic ${Buffer.from('vpnuser:vpnpass').toString('base64')}`);
+    expect(seenProxyAuth).toBe(`Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}`);
     expect(result.status).toBe(200);
     expect(JSON.parse(result.body)).toMatchObject({ ip: '198.51.100.77', country: 'CH' });
 

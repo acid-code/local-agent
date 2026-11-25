@@ -126,7 +126,7 @@ describe('auto runs the mapped model', () => {
       strategy: 'rolling', sizeClass: size, local: true, modalities: ['text'], strengths: ['chat', 'code'], typicalQ4GiB: size === 'large' ? 18 : 3,
       priceIn: 0, priceOut: 0, notes: '', parameterSize: null, family: 'test', source: 'test', embedding: false, freeTier: null, enabled: true,
     });
-    add('fast', 'qwen3:4b', 'small', 4096);
+    add('fast', 'qwen3:4b', 'small', 8192);
     add('main', 'gemma4:26b-a4b', 'large', 32768);
     add('coder', 'qwen3-coder:30b', 'large', 32768);
     store.updateProvider('prov_gemini', { enabled: true });
