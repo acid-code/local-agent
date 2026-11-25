@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { isInside } from '@local-agent/shared';
 import type { Store } from './db.js';
-import { fileText, getFile } from './files.js';
+import { fileText, getFile, type FileRow } from './files.js';
 import { gitRoot, readExcerpt, treeListing } from './gitops.js';
 
 /** Everything after this marker in a user message is context the composer attached. The UI hides it and shows chips. */
@@ -22,7 +22,12 @@ export function mentionLabel(mention: Mention, store: Store): string {
 
 /** Turns @-mentions into text the model can read: folder trees, file contents or excerpts, uploaded file text. Each block says when it was cut. */
 /** Only the caller's own uploads and folders resolve. */
-export function expandMentions(store: Store, mentions: Mention[], ownerId = 'owner'): string {
+export function expandMentions(
+  store: Store,
+  mentions: Mention[],
+  ownerId = 'owner',
+  opts?: { stageFile?: (file: FileRow) => string | null },
+): string {
   const blocks: string[] = [];
   let used = 0;
   for (const mention of mentions.slice(0, 12)) {
@@ -32,11 +37,13 @@ export function expandMentions(store: Store, mentions: Mention[], ownerId = 'own
         const found = getFile(store, mention.id);
         const file = found && found.ownerId === ownerId ? found : null;
         if (!file) { blocks.push(`[file:${mention.id}] was not found.`); continue; }
+        const staged = opts?.stageFile?.(file) ?? null;
+        const stageLine = staged ? `\nWorkspace path (readable in shell/scripts with cwd="workspace"): ${staged}` : '';
         const text = fileText(store, file.id);
         const room = Math.max(2_000, Math.min(20_000, CONTEXT_BUDGET - used));
         block = text
-          ? `### [file:${file.id}] ${file.name} (${file.mime}, ${file.size} bytes)\n\`\`\`\n${text.slice(0, room)}\n\`\`\`${text.length > room ? `\n(Truncated: showing ${room} of ${text.length} characters. Use find_context with id ${file.id} for more.)` : ''}`
-          : `### [file:${file.id}] ${file.name} (${file.mime}, ${file.size} bytes)\nNo readable text (binary or media). The owner can open it in the preview.`;
+          ? `### [file:${file.id}] ${file.name} (${file.mime}, ${file.size} bytes)${stageLine}\n\`\`\`\n${text.slice(0, room)}\n\`\`\`${text.length > room ? `\n(Truncated: showing ${room} of ${text.length} characters. Use find_context with id ${file.id} for more.)` : ''}`
+          : `### [file:${file.id}] ${file.name} (${file.mime}, ${file.size} bytes)${stageLine}\nNo readable text (binary or media). The owner can open it in the preview.`;
       } else {
         const root = gitRoot(store, mention.root, ownerId);
         const full = path.resolve(root.path, mention.path || '.');

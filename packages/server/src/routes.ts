@@ -54,7 +54,7 @@ import { git, listSharedRepos, registerSharedRepo } from './repos.js';
 import { isInside } from '@local-agent/shared';
 import { CONTEXT_MARK, expandMentions } from './mentions.js';
 import { cloneInto, gitRoot, gitStatus, listDir, listGitRoots, openPullRequest, pushBranch, readExcerpt, validBranch } from './gitops.js';
-import { MAX_FILE_BYTES, deleteFile, filePath, getFile, getMessageRow, listFiles, mimeFor, saveFile, searchMessages } from './files.js';
+import { MAX_FILE_BYTES, deleteFile, filePath, getFile, getMessageRow, listFiles, mimeFor, saveFile, searchMessages, stageFileIntoWorkspace } from './files.js';
 import type { Store } from './db.js';
 import type { Vault } from './vault.js';
 import { renderSlides } from './slides.js';
@@ -661,6 +661,11 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     ensureDiskRoom(config.dataDir, bytes.length);
     try {
       const file = saveFile(store, config.dataDir, { name: body.name, bytes, sessionId: body.sessionId ?? null, source: 'upload', ownerId: me(req) });
+      const uploadSession = body.sessionId ? store.getSession(body.sessionId) : null;
+      const uploadAgent = uploadSession?.agentId ? store.getAgent(uploadSession.agentId) : null;
+      if (uploadAgent?.workspacePath) {
+        stageFileIntoWorkspace(store, config.dataDir, file.id, uploadAgent.workspacePath);
+      }
       ocr.indexImage(file, me(req));
       return { file };
     } catch (error) {
@@ -1243,7 +1248,16 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
     }
     if (engine.sessionBusy(id)) throw http(409, 'A reply is still running in this chat. Wait for it or press Stop, then send again.');
     const offers = vault.capture(null, body.content);
-    let context = body.mentions?.length ? expandMentions(store, body.mentions.map((mention) => (mention.kind === 'file' ? { kind: 'file' as const, id: mention.id } : mention)), me(req)) : '';
+    const targetAgent = store.getAgent(agentId);
+    if (targetAgent?.workspacePath) {
+      for (const uploaded of listFiles(store, { sessionId: id, ownerId: me(req), source: 'upload', limit: 20 })) {
+        stageFileIntoWorkspace(store, config.dataDir, uploaded.id, targetAgent.workspacePath);
+      }
+    }
+    const stageFile = targetAgent?.workspacePath
+      ? (f: { id: string }) => stageFileIntoWorkspace(store, config.dataDir, f.id, targetAgent.workspacePath)
+      : undefined;
+    let context = body.mentions?.length ? expandMentions(store, body.mentions.map((mention) => (mention.kind === 'file' ? { kind: 'file' as const, id: mention.id } : mention)), me(req), { stageFile }) : '';
     // Photos sent with "read text" on: OCR text rides along as context (printed via Tesseract, handwriting via a vision model).
     for (const mention of body.mentions ?? []) {
       if (mention.kind !== 'file' || !mention.ocr || !engine.ocrReader) continue;

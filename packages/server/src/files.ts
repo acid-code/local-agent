@@ -159,6 +159,37 @@ export function filePath(store: Store, dataDir: string, id: string): string | nu
   return full.startsWith(root + path.sep) && fs.existsSync(full) ? full : null;
 }
 
+/**
+ * Copy an uploaded chat file into `<workspacePath>/uploads/` (mounted in the Docker workbench)
+ * under a shell-safe filename, avoiding collisions across same-named uploads of different sizes.
+ */
+export function stageFileIntoWorkspace(store: Store, dataDir: string, fileId: string, workspacePath: string): string | null {
+  const file = getFile(store, fileId);
+  const src = filePath(store, dataDir, fileId);
+  if (!file || !src || !workspacePath) return null;
+  const srcStat = fs.statSync(src);
+  const rawBase = path.basename(file.name);
+  const safe = rawBase.replace(/^\$+/, '').replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '') || file.id;
+  const uploadsDir = path.join(workspacePath, 'uploads');
+  fs.mkdirSync(uploadsDir, { recursive: true });
+  let finalName = safe;
+  const candidate = path.join(uploadsDir, safe);
+  if (fs.existsSync(candidate)) {
+    try {
+      const existing = fs.statSync(candidate);
+      if (existing.size !== srcStat.size) finalName = `${file.id}_${safe}`;
+    } catch {
+      finalName = `${file.id}_${safe}`;
+    }
+  }
+  const dest = path.join(uploadsDir, finalName);
+  const needCopy = !fs.existsSync(dest) || (() => {
+    try { return fs.statSync(dest).size !== srcStat.size; } catch { return true; }
+  })();
+  if (needCopy) fs.copyFileSync(src, dest);
+  return `uploads/${finalName}`;
+}
+
 export function fileText(store: Store, id: string): string {
   const row = fileRow(store, id, 'text_index') as { text_index: string } | undefined;
   return row?.text_index ?? '';
