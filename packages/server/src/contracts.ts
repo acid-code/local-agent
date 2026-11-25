@@ -87,7 +87,7 @@ const toolSchemas: Record<string, z.ZodTypeAny> = {
   repo_sync: z.object({ label: z.string().optional(), url: z.string().optional() }),
   shell: z.object({
     command: z.string().min(1),
-    cwd: z.string().optional().describe('Project label to run in, when this chat has more than one project.'),
+    cwd: z.string().optional().describe('Project label when multiple projects are attached, or "workspace" for files in your own workspace.'),
     why: z.string().optional().describe('Optional 3-8 word intent shown in the step log.'),
   }),
   write_file: z.object({

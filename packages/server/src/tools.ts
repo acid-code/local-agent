@@ -394,7 +394,7 @@ export const BUILTIN_TOOLS: Tool[] = [
     description: 'Run a shell command (hard limit: 4,000 characters; 64 KB captured output). Runs in the shared workbench container (Debian, node 22, python3, git). Never embed large files or heredocs (cat << EOF) in shell — use write_file (with append=true for chunks) or apply_patch, then run short commands.',
     parameters: obj({
       command: { type: 'string' },
-      cwd: { type: 'string', description: 'Workshop project label, when this chat has more than one.' },
+      cwd: { type: 'string', description: 'Project label when multiple projects are attached, or "workspace" for files in your own workspace.' },
       why: { type: 'string', description: 'Optional 3-8 word intent shown in the step log.' },
     }, ['command']),
     mutates: (args) => assessCommand(String(args.command || '')) !== 'ok',

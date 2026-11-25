@@ -156,9 +156,11 @@ export function projectPath(roots: { label: string; path: string }[], project: s
   if (roots.length > 1) {
     const inferred = inferProject(roots, hint);
     if (inferred) return roots.find((root) => root.label === inferred)!.path;
-    // General utility / package-install / script commands (e.g. pip install, python3, ffmpeg) are not repo-specific:
-    // default to the persona's workspace instead of failing with "Name the project".
-    if (workspace && /^\s*(?:pip3?|uv\s+pip|python3?|which|echo|env|ffmpeg|ffprobe|convert|curl|wget)\b/i.test(hint || '')) {
+    const byFile = inferByExistingFile(roots, workspace, hint);
+    if (byFile) return byFile;
+    // General utility / package-install / script commands (e.g. pip install, python3, ffmpeg, node -e)
+    // are not repo-specific: default to the persona's workspace instead of failing with "Name the project".
+    if (workspace && /^\s*(?:pip3?|uv\s+pip|python3?|which|echo|env|ffmpeg|ffprobe|convert|curl|wget|node\s+(?:-e|--eval|--check))\b/i.test(hint || '')) {
       return workspace;
     }
     throw new Error(`Name the project: ${[...roots.map((root) => root.label), 'workspace'].join(', ')}.`);
@@ -179,6 +181,40 @@ export function inferProject(roots: { label: string; path: string }[], text: str
     if (absolute.test(text) || relative.test(text)) hits.add(root.label);
   }
   return hits.size === 1 ? [...hits][0] : undefined;
+}
+
+function inferByExistingFile(roots: { label: string; path: string }[], workspace: string, hint: string): string | undefined {
+  if (!hint.trim()) return undefined;
+  const tokens = new Set<string>();
+  for (const m of hint.matchAll(/['"]([^'"\n]{1,200})['"]/g)) tokens.add(m[1]!.trim());
+  for (const raw of hint.split(/\s+/)) {
+    const clean = raw.replace(/^['"(]+|['");,]+$/g, '').trim();
+    if (clean) tokens.add(clean);
+  }
+  const candidates = [...tokens].filter((token) =>
+    token.length > 0
+    && token.length <= 200
+    && !token.startsWith('-')
+    && !/^[a-z]+:\/\//i.test(token)
+    && !path.isAbsolute(token)
+    && !/\.\.(?:\/|\\|$)/.test(token)
+    && !/^[\d.]+$/.test(token)
+    && /[./]/.test(token),
+  );
+  if (!candidates.length) return undefined;
+  const dirs = [...roots.map((r) => r.path), ...(workspace ? [workspace] : [])];
+  const matches = new Set<string>();
+  for (const dir of dirs) {
+    const resolvedDir = path.resolve(dir);
+    for (const token of candidates) {
+      const full = path.resolve(resolvedDir, token);
+      if (safeInside(resolvedDir, full) && fs.existsSync(full)) {
+        matches.add(dir);
+        break;
+      }
+    }
+  }
+  return matches.size === 1 ? [...matches][0] : undefined;
 }
 
 function inside(root: string, relative: string): string | null {
