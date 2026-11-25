@@ -1,4 +1,4 @@
-import { withoutHarmlessRedirects } from './guard.js';
+import { hasShellRedirect, withoutHarmlessRedirects } from './guard.js';
 /**
  * Risk-based approval tiers. Every tool call gets a tier; the approval mode decides which tiers ask first.
  *   safe   read-only (read, list, search, fetch): never asks
@@ -18,7 +18,7 @@ const SAFE_TOOLS = new Set([
 ]);
 const LOW_TOOLS = new Set(['write_file', 'make_slides', 'memory_file', 'remember', 'plan', 'send_message', 'handoff']);
 const HIGH_SHELL = [/\bsudo\b/i, /\bgit\s+push\b/i, /\bnpm\s+publish\b/i, /\bdocker\b[^\n]*\b(rm|rmi|system|prune|kill)\b/i, /\b(kill|pkill|killall)\b/i, /\b(mount|umount)\b/i, /\bch(mod|own)\s+-R\b/i, /\brm\s+-[a-z]*r[a-z]*f?\s+(\/|~|\.\.|\$HOME)/i, /\b(ssh|scp|rsync)\b[^\n]*@/i, /\bcurl\b[^\n]*-X\s*(POST|PUT|DELETE|PATCH)/i];
-const MEDIUM_SHELL = [/\brm\b/i, /\bmv\b/i, /\bchmod\b/i, /\bchown\b/i, /(^|[^&=])>{1,2}/, /\btee\b/i, /\bgit\s+(reset|clean|checkout\s+--|rebase)\b/i];
+const MEDIUM_SHELL = [/\brm\b/i, /\bmv\b/i, /\bchmod\b/i, /\bchown\b/i, /\btee\b/i, /\bgit\s+(reset|clean|checkout\s+--|rebase)\b/i];
 const HIGH_ACTION = /(^|_)(send|post|publish|delete|remove|destroy|pay|purchase|buy|transfer|merge|deploy|share|invite|reply|comment|create_(issue|pull|pr|draft|event)|update_(issue|event)|push)(_|$)/i;
 
 export function riskOf(tool: string, args: Record<string, unknown>, declared: string | null): { tier: RiskTier; why: string } {
@@ -28,7 +28,7 @@ export function riskOf(tool: string, args: Record<string, unknown>, declared: st
     const cleaned = withoutHarmlessRedirects(command);
     if (/\bapt(-get)?\s+install\b/i.test(command)) return { tier: 'high', why: `Installs system packages in the shared workbench (affects all personas): ${command.slice(0, 160)}` };
     if (HIGH_SHELL.some((pattern) => pattern.test(command))) return { tier: 'high', why: `Shell command with effects outside the workspace: ${command.slice(0, 160)}` };
-    if (MEDIUM_SHELL.some((pattern) => pattern.test(cleaned))) return { tier: 'medium', why: `Shell command changes or deletes files: ${command.slice(0, 160)}` };
+    if (hasShellRedirect(command) || MEDIUM_SHELL.some((pattern) => pattern.test(cleaned))) return { tier: 'medium', why: `Shell command changes or deletes files: ${command.slice(0, 160)}` };
     return { tier: 'low', why: `Shell command: ${command.slice(0, 160)}` };
   }
   if (tool === 'docker_rm') return { tier: 'high', why: declared ?? 'Remove a container' };

@@ -140,6 +140,7 @@ describe('context, cron, guard, embeddings', () => {
       'git log -3 &>/dev/null',
       'cat package.json >/dev/null && echo ok',
       'ls -la /projects/fb-marketplace-scraper; ls /projects/fb-marketplace-scraper/node_modules 2>/dev/null | head -',
+      'node -e "const m = html.match(/<script>/);"',
     ]) expect(assessCommand(command), command).toBe('ok');
     for (const command of [
       'echo hi > notes.txt',

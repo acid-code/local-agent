@@ -19,7 +19,6 @@ const MUTATING: RegExp[] = [
   /\b(mount|umount)\b/i,
   /\b(kill|pkill)\b/i,
   /\bdocker\b[^\n]*\b(rm|rmi|system|prune|kill)\b/i,
-  /(^|[^&=])>{1,2}/,
   /\bgit\s+push\b/i,
   /\bnpm\s+publish\b/i,
   /\btee\b/i,
@@ -35,15 +34,44 @@ const HARMLESS_REDIRECTS = /(?:\d|&)?>{1,2}\s*\/dev\/null\b|\b\d>&\d\b/g;
 
 export type CommandAssessment = 'ok' | 'mutating' | 'blocked';
 
+/** Replace complete single- and double-quoted literals with "" so inline code (e.g. `<script>`, `x > 0`) is not read as shell operators. */
+export function stripQuotedStrings(command: string): string {
+  let out = '';
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i]!;
+    if (ch === "'" || ch === '"') {
+      let j = i + 1;
+      while (j < command.length) {
+        const cur = command[j]!;
+        if (ch === '"' && cur === '\\') { j += 2; continue; }
+        if (cur === ch) break;
+        j += 1;
+      }
+      if (j < command.length) {
+        out += '""';
+        i = j;
+        continue;
+      }
+    }
+    out += ch;
+  }
+  return out;
+}
+
 /** Drop 2>/dev/null, >/dev/null, &>/dev/null and 2>&1 so they are not treated as file writes. */
 export function withoutHarmlessRedirects(command: string): string {
   return command.replace(HARMLESS_REDIRECTS, ' ');
 }
 
+/** True only when an unquoted shell output redirect (> or >>) outside harmless /dev/null & stream merges exists. */
+export function hasShellRedirect(command: string): boolean {
+  return /(^|[^&=])>{1,2}/.test(stripQuotedStrings(withoutHarmlessRedirects(command)));
+}
+
 export function assessCommand(command: string): CommandAssessment {
   if (BLOCKED.some((pattern) => pattern.test(command))) return 'blocked';
   const cleaned = withoutHarmlessRedirects(command);
-  if (MUTATING.some((pattern) => pattern.test(cleaned))) return 'mutating';
+  if (hasShellRedirect(command) || MUTATING.some((pattern) => pattern.test(cleaned))) return 'mutating';
   return 'ok';
 }
 

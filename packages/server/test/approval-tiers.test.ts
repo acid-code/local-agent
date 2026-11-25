@@ -34,6 +34,8 @@ describe('risk tiers', () => {
       'git log -3 &>/dev/null',
       'cat package.json >/dev/null && echo ok',
       'ls 2>&1 >/dev/null',
+      'node -e "const m = html.match(/<script>([\\\\s\\\\S]*?)<\\\\/script>/); if (a > b) console.log(1);"',
+      'python3 -c "print(2 > 1)"',
     ];
     for (const command of readOnly) {
       const result = riskOf('shell', { command }, null);
