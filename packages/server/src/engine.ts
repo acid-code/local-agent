@@ -1528,6 +1528,8 @@ export class Engine {
   private async stepTools(run: RunRow, signal: AbortSignal) {
     const calls = run.cursor.toolCalls ?? [];
     const completed = new Set(run.cursor.completedToolIds ?? []);
+    const batchTouchedPlan = calls.some((c) => c.name === 'plan' || c.name === 'tasks' || c.name === 'exit_plan_mode');
+    const lastExecCallId = [...calls].reverse().find((c) => ['write_file', 'create_file', 'apply_patch', 'shell', 'git'].includes(c.name))?.id;
     let handoff = false;
     for (const call of calls) {
       if (completed.has(call.id)) continue;
@@ -1751,8 +1753,20 @@ export class Engine {
         const output = this.vault.redact(clampText(await tool.execute(args, { ...this.contextFor(run, signal), toolCallId: call.id }), 200_000));
         const afterOk = this.store.getRun(run.id);
         if (afterOk?.cursor.failStreak) this.store.updateRun(run.id, { cursor: { ...afterOk.cursor, failStreak: undefined } });
+        let planNote = '';
+        const liveStage = afterOk?.cursor.stage ?? run.cursor.stage;
+        if (call.id === lastExecCallId && !batchTouchedPlan && !run.cursor.helperId && liveStage === 'implement') {
+          const activePlan = readPlan(this.store, run.sessionId);
+          if (activePlan?.items.length) {
+            const done = activePlan.items.filter((item) => item.status === 'done').length;
+            const nextIdx = activePlan.items.findIndex((item) => item.status !== 'done' && item.status !== 'blocked');
+            if (nextIdx >= 0) {
+              planNote = `\n\n[plan] ${done}/${activePlan.items.length} done · next step #${nextIdx + 1}: "${activePlan.items[nextIdx]!.text}" — match this exact step and call plan({ itemId: "${nextIdx + 1}", status: "done", evidence: "..." }) as soon as you finish it.`;
+            }
+          }
+        }
         this.store.updateStep(step.id, { status: 'completed', output, latencyMs: Date.now() - started, endedAt: now() });
-        this.persistTool(run, call, `${output}${loopNote}`, 'completed', false);
+        this.persistTool(run, call, `${output}${loopNote}${planNote}`, 'completed', false);
         this.bus.publish({ type: 'step', runId: run.id, step: this.store.getStep(step.id) });
         if (run.cursor.helperId) {
           this.autonomy.noteProgress(run.cursor.helperId, { tool: call.name, summary: stepSummary, status: 'completed', at: now() });

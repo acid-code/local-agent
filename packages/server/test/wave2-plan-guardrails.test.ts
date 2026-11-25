@@ -351,4 +351,35 @@ describe('wave 2 plan-execute guardrails & auto-effort', () => {
       await built.app.close();
     }
   });
+
+  it('appends an inline [plan] next-step reminder after implement edits when plan was not updated, and skips when plan is called', async () => {
+    const built = await setup();
+    try {
+      built.provider.steps = [
+        { toolCalls: [call('ex3', 'exit_plan_mode', { steps: ['Write Part 1: setup', 'Write Part 2: polish'], summary: 'Two parts' })] },
+        { toolCalls: [call('ap_no_plan', 'apply_patch', { path: 'target.txt', search: 'alpha', replace: 'ALPHA' })] },
+        { toolCalls: [
+          call('ap_with_plan', 'apply_patch', { path: 'target.txt', search: 'ALPHA', replace: 'ALPHA2' }),
+          call('pl_done_1', 'plan', { itemId: '1', status: 'done', evidence: 'Part 1 done' }),
+        ] },
+        { text: 'All done.' },
+      ];
+      const run = await built.engine.startTurn({
+        sessionId: built.session.id,
+        agentId: built.agent.id,
+        content: '/plan Two-part target edit',
+        wait: true,
+      });
+      expect(run.status).toBe('completed');
+      const toolMsgs = built.store.listMessages(built.session.id).filter((m) => m.role === 'tool' && m.runId === run.id);
+      const firstEditOut = toolMsgs.find((m) => m.toolCallId === 'ap_no_plan')?.content ?? '';
+      expect(firstEditOut).toContain('[plan] 0/2 done · next step #1: "Write Part 1: setup"');
+      expect(firstEditOut).toContain('plan({ itemId: "1", status: "done"');
+
+      const secondEditOut = toolMsgs.find((m) => m.toolCallId === 'ap_with_plan')?.content ?? '';
+      expect(secondEditOut).not.toContain('[plan]');
+    } finally {
+      await built.app.close();
+    }
+  });
 });

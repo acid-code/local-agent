@@ -161,7 +161,7 @@ export function exitPlanModeTool(): Tool {
       ctx.setFocus?.(summary ? summary.slice(0, 60) : 'Executing plan', 'editing');
       const listed = steps.map((s, i) => `${i + 1}. [pending] ${s}`).join('\n');
       const checkLines = checks.length ? `\nAcceptance checks (verified before you finish):\n${checks.map((c) => `- ${c}`).join('\n')}` : '';
-      return `Exited plan mode. File edits and execution tools are now unlocked (stage: implement).\nPlan:\n${listed}${checkLines}\nMark each step doing/done with evidence using plan({ itemId: "1", status: "done", evidence: "..." }).`;
+      return `Exited plan mode. File edits and execution tools are now unlocked (stage: implement).\nPlan:\n${listed}${checkLines}\nFollow the steps in exact order (do not drift from each step's text). Right after finishing each step, call plan({ itemId: "<number>", status: "done", evidence: "..." }) before starting the next step.`;
     },
   };
 }
