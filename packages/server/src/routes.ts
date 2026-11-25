@@ -2482,7 +2482,8 @@ export function buildLiveSlotStatus(slot: LlamaRawSlot | null | undefined, label
       prefillPct: activePrefill.prefillPct,
       promptPct: activePrefill.promptPct,
       cacheHitPct: activePrefill.cacheHitPct,
-      prefillTokPerSec: activePrefill.prefillTokPerSec,
+      prefillTokPerSec: activePrefill.recentTokPerSec ?? activePrefill.prefillTokPerSec,
+      prefillEtaSec: activePrefill.etaSec,
       exactProgress: true,
     };
   }
@@ -2503,6 +2504,7 @@ export function buildLiveSlotStatus(slot: LlamaRawSlot | null | undefined, label
       promptPct: 100,
       cacheHitPct: total > 0 ? Math.min(100, Math.round((rawCached / total) * 100)) : null,
       prefillTokPerSec: null,
+      prefillEtaSec: null,
       exactProgress: true,
     };
   }
@@ -2522,6 +2524,7 @@ export function buildLiveSlotStatus(slot: LlamaRawSlot | null | undefined, label
       promptPct: null,
       cacheHitPct: null,
       prefillTokPerSec: null,
+      prefillEtaSec: null,
       exactProgress: false,
     };
   }
@@ -2540,6 +2543,7 @@ export function buildLiveSlotStatus(slot: LlamaRawSlot | null | undefined, label
     promptPct: rawPromptTokens > 0 ? 100 : null,
     cacheHitPct: (rawCached > 0 || rawProcessed > 0) && rawPromptTokens > 0 ? Math.min(100, Math.round((rawCached / rawPromptTokens) * 100)) : null,
     prefillTokPerSec: null,
+    prefillEtaSec: null,
     exactProgress: false,
   };
 }

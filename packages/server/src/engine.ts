@@ -1201,6 +1201,7 @@ export class Engine {
             throw err;
           }
         }
+        let prevPrefill: PrefillSnapshot | null = null;
         for await (const event of provider.complete({
           model: model.apiName, messages: built.messages, tools, signal: streamAbort.signal,
           paceMs: model.profileId === 'rehearsal' && process.env.NODE_ENV !== 'test' ? 10 : 0,
@@ -1214,7 +1215,8 @@ export class Engine {
         })) {
           if (signal.aborted) throw new StopError();
           if (event.type === 'progress') {
-            const snapshot = computePrefillSnapshot(event.progress);
+            const snapshot = computePrefillSnapshot(event.progress, prevPrefill);
+            prevPrefill = snapshot;
             const live = this.liveStreams.get(run.id);
             if (live) live.prefill = snapshot;
             if (llamaServerLabel) this.livePrefills.set(llamaServerLabel, { runId: run.id, snapshot, updatedAt: Date.now() });

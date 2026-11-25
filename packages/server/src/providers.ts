@@ -77,11 +77,13 @@ export interface PrefillSnapshot {
   cacheHitPct: number;
   timeMs: number;
   prefillTokPerSec: number | null;
+  recentTokPerSec: number | null;
+  etaSec: number | null;
   done: boolean;
 }
 
 /** Exact prefill snapshot from llama-server `prompt_progress` (`total`, `cache`, `processed`, `time_ms`). */
-export function computePrefillSnapshot(p: PromptProgress): PrefillSnapshot {
+export function computePrefillSnapshot(p: PromptProgress, prev?: PrefillSnapshot | null): PrefillSnapshot {
   const total = Math.max(0, Math.round(p.total));
   const cached = Math.min(total, Math.max(0, Math.round(p.cached)));
   const processed = Math.min(total, Math.max(cached, Math.round(p.processed)));
@@ -92,6 +94,21 @@ export function computePrefillSnapshot(p: PromptProgress): PrefillSnapshot {
   const promptPct = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 100;
   const cacheHitPct = total > 0 ? Math.min(100, Math.round((cached / total) * 100)) : 0;
   const prefillTokPerSec = timeMs >= 200 && evaluated > 0 ? Math.round((evaluated / (timeMs / 1000)) * 10) / 10 : null;
+  const samePrompt = Boolean(prev && prev.total === total && prev.cached === cached);
+  let recentTokPerSec: number | null = samePrompt ? (prev!.recentTokPerSec ?? prefillTokPerSec) : prefillTokPerSec;
+  if (samePrompt) {
+    const dEval = evaluated - prev!.evaluated;
+    const dMs = timeMs - prev!.timeMs;
+    if (dEval > 0 && dMs >= 100) {
+      const instant = dEval / (dMs / 1000);
+      const smoothed = prev!.recentTokPerSec != null ? instant * 0.65 + prev!.recentTokPerSec * 0.35 : instant;
+      recentTokPerSec = Math.round(smoothed * 10) / 10;
+    }
+  }
+  const done = total > 0 && processed >= total;
+  const speed = recentTokPerSec ?? prefillTokPerSec;
+  const remaining = Math.max(0, toEval - evaluated);
+  const etaSec = done ? 0 : (speed != null && speed > 0 && remaining > 0 ? Math.max(1, Math.round(remaining / speed)) : null);
   return {
     total,
     cached,
@@ -103,7 +120,9 @@ export function computePrefillSnapshot(p: PromptProgress): PrefillSnapshot {
     cacheHitPct,
     timeMs,
     prefillTokPerSec,
-    done: total > 0 && processed >= total,
+    recentTokPerSec,
+    etaSec,
+    done,
   };
 }
 

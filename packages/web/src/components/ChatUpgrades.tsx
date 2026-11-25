@@ -366,7 +366,18 @@ export interface LivePrefillState {
   cacheHitPct: number;
   timeMs: number;
   prefillTokPerSec: number | null;
+  recentTokPerSec?: number | null;
+  etaSec?: number | null;
   done: boolean;
+}
+
+function formatPrefillEta(sec: number | null | undefined): string | null {
+  if (sec == null || !Number.isFinite(sec) || sec <= 0) return null;
+  const rounded = Math.round(sec);
+  if (rounded < 60) return `~${rounded}s`;
+  const m = Math.floor(rounded / 60);
+  const s = rounded % 60;
+  return s > 0 ? `~${m}m ${s}s` : `~${m}m`;
 }
 
 /** Cursor-style expandable decision & tool-call timeline (live while running, inspectable after). */
@@ -387,6 +398,7 @@ interface LiveLlmTelemetry {
     promptPct?: number | null;
     cacheHitPct: number | null;
     prefillTokPerSec?: number | null;
+    prefillEtaSec?: number | null;
     exactProgress?: boolean;
     speculative: boolean;
     speculativeType: string | null;
@@ -464,7 +476,8 @@ function ModelLiveViz({
     : slot?.promptPct ?? (total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0);
   const toEval = activePrefill ? activePrefill.toEval : (slot?.promptNewTotal ?? Math.max(0, total - cached));
   const evaluated = activePrefill ? activePrefill.evaluated : (slot?.promptNewProcessed ?? Math.max(0, processed - cached));
-  const prefillTps = activePrefill ? activePrefill.prefillTokPerSec : (slot?.prefillTokPerSec ?? null);
+  const prefillTps = activePrefill ? (activePrefill.recentTokPerSec ?? activePrefill.prefillTokPerSec) : (slot?.prefillTokPerSec ?? null);
+  const prefillEta = formatPrefillEta(activePrefill ? activePrefill.etaSec : slot?.prefillEtaSec);
   const cacheLabel = activePrefill ? activePrefill.cacheHitPct : (slot?.cacheHitPct ?? null);
   const gttPct = gpu?.gttUsedGiB != null && gpu?.gttTotalGiB ? Math.min(100, Math.round((gpu.gttUsedGiB / gpu.gttTotalGiB) * 100)) : 0;
   const ramPct = cpu?.ramTotalGiB ? Math.min(100, Math.round((cpu.ramUsedGiB / cpu.ramTotalGiB) * 100)) : 0;
@@ -477,7 +490,7 @@ function ModelLiveViz({
             <span>
               {isPrefilling
                 ? workPct != null
-                  ? `Prefill ${workPct}%${prefillTps ? ` · ${prefillTps} t/s` : ''}`
+                  ? `Prefill ${workPct}%${prefillTps ? ` · ${prefillTps} t/s` : ''}${prefillEta ? ` · ${prefillEta} left` : ''}`
                   : 'Prefilling…'
                 : isGenerating
                   ? `Generating${slot?.nDecoded ? ` · ${slot.nDecoded} tok` : ''}`
@@ -609,6 +622,7 @@ export function DecisionTimeline({
   const isActivelyStreaming = Boolean(liveTokPerSec && liveTokPerSec > 0) || (!livePrefill && Boolean(telemetry?.slot?.isGenerating));
   const prefillingNow = Boolean(live && activeModelStepId && !isActivelyStreaming && (livePrefill || telemetry?.slot?.isPrefilling));
   const prefillPct = prefillingNow ? (livePrefill ? livePrefill.prefillPct : (telemetry?.slot?.prefillPct ?? null)) : null;
+  const prefillEta = prefillingNow ? formatPrefillEta(livePrefill ? livePrefill.etaSec : telemetry?.slot?.prefillEtaSec) : null;
 
   return (
     <div className={`decision-trace${docked ? ' docked' : ''}${live ? ' live' : ''}`}>
@@ -619,7 +633,7 @@ export function DecisionTimeline({
           <span>
             {activeStep
               ? prefillPct != null
-                ? `${activeStep.name} · Prefill ${prefillPct}%`
+                ? `${activeStep.name} · Prefill ${prefillPct}%${prefillEta ? ` · ${prefillEta}` : ''}`
                 : prefillingNow && activeStep.id === activeModelStepId
                   ? `${activeStep.name} · Prefilling…`
                   : t('Running {0}…', [activeStep.name])
@@ -627,7 +641,7 @@ export function DecisionTimeline({
           </span>
         </button>
         {prefillPct != null ? (
-          <span className="decision-tps mono">{prefillPct}%</span>
+          <span className="decision-tps mono">{prefillPct}%{prefillEta ? ` · ${prefillEta}` : ''}</span>
         ) : shownTps != null && shownTps > 0 ? (
           <span className="decision-tps mono" title={live ? 'Live decode speed' : 'Average decode speed'}>
             {shownTps.toFixed(1)} t/s
@@ -648,7 +662,7 @@ export function DecisionTimeline({
             const summary = step.kind === 'routing'
               ? String((step.output as { reason?: string } | null)?.reason || step.name)
               : step.kind === 'model'
-                ? `${step.name}${isLiveModel && prefillPct != null ? ` · Prefill ${prefillPct}%` : isLiveModel && prefillingNow ? ' · Prefilling…' : step.tokensOut ? ` · ${step.tokensOut} tok` : ''}`
+                ? `${step.name}${isLiveModel && prefillPct != null ? ` · Prefill ${prefillPct}%${prefillEta ? ` (${prefillEta})` : ''}` : isLiveModel && prefillingNow ? ' · Prefilling…' : step.tokensOut ? ` · ${step.tokensOut} tok` : ''}`
                 : step.name;
             return (
               <li key={step.id} className={`decision-item ${step.status}`}>

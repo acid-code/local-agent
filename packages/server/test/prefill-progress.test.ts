@@ -278,4 +278,41 @@ describe('prefill progress accuracy', () => {
       else process.env.LLAMA_SERVER_URL = prevLlamaUrl;
     }
   });
+
+  it('computes recentTokPerSec and realistic etaSec as prefill slows down and forwards them in buildLiveSlotStatus', () => {
+    // Fast initial batch: 4000 tokens in 1s -> 4000 t/s, 12000 remaining -> ~3s ETA.
+    const s1 = computePrefillSnapshot({ total: 16000, cached: 0, processed: 4000, timeMs: 1000 });
+    expect(s1.prefillTokPerSec).toBe(4000);
+    expect(s1.recentTokPerSec).toBe(4000);
+    expect(s1.etaSec).toBe(3);
+
+    // Noticeably slower second batch: +1000 tokens in +2s -> 500 t/s instant.
+    // Cumulative would say 5000/3s = 1666.7 t/s (~7s left), whereas smoothed recent speed (0.65*500 + 0.35*4000 = 1725 t/s? No, next slower batch drops further).
+    const s2 = computePrefillSnapshot({ total: 16000, cached: 0, processed: 5000, timeMs: 3000 }, s1);
+    expect(s2.prefillTokPerSec).toBe(1666.7);
+    expect(s2.recentTokPerSec).toBe(1725);
+    expect(s2.etaSec).toBe(6);
+
+    // Continued slow batch: +1000 tokens in +5s -> 200 t/s instant (0.65*200 + 0.35*1725 = 733.8 t/s), much slower than cumulative 6000/8s=750!
+    // One more 200 t/s batch drops smoothed speed even further (~386.8 t/s vs cumulative ~615.4) and increases remaining ETA accordingly.
+    const s3 = computePrefillSnapshot({ total: 16000, cached: 0, processed: 6000, timeMs: 8000 }, s2);
+    const s4 = computePrefillSnapshot({ total: 16000, cached: 0, processed: 7000, timeMs: 13000 }, s3);
+    expect(s4.recentTokPerSec!).toBeLessThan(s4.prefillTokPerSec!);
+    expect(s4.etaSec).toBe(Math.max(1, Math.round(9000 / s4.recentTokPerSec!)));
+
+    const slot = buildLiveSlotStatus({
+      is_processing: true,
+      n_ctx: 32768,
+      n_prompt_tokens: 7000,
+      n_prompt_tokens_processed: 7000,
+      n_prompt_tokens_cache: 0,
+      next_token: [{ n_decoded: 0 }],
+    }, 'main', s4);
+    expect(slot.prefillTokPerSec).toBe(s4.recentTokPerSec);
+    expect(slot.prefillEtaSec).toBe(s4.etaSec);
+
+    const doneSnap = computePrefillSnapshot({ total: 16000, cached: 0, processed: 16000, timeMs: 58000 }, s4);
+    expect(doneSnap.etaSec).toBe(0);
+    expect(doneSnap.done).toBe(true);
+  });
 });
