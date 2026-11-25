@@ -10,6 +10,7 @@ import { runPreCommitSemgrep } from './semgrep.js';
 import { OWNER_ID, foreignPath } from './accounts.js';
 import type { Store } from './db.js';
 import type { Tool, ToolContext } from './tools.js';
+import { runPostEditDiagnostics } from './diagnostics.js';
 import { nid, now } from './util.js';
 
 export interface PlanItem { id: string; text: string; status: string; note: string | null; position: number }
@@ -417,7 +418,7 @@ export const CODING_TOOLS: Tool[] = [
     async execute(args, ctx) {
       if (!ctx.sessionId) throw new Error('No session.');
       const edits = editsOf(args);
-      const files: { path: string; before: string | null; after: string }[] = [];
+      const files: { path: string; root: string; before: string | null; after: string }[] = [];
       const diffs: string[] = [];
       for (const edit of edits) {
         const allowed = allowedRoot(ctx, edit.path);
@@ -427,7 +428,7 @@ export const CODING_TOOLS: Tool[] = [
         let before: string | null = null;
         try { before = await fs.readFile(full, 'utf8'); } catch { before = null; }
         const after = before == null ? edit.replace : applySearchReplace(before, edit.search, edit.replace);
-        files.push({ path: full, before, after });
+        files.push({ path: full, root: allowed.root, before, after });
         diffs.push(lineDiff(path.relative(ctx.workspace, full), before ?? '', after));
       }
       const id = nid('edit');
@@ -438,7 +439,13 @@ export const CODING_TOOLS: Tool[] = [
         await fs.mkdir(path.dirname(file.path), { recursive: true });
         await fs.writeFile(file.path, file.after, 'utf8');
       }
-      return `Checkpoint ${id}\n${diffs.join('\n')}`;
+      const diag = await runPostEditDiagnostics(files.map((file) => file.path), {
+        workspace: ctx.workspace,
+        roots: files.map((file) => file.root),
+        workbench: ctx.workbench,
+        enabled: ctx.autoDiagnostics,
+      }).catch(() => '');
+      return `Checkpoint ${id}\n${diffs.join('\n')}${diag}`;
     },
   },
   {

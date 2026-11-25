@@ -201,6 +201,8 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       goodModelId: z.string().nullable().optional(),
       autoResume: z.boolean().optional(),
       personaAutoStart: z.boolean().optional(),
+      compactCodingPrompt: z.boolean().optional(),
+      autoDiagnostics: z.boolean().optional(),
       sandbox: z.enum(['docker-or-host', 'docker-only', 'host']).optional(),
       maxSteps: z.number().int().min(1).max(40).optional(),
       outputReserveTokens: z.number().int().min(128).max(32000).optional(),

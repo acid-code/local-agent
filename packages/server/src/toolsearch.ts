@@ -13,6 +13,12 @@ export const CORE_TOOLS = [
   'spawn_agent', 'helpers', 'share_file', 'find_tools',
 ];
 
+/** Lean coding-first core toolset for Pi/Cline-style compact coding mode (discoverable tools stay reachable via find_tools). */
+export const COMPACT_CODING_TOOLS = [
+  'read_file', 'write_file', 'apply_patch', 'list_dir', 'grep', 'glob', 'shell', 'git',
+  'plan', 'enter_plan_mode', 'exit_plan_mode', 'read_output', 'set_focus', 'spawn_agent', 'helpers',
+];
+
 /** Below this many allowed tools the whole list is offered and find_tools is not needed. */
 export const LEAN_MIN_TOOLS = 18;
 /** Tools pre-loaded from the request text at the start of a run, so obvious needs skip a find_tools round trip. */

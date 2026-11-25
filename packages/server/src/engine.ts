@@ -40,7 +40,8 @@ import type { Settings } from './settings.js';
 import { CODING_TOOLS, readPlan, replacePlan } from './coding.js';
 import { formatCitations, searchKnowledge } from './kb.js';
 import { kbSearchTool, loadSkillTool, setFocusTool, toolsFor, type Tool, type ToolContext } from './tools.js';
-import { CORE_TOOLS, LEAN_MIN_TOOLS, SEED_TOOLS, findToolsTool, leanMenuEnabled, rankTools } from './toolsearch.js';
+import { COMPACT_CODING_TOOLS, CORE_TOOLS, LEAN_MIN_TOOLS, SEED_TOOLS, findToolsTool, leanMenuEnabled, rankTools } from './toolsearch.js';
+import { FENCED_EDIT_HINT, extractFencedEdits } from './fenced-edits.js';
 import { listSkills, runSkillScript, skillCatalog } from './skills.js';
 import { getWorkshop, workshopBrief } from './workshops.js';
 import { chatWorkspaceBrief, chatWorkspacePaths, getChatWorkspaces, setChatWorkspaces } from './chat-workspaces.js';
@@ -908,7 +909,8 @@ export class Engine {
       if (steeringAgent && !current.cursor.helperId) {
         const steerModel = current.modelId ? this.store.getModel(current.modelId) : null;
         const steerStable = Boolean(steerModel && this.cacheFriendly(steerModel));
-        const offered = this.tools(steeringAgent, sessionMode, current.cursor.stage, current.cursor.toolSubset, false, current, false, steerStable);
+        const steerCompact = this.isCompactCoding(steeringAgent, sessionMode, current, steerModel, settings);
+        const offered = this.tools(steeringAgent, sessionMode, current.cursor.stage, current.cursor.toolSubset, false, current, false, steerStable, steerCompact);
         const offeredNames = new Set(offered.map((t) => t.name));
         const contract = contractForAgent(steeringAgent.name);
         const { tools: allPermitted, servers } = this.allowedTools(steeringAgent, sessionMode, current.cursor.stage, current.cursor.toolSubset, false, steerStable);
@@ -1102,9 +1104,10 @@ export class Engine {
         : (Boolean(current.cursor.reasoning) || autoEffort === 'high' || autoEffort === 'medium' || Boolean(providerRow && (isLlamaServerProvider(providerRow) || isUncensoredProvider(providerRow))));
     const nativeThinking = thinkingOn || (/(?:qwen3|flint|deepseek[-_]?r1|qwq|\bo[134]\b)/i.test(`${model.apiName} ${model.name}`) && !/-instruct\b/i.test(model.apiName));
     const toolless = Boolean(current.cursor.noTools) || this.toolSupportOf(model) === false;
+    const compactCoding = this.isCompactCoding(agent, sessionForCtx?.mode, current, model, settings);
     const tools = toolless
       ? []
-      : this.tools(agent, sessionForCtx?.mode, current.cursor.stage, current.cursor.toolSubset, Boolean(current.cursor.helperId), current, false, this.cacheFriendly(model))
+      : this.tools(agent, sessionForCtx?.mode, current.cursor.stage, current.cursor.toolSubset, Boolean(current.cursor.helperId), current, false, this.cacheFriendly(model), compactCoding)
           .filter((tool) => !(nativeThinking && tool.name === 'think'))
           .map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
     const repoTask = Boolean(sessionForCtx?.mode === 'code' || sessionForCtx?.workshopId || current.cursor.stage || turnRoots(this.store, current, this.libraryDir).length > 0);
@@ -1377,6 +1380,17 @@ export class Engine {
       if (recovered.calls.length || recovered.truncated) {
         text = recovered.text;
         if (!current.cursor.noTools && recovered.calls.length) toolCalls = recovered.calls;
+      }
+    }
+    if (!toolCalls?.length && !current.cursor.noTools && current.cursor.stage !== 'plan' && /`{3,}(?:file|edit):/.test(text)) {
+      const offeredSet = new Set(tools.map((t) => t.name));
+      if (offeredSet.has('write_file') || offeredSet.has('apply_patch')) {
+        const fenced = extractFencedEdits(text);
+        const validCalls = fenced.calls.filter((call) => offeredSet.has(call.name));
+        if (validCalls.length) {
+          text = validCalls.length === fenced.calls.length ? fenced.text : text;
+          toolCalls = validCalls;
+        }
       }
     }
     let emptyAnswerFailed = false;
@@ -2057,8 +2071,12 @@ export class Engine {
     const rulesNote = session ? projectRules(chatWorkspacePaths(this.store, run.sessionId, session.ownerId || OWNER_ID), disabledRules(this.store, run.sessionId)) : '';
     // Everything this persona can reach (found or not): notes about skills and teammates name what find_tools can surface.
     const cacheFriendly = this.cacheFriendly(model);
-    const offeredTools = this.tools(agent, session?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId), run, true, cacheFriendly);
+    const compactCoding = this.isCompactCoding(agent, session?.mode, run, model, settings);
+    const offeredTools = this.tools(agent, session?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId), run, true, cacheFriendly, compactCoding);
     const toolNames = offeredTools.map((tool) => tool.name);
+    const menuTools = (run.cursor.noTools || this.toolSupportOf(model) === false)
+      ? []
+      : this.tools(agent, session?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId), run, false, cacheFriendly, compactCoding);
     const toolSteps = run.cursor.helperId || run.cursor.turn < 4 ? [] : this.store.listSteps(run.id).filter((step) => step.kind === 'tool');
     const nudge = run.cursor.helperId ? '' : skillNudge(run.cursor.turn, toolNames, {
       proposed: toolSteps.some((step) => step.name === 'propose_skill'),
@@ -2068,7 +2086,7 @@ export class Engine {
     const languageNote = languageHint(this.replyLang(agent, user?.content ?? ''));
     const recoveryNote = run.cursor.recovery?.note ?? '';
     // Persona awareness: let each persona know what teammates exist for consult_agent / spawn_agent.
-    const teammates = this.store.listAgents(agent.ownerId || OWNER_ID).filter((a) => a.id !== agent.id && !a.hidden);
+    const teammates = compactCoding ? [] : this.store.listAgents(agent.ownerId || OWNER_ID).filter((a) => a.id !== agent.id && !a.hidden);
     const teamNote = [
       teammates.length && (toolNames.includes('consult_agent') || toolNames.includes('spawn_agent'))
         ? `\n\nAvailable teammates you can consult or delegate to: ${teammates.slice(0, 12).map((t) => `${t.name}${t.title ? ` (${t.title})` : ''}`).join(', ')}.`
@@ -2076,7 +2094,7 @@ export class Engine {
       toolNames.includes('spawn_agent') && !run.cursor.helperId
         ? '\n\nMini-agents: use spawn_agent with role="research" (fast 4B read-only search/facts), role="verify" (fast 4B test/build runner), or role="coder" (main model in an isolated git worktree) and pass structured goal/scope/done_when. Collect results with helpers({action:"wait"}).'
         : '',
-      (() => {
+      compactCoding ? '' : (() => {
         const caps: string[] = [];
         if (toolNames.includes('make_slides')) caps.push('make_slides (real designed .pptx decks: hero title, split picture slides, cards, big-number stats, charts, kickers, source lines, notes. Always give most slides a real picture via image.query (short English search words) and vary layouts; read the DESIGN CHECK in the result and fix it with revise_file_id before replying. Never ship a plain text-only deck)');
         if (toolNames.includes('fetch_image')) caps.push('fetch_image (search and download real high-resolution PNG/JPEG photos & scientific/medical diagrams from Wikimedia Commons or SearXNG as [file:<id>] to embed in slides or chat)');
@@ -2094,10 +2112,13 @@ export class Engine {
           : '';
       })(),
     ].join('');
-    const searchFirstNote = toolNames.includes('web_search')
+    const searchEnabled = compactCoding ? (run.cursor.extraTools ?? []).includes('web_search') : toolNames.includes('web_search');
+    const searchFirstNote = searchEnabled
       ? '\n\nWeb lookup rule: call web_search (SearXNG) first to discover real URLs and facts; never invent URLs. When opening a website, store/shopping page (AliExpress, Amazon, eBay, etc.), product listing, live prices, JS-heavy page, or whenever the user asks to browse/surf/open a site, prefer browse (live browser) instead of web_fetch. Reserve web_fetch for lightweight static articles, manuals, or docs. If web_fetch returns nav chrome, missing prices, empty text, or a block/403, switch immediately to browse — do not keep calling web_fetch.'
       : '';
-    const sharedRepoNote = sharedRepoBrief(this.store);
+    const sharedRepoNote = compactCoding && chatWorkspaces.trim() ? '' : sharedRepoBrief(this.store);
+    const citeHint = compactCoding && !hasKb ? '' : CITE_HINT;
+    const fencedHint = compactCoding ? `\n\n${FENCED_EDIT_HINT}` : '';
     const todayIso = (run.startedAt || new Date().toISOString()).slice(0, 10);
     const dateNote = `\n\nCurrent date: ${todayIso} (current year is ${todayIso.slice(0, 4)}; use ${todayIso.slice(0, 4)} when searching for current news, models, prices, or releases).`;
     // llama-server reuses the longest cached prompt prefix, and the hybrid Qwen3.6 cannot roll back into the middle of
@@ -2105,8 +2126,8 @@ export class Engine {
     // at the first step, and notes (recovery, steering, nudges) are pinned once after the message that was last when
     // they appeared, instead of being rewritten into an earlier message each step.
     const system = cacheFriendly
-      ? `${agent.systemPrompt}${dateNote}${sharedRepoNote}${rulesNote}${memoryNote}${teamNote}${searchFirstNote}${kbHint}${CITE_HINT}${HONESTY_RULE}${run.cursor.helperId ? '' : TASKS_HINT}${languageNote}`
-      : `${agent.systemPrompt}${dateNote}${sharedRepoNote}${chatWorkspaces}${rulesNote}${memoryNote}${teamNote}${searchFirstNote}${stageNote}${roleNote}${kbHint}${CITE_HINT}${HONESTY_RULE}${run.cursor.helperId ? '' : TASKS_HINT}${nudge}${languageNote}${recoveryNote}`;
+      ? `${agent.systemPrompt}${dateNote}${sharedRepoNote}${rulesNote}${memoryNote}${teamNote}${searchFirstNote}${kbHint}${citeHint}${HONESTY_RULE}${run.cursor.helperId ? '' : TASKS_HINT}${fencedHint}${languageNote}`
+      : `${agent.systemPrompt}${dateNote}${sharedRepoNote}${chatWorkspaces}${rulesNote}${memoryNote}${teamNote}${searchFirstNote}${stageNote}${roleNote}${kbHint}${citeHint}${HONESTY_RULE}${run.cursor.helperId ? '' : TASKS_HINT}${fencedHint}${nudge}${languageNote}${recoveryNote}`;
     const preambleGuess = `${system}\n${notes.map((note) => note.content).join('\n')}`;
     if (model.providerId === 'prov_gemini' && estimateTokens(preambleGuess, 'gemini') > budget * 0.75) {
       const key = process.env.GEMINI_API_KEY;
@@ -2116,8 +2137,8 @@ export class Engine {
       }
     }
     const tok = model.tokenizer as 'gemma4';
-    const toolSchemaTokens = offeredTools.length
-      ? estimateTokens(JSON.stringify(offeredTools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }))), tok)
+    const toolSchemaTokens = menuTools.length
+      ? estimateTokens(JSON.stringify(menuTools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }))), tok)
       : 0;
     const optionalParts = [{ label: 'knowledge base passages', text: kbNote }, { label: 'workshop brief', text: workshopNote }, { label: 'skills catalog', text: skillNote }].filter((part) => part.text.trim());
     const frozen = cacheFriendly && run.cursor.frozen?.modelId === model.id ? run.cursor.frozen : undefined;
@@ -2156,7 +2177,7 @@ export class Engine {
       messages: this.uncoveredMessages(messages, summaries).map((message) => ({ id: message.id, role: message.role as 'user', content: message.content })),
       run: { messageIds: runMessageIds, digestIds: run.cursor.digestIds, historyFloorId: run.cursor.historyFloorId },
       breakdownHints: {
-        systemPrompt: estimateTokens(`${CITE_HINT}${HONESTY_RULE}${TASKS_HINT}${searchFirstNote}${languageNote}${stageNote}${roleNote}${recoveryNote}`, tok),
+        systemPrompt: estimateTokens(`${citeHint}${HONESTY_RULE}${run.cursor.helperId ? '' : TASKS_HINT}${fencedHint}${searchFirstNote}${languageNote}${stageNote}${roleNote}${recoveryNote}`, tok),
         personaAndTools: estimateTokens(`${agent.systemPrompt}${teamNote}${skillNote}`, tok) + toolSchemaTokens,
         memory: estimateTokens(`${memoryNote}${kbHint}${kbNote}`, tok),
         files: estimateTokens(`${sharedRepoNote}${chatWorkspaces}${rulesNote}${workshopNote}`, tok),
@@ -2586,12 +2607,21 @@ export class Engine {
     return this.refreshing;
   }
 
+  /** Pi/Cline-style lean coding prompt + compact core tool menu for local coding runs. */
+  private isCompactCoding(agent: Agent, sessionMode: string | undefined, run: RunRow, model: ModelRow | null | undefined, settings: Settings): boolean {
+    if (settings.compactCodingPrompt === false || process.env.LA_COMPACT_CODING === '0') return false;
+    const slug = contractForAgent(agent.name)?.slug;
+    if (slug === 'researcher' || agent.templateId === 'researcher') return false;
+    if (!model?.local && process.env.LA_COMPACT_CODING !== '1') return false;
+    return sessionMode === 'code' || Boolean(run.cursor.stage) || Boolean(run.cursor.worktreePath) || slug === 'coder' || agent.templateId === 'coder';
+  }
+
   /**
    * What the model is offered. Small allowlists get everything; larger ones get a lean menu (declared tools plus
    * essentials), find_tools, and whatever this run found or was seeded with, appended in order so the prefix holds.
    * `all` returns every permitted tool (for executing a call), plus find_tools.
    */
-  private tools(agent: Agent, sessionMode?: string, stage?: 'plan' | 'implement', subset?: string[], helper = false, run?: RunRow, all = false, stablePrefix = false): Tool[] {
+  private tools(agent: Agent, sessionMode?: string, stage?: 'plan' | 'implement', subset?: string[], helper = false, run?: RunRow, all = false, stablePrefix = false, compactCoding = false): Tool[] {
     const { tools: allowed, servers } = this.allowedTools(agent, sessionMode, stage, subset, helper, stablePrefix);
     // Tools the persona's contract would reject are never offered (they only cost tokens and a failed call).
     const contract = contractForAgent(agent.name);
@@ -2600,10 +2630,19 @@ export class Engine {
       ? list.filter((tool) => tool.name !== 'tasks')
       : list;
     if (!leanMenuEnabled() || permitted.length <= LEAN_MIN_TOOLS) return all ? permitted : hideDuplicateTasks(permitted);
-    const core = new Set<string>([...agent.toolAllowlist, ...CORE_TOOLS]);
-    if (stage === 'plan' || (stablePrefix && !helper && !subset)) for (const name of ['plan', 'recall', 'consult_agent', 'enter_plan_mode', 'exit_plan_mode']) core.add(name);
-    if (core.has('make_slides')) core.add('slide_draft');
-    if (stage === 'implement' || sessionMode === 'code' || (stablePrefix && !helper && !subset)) for (const tool of CODING_TOOLS) core.add(tool.name);
+    const core = compactCoding
+      ? new Set<string>(COMPACT_CODING_TOOLS)
+      : new Set<string>([...agent.toolAllowlist, ...CORE_TOOLS]);
+    if (stage === 'plan' || (stablePrefix && !helper && !subset)) {
+      const planNames = compactCoding ? ['plan', 'enter_plan_mode', 'exit_plan_mode'] : ['plan', 'recall', 'consult_agent', 'enter_plan_mode', 'exit_plan_mode'];
+      for (const name of planNames) core.add(name);
+    }
+    if (!compactCoding && core.has('make_slides')) core.add('slide_draft');
+    if (stage === 'implement' || sessionMode === 'code' || (stablePrefix && !helper && !subset)) {
+      for (const tool of CODING_TOOLS) {
+        if (!compactCoding || COMPACT_CODING_TOOLS.includes(tool.name)) core.add(tool.name);
+      }
+    }
     if (permitted.some((tool) => tool.name === 'plan' && core.has('plan')) && !agent.toolAllowlist.includes('tasks')) core.delete('tasks');
     const base = permitted.filter((tool) => core.has(tool.name));
     const baseNames = new Set(base.map((tool) => tool.name));
@@ -2747,6 +2786,7 @@ export class Engine {
       agent, workspace: run.cursor.worktreePath || agent.workspacePath, signal, docker: this.docker, workbench: this.workbench, browser: this.browser, computer: this.computer, fetchImpl: this.fetchImpl, searxngUrl: settings.searxngUrl || process.env.SEARXNG_URL || '',
       sandbox: settings.sandbox, store: this.store, depth: run.cursor.depth ?? 0,
       sessionId: run.sessionId, runId: run.id, codeApproval: settings.codeApproval,
+      autoDiagnostics: settings.autoDiagnostics !== false && process.env.LA_POST_EDIT_DIAGNOSTICS !== '0',
       secretEnv: () => (member ? {} : this.vault.envFor(agent.id, `run:${run.id}`)),
       libraryDir: this.libraryDir,
       roots: turnRoots(this.store, run, this.libraryDir),

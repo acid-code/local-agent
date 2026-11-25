@@ -5,6 +5,7 @@ import { assessCommand, isBlockedUrl, resolveInside, type WorkPhase } from '@loc
 import { formatCitations, searchKnowledge } from './kb.js';
 import { loadSkill } from './skills.js';
 import { lineDiff } from './coding.js';
+import { runPostEditDiagnostics } from './diagnostics.js';
 import { nid, now } from './util.js';
 import { locatePath, projectPath } from './workshops.js';
 import type { Agent } from './db.js';
@@ -41,6 +42,7 @@ export interface ToolContext {
   setFocus?: (focus: string, phase?: WorkPhase) => void;
   enterPlanMode?: (goal?: string, reason?: string) => void;
   exitPlanMode?: (input: { steps?: string[]; checks?: string[]; summary?: string }) => void;
+  autoDiagnostics?: boolean;
 }
 
 export interface Tool {
@@ -282,10 +284,18 @@ async function writeWorkspaceTarget(args: Record<string, unknown>, ctx: ToolCont
   }
   await fs.mkdir(path.dirname(hit.full), { recursive: true });
   await fs.writeFile(hit.full, next, 'utf8');
+  const diag = !append
+    ? await runPostEditDiagnostics([hit.full], {
+        workspace: ctx.workspace,
+        root: hit.root,
+        workbench: ctx.workbench,
+        enabled: ctx.autoDiagnostics,
+      }).catch(() => '')
+    : '';
   const labelRel = `${hit.label ? `${hit.label}/` : ''}${path.relative(hit.root, hit.full)}`;
   return append
     ? `Appended ${content.length} bytes to ${labelRel} (total ${next.length} bytes).`
-    : `${verb} ${labelRel} (${next.length} bytes).`;
+    : `${verb} ${labelRel} (${next.length} bytes).${diag}`;
 }
 
 export const BUILTIN_TOOLS: Tool[] = [

@@ -50,6 +50,10 @@ export interface Settings {
   modelProfile?: { id: string; hebrew: string | null; at: string } | null;
   /** Whether personas may auto-start each other's runs via send_message / handoff. Default true. */
   personaAutoStart?: boolean;
+  /** Lean <1K-token system preamble and compact core toolset for local coding runs. Default true. */
+  compactCodingPrompt?: boolean;
+  /** Run automatic syntax/type checks after write_file, create_file, and apply_patch. Default true. */
+  autoDiagnostics?: boolean;
 }
 
 export interface ImageGenSettings {
@@ -91,6 +95,8 @@ export const DEFAULT_SETTINGS: Settings = {
   backupTransport: 'none',
   backupTarget: '',
   personaAutoStart: true,
+  compactCodingPrompt: true,
+  autoDiagnostics: true,
   imapHost: '',
   imapPort: 993,
   imapMailbox: 'INBOX',
