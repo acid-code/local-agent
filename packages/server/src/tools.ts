@@ -263,33 +263,39 @@ async function writeWorkspaceTarget(args: Record<string, unknown>, ctx: ToolCont
   if (!hit.write) {
     throw new Error('That file is not in a writable project (shared repos are read-only outside implement/code mode — call exit_plan_mode, switch the chat to code mode, or spawn a coder helper in a worktree).');
   }
+  const append = args.append === true;
   let before: string | null = null;
   try { before = await fs.readFile(hit.full, 'utf8'); } catch { before = null; }
-  if (before != null && args.overwrite !== true) {
+  if (!append && before != null && args.overwrite !== true) {
     const existingLines = before.split('\n').length;
     if (existingLines > 100) {
       throw new Error(`File ${target} already has ${existingLines} lines. Use apply_patch for targeted edits instead of replacing the whole file (or pass overwrite: true if a full rewrite is intended).`);
     }
   }
   const content = String(args.content ?? '');
+  const next = append && before != null ? `${before}${content}` : content;
   if (ctx.sessionId) {
     const rel = path.relative(ctx.workspace, hit.full);
     ctx.store.db.prepare('INSERT INTO edit_batches (id, session_id, run_id, label, files, diff, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
-      nid('edit'), ctx.sessionId, ctx.runId ?? null, target, JSON.stringify([{ path: hit.full, before, after: content }]), lineDiff(rel, before ?? '', content), now(),
+      nid('edit'), ctx.sessionId, ctx.runId ?? null, target, JSON.stringify([{ path: hit.full, before, after: next }]), lineDiff(rel, before ?? '', next), now(),
     );
   }
   await fs.mkdir(path.dirname(hit.full), { recursive: true });
-  await fs.writeFile(hit.full, content, 'utf8');
-  return `${verb} ${hit.label ? `${hit.label}/` : ''}${path.relative(hit.root, hit.full)} (${content.length} bytes).`;
+  await fs.writeFile(hit.full, next, 'utf8');
+  const labelRel = `${hit.label ? `${hit.label}/` : ''}${path.relative(hit.root, hit.full)}`;
+  return append
+    ? `Appended ${content.length} bytes to ${labelRel} (total ${next.length} bytes).`
+    : `${verb} ${labelRel} (${next.length} bytes).`;
 }
 
 export const BUILTIN_TOOLS: Tool[] = [
   {
     name: 'create_file',
-    description: 'Create or replace a text file in the agent workspace. Alias for write_file, for clients that use create-file names.',
+    description: 'Create or replace a text file in the agent workspace (alias for write_file). Keep each call under ~150 lines / ~6,000 chars so tool JSON does not truncate; for larger outputs, split into modular files or write the first chunk and call again with append=true.',
     parameters: obj({
       path: { type: 'string' },
       content: { type: 'string' },
+      append: { type: 'boolean', description: 'When true, append content to the end of the file instead of replacing it (ideal for building large files in chunks).' },
       overwrite: { type: 'boolean', description: 'Set true only when intentionally replacing an existing file of >100 lines.' },
     }, ['path', 'content']),
     mutates: () => true,
@@ -317,7 +323,7 @@ export const BUILTIN_TOOLS: Tool[] = [
   },
   {
     name: 'read_file',
-    description: 'Read a text file in the workspace or a workshop project. Prefix the path with the project label, such as server/src/index.ts. Pass startLine and endLine (1-based) to read slices of large files, or outlineOnly=true to view headings/symbols first.',
+    description: 'Read a text file (up to 1 MB; slices cap at 400 lines / 16,000 chars per call). Prefix with project label if needed, pass startLine/endLine (1-based) to page through large files, or outlineOnly=true to view headings/symbols first.',
     parameters: obj({
       path: { type: 'string' },
       startLine: { type: 'number', description: 'Optional 1-based starting line.' },
@@ -360,10 +366,11 @@ export const BUILTIN_TOOLS: Tool[] = [
   },
   {
     name: 'write_file',
-    description: 'Write a text file inside the agent workspace. This changes disk and needs approval.',
+    description: 'Write a text file in the agent workspace (needs approval; existing files >100 lines require apply_patch or overwrite=true). Keep each call under ~150 lines / ~6,000 chars; for larger files, write the initial part and append chunks with append=true.',
     parameters: obj({
       path: { type: 'string' },
       content: { type: 'string' },
+      append: { type: 'boolean', description: 'When true, append content to the end of the file instead of replacing it (ideal for building large files in chunks).' },
       overwrite: { type: 'boolean', description: 'Set true only when intentionally replacing an existing file of >100 lines.' },
     }, ['path', 'content']),
     mutates: () => true,
@@ -374,7 +381,7 @@ export const BUILTIN_TOOLS: Tool[] = [
   },
   {
     name: 'shell',
-    description: 'Run a shell command. Runs in the shared workbench computer (Debian, node 22, python3, git; network on; installs and caches persist; Python projects get a .venv automatically) when Docker is available, otherwise a workspace-jailed host process. Destructive commands need approval.',
+    description: 'Run a shell command (hard limit: 4,000 characters; 64 KB captured output). Runs in the shared workbench container (Debian, node 22, python3, git). Never embed large files or heredocs (cat << EOF) in shell — use write_file (with append=true for chunks) or apply_patch, then run short commands.',
     parameters: obj({
       command: { type: 'string' },
       cwd: { type: 'string', description: 'Workshop project label, when this chat has more than one.' },
@@ -392,7 +399,7 @@ export const BUILTIN_TOOLS: Tool[] = [
     async execute(args, ctx) {
       const command = String(args.command || '').trim();
       if (!command) throw new Error('Missing command.');
-      if (command.length > 4000) throw new Error('Command is too long.');
+      if (command.length > 4000) throw new Error(`Command is too long (${command.length.toLocaleString('en-US')} chars; hard limit is 4,000 chars). Do NOT embed large files or heredocs in shell — write files with write_file (use append=true for chunks) or apply_patch, then run a short command.`);
       if (assessCommand(command) === 'blocked') throw new Error('That command is blocked.');
       const cwd = (ctx.roots?.length ?? 0) > 0 ? projectPath(ctx.roots!, args.cwd ? String(args.cwd) : undefined, ctx.workspace, command) : ctx.workspace;
       if (!(await fs.access(cwd).then(() => true).catch(() => false))) {

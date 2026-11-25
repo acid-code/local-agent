@@ -397,7 +397,7 @@ export const CODING_TOOLS: Tool[] = [
   },
   {
     name: 'apply_patch',
-    description: 'Apply a search-and-replace edit. A checkpoint of the previous bytes is stored first so the batch can be reverted.',
+    description: 'Apply a search-and-replace edit (preferred over write_file for existing files >100 lines; keep search/replace blocks small and exact). A checkpoint of the previous bytes is stored first so the batch can be reverted.',
     parameters: obj({
       edits: { type: 'array', items: { type: 'object' } },
       path: { type: 'string' }, search: { type: 'string' }, replace: { type: 'string' },

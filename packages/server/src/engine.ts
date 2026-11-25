@@ -3481,11 +3481,14 @@ export function argumentsError(name: string, raw: string | undefined, attempt = 
     const found = Number(detail.match(/position (\d+)/)?.[1]);
     if (Number.isFinite(found)) position = found;
   }
+  const truncatedLarge = text.length > 10_000 && name !== 'make_slides';
   const big = text.length > 6000;
-  const fix = [
-    'Call the tool again with one valid JSON object: escape double quotes and backslashes inside strings, write newlines as \\n, close every brace and bracket.',
-    big ? (name === 'make_slides' ? 'The deck is too big for one call: use slide_draft (start, then one add per slide) and make_slides {draft_id}.' : 'The payload is large: split it (write the first part, then append or apply_patch the rest in further calls).') : '',
-  ].filter(Boolean).join(' ');
+  const fix = truncatedLarge
+    ? `TRUNCATED BY OUTPUT LIMIT: your ${name} call was ${text.length.toLocaleString('en-US')} characters and got cut off before the JSON closed. Do NOT retry a huge single-file dump, and do NOT wrap it in a shell heredoc (shell max is 4,000 chars) or a generator script. Instead: split into modular files (e.g. index.html, style.css, app.js) OR write <=150 lines (~5,000 chars) first with write_file and add remaining sections with write_file({ path, content, append: true }) or apply_patch.`
+    : [
+        'Call the tool again with one valid JSON object: escape double quotes and backslashes inside strings, write newlines as \\n, close every brace and bracket.',
+        big ? (name === 'make_slides' ? 'The deck is too big for one call: use slide_draft (start, then one add per slide) and make_slides {draft_id}.' : 'The payload is large: split it (write <=150 lines first with write_file, then append: true or apply_patch for the rest).') : '',
+      ].filter(Boolean).join(' ');
   const info = {
     error: 'invalid_tool_arguments', tool: name, problem, length: text.length,
     ...(position !== undefined ? { position, near: text.slice(Math.max(0, position - 40), position + 20).replace(/\s+/g, ' ') } : {}),

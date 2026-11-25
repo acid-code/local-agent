@@ -93,11 +93,13 @@ const toolSchemas: Record<string, z.ZodTypeAny> = {
   write_file: z.object({
     path: z.string().min(1),
     content: z.string(),
+    append: z.boolean().optional().describe('When true, append content to the end of the file instead of replacing it.'),
     overwrite: z.boolean().optional().describe('Set true only when intentionally replacing an existing file of >100 lines.'),
   }),
   create_file: z.object({
     path: z.string().min(1),
     content: z.string(),
+    append: z.boolean().optional().describe('When true, append content to the end of the file instead of replacing it.'),
     overwrite: z.boolean().optional().describe('Set true only when intentionally replacing an existing file of >100 lines.'),
   }),
   read_file: z.object({
