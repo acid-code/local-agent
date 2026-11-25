@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { ChatMessage, ToolCall } from '@local-agent/shared';
 import { buildApp } from '../src/app.js';
-import { argumentsError, isTransientModelError, transientDelayMs } from '../src/engine.js';
+import { argumentsError, extractInlineToolCalls, isTransientModelError, transientDelayMs } from '../src/engine.js';
 import type { ModelProvider } from '../src/providers.js';
 
 const dirs: string[] = [];
@@ -130,5 +130,18 @@ describe('structured bad-argument feedback with a cap', () => {
     const tools = built.store.listMessages(built.session.id).filter((m) => m.role === 'tool').map((m) => m.content);
     expect(tools.at(-1)).toMatch(/last try/);
     await built.app.close();
+  });
+
+  it('extracts closed <tool_call> blocks and strips truncated unclosed <tool_call> markup', () => {
+    const closed = extractInlineToolCalls('Starting.\n\n<tool_call>\n<function=write_file>\n<parameter=path>a.txt</parameter>\n<parameter=content>hi</parameter>\n</function>\n</tool_call>');
+    expect(closed.truncated).toBe(false);
+    expect(closed.text).toBe('Starting.');
+    expect(closed.calls).toHaveLength(1);
+    expect(closed.calls[0]?.name).toBe('write_file');
+
+    const cutOff = extractInlineToolCalls('Let me write via python:\n\n<tool_call>\n<function=write_file>\n<parameter=path>\n/projects/workspace/build_game.py\n</parameter>\n<parameter=content>\nline1\nline2');
+    expect(cutOff.truncated).toBe(true);
+    expect(cutOff.calls).toEqual([]);
+    expect(cutOff.text).toBe('Let me write via python:');
   });
 });

@@ -1371,12 +1371,12 @@ export class Engine {
     text = split.answer;
     reasoningText = [reasoningText, split.reasoning].filter(Boolean).join('\n');
     // Fallback parser for raw Qwen3/XML <tool_call> blocks when llama-server's peg-native parser misses whitespace variants.
-    // On tool-free / finalSynthesis turns, strip leaked <tool_call> markup instead of executing more tools.
-    if (!toolCalls?.length && /<tool_call>\s*(?:<function=|\{)/i.test(text)) {
+    // On tool-free / finalSynthesis turns, strip leaked <tool_call> markup (including unclosed blocks) instead of executing more tools.
+    if (!toolCalls?.length && /<tool_call>/i.test(text)) {
       const recovered = extractInlineToolCalls(text);
-      if (recovered.calls.length) {
+      if (recovered.calls.length || recovered.truncated) {
         text = recovered.text;
-        if (!current.cursor.noTools) toolCalls = recovered.calls;
+        if (!current.cursor.noTools && recovered.calls.length) toolCalls = recovered.calls;
       }
     }
     let emptyAnswerFailed = false;
@@ -1452,17 +1452,13 @@ export class Engine {
       const taskRounds = current.cursor.taskRounds ?? 0;
       const taskSnapshot = open.slice().sort().join('\n');
       const repeatedTasks = Boolean(current.cursor.taskSnapshot && taskSnapshot && current.cursor.taskSnapshot === taskSnapshot);
-      if (open.length && taskRounds < MAX_TASK_ROUNDS && maxSteps - current.cursor.turn > 1) {
-        if (repeatedTasks) {
-          text += `\n\n⚠️ ${open.length} task(s) still open: ${open.join('; ')}`;
-        } else {
+      if (open.length && !current.cursor.noTools && !repeatedTasks && taskRounds < MAX_TASK_ROUNDS && maxSteps - current.cursor.turn > 1) {
         this.store.updateStep(step.id, { status: 'completed', output: { text, discarded: 'open tasks' }, tokensIn: usage.inputTokens, tokensOut: usage.outputTokens, costUsd: cost, latencyMs: Date.now() - started, endedAt: now() });
         this.bus.publish({ type: 'step', runId: run.id, step: this.store.getStep(step.id) });
         this.store.addStep({ runId: run.id, kind: 'contract', name: 'verify', status: 'completed', input: { tasks: open.length }, output: `Sent back: ${open.length} task(s) still open`, toolCallId: null, turn: current.cursor.turn, tokensIn: 0, tokensOut: 0, latencyMs: 0, costUsd: 0, error: null, startedAt: now() });
         const fresh = this.store.getRun(run.id)!;
         this.store.updateRun(run.id, { cursor: { ...current.cursor, ...(fresh.cursor.steering ? { steering: fresh.cursor.steering } : {}), phase: 'model', turn: current.cursor.turn + 1, taskRounds: taskRounds + 1, taskSnapshot, recovery: { rounds: current.cursor.recovery?.rounds ?? 0, note: tasksNote(open) } }, inputTokens: fresh.inputTokens + usage.inputTokens, outputTokens: fresh.outputTokens + usage.outputTokens, costUsd: fresh.costUsd + cost });
         return;
-        }
       }
       if (open.length) text += `\n\n⚠️ ${open.length} task(s) still open: ${open.join('; ')}`;
       if (check.action === 'footer') {
@@ -3548,11 +3544,11 @@ export function roughModelGiB(apiName: string): number {
   return size * 0.6 + 1;
 }
 
-/** Fallback parser for leaked Qwen3 XML (<tool_call> <function=name> <parameter=k>v</parameter> </function> </tool_call>) or JSON <tool_call>{...}</tool_call>. */
-export function extractInlineToolCalls(raw: string): { text: string; calls: ToolCall[] } {
+/** Fallback parser for leaked Qwen3 XML (<tool_call> <function=name> <parameter=k>v</parameter> </function> </tool_call>) or JSON <tool_call>{...}</tool_call>, plus stripping truncated unclosed <tool_call> blocks. */
+export function extractInlineToolCalls(raw: string): { text: string; calls: ToolCall[]; truncated: boolean } {
   const calls: ToolCall[] = [];
   const blockRe = /<tool_call>([\s\S]*?)<\/tool_call>/gi;
-  const cleaned = raw.replace(blockRe, (full, body: string) => {
+  let cleaned = raw.replace(blockRe, (full, body: string) => {
     const fnMatch = /<function\s*=\s*([^\s>]+)\s*>([\s\S]*?)<\/function>/i.exec(body);
     if (fnMatch) {
       const name = fnMatch[1]!.trim();
@@ -3586,8 +3582,13 @@ export function extractInlineToolCalls(raw: string): { text: string; calls: Tool
       } catch { /* leave unmatched */ }
     }
     return full;
-  }).trim();
-  return { text: cleaned, calls };
+  });
+  let truncated = false;
+  if (/<tool_call>[\s\S]*$/i.test(cleaned)) {
+    truncated = true;
+    cleaned = cleaned.replace(/<tool_call>[\s\S]*$/i, '');
+  }
+  return { text: cleaned.trim(), calls, truncated };
 }
 
 /**
