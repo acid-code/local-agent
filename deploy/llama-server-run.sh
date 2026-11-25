@@ -4,6 +4,11 @@
 # systemd never has to expand ${VAR:-default} (it does not support that syntax).
 set -euo pipefail
 
+# Optional user-owned overrides (no sudo needed); they win over /etc/default/llama-server.
+LOCAL_ENV="${LLAMA_LOCAL_ENV:-/opt/llama-server/llama.local.env}"
+# shellcheck disable=SC1090
+[[ -r "$LOCAL_ENV" ]] && set -a && . "$LOCAL_ENV" && set +a
+
 BIN="${LLAMA_BIN:-/opt/llama-server/bin/llama-server}"
 MODEL="${LLAMA_MODEL:-/opt/llama-server/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf}"
 
