@@ -45,6 +45,7 @@ fi
 BUILD_SRC="${POSITIONAL[0]:-}"
 if [[ -z "$BUILD_SRC" ]]; then
   for cand in \
+    "/home/$APP_USER/projects/llama-inkling-main/build/bin" \
     "$APU_ROOT/build-dspine-v2/bin" \
     /tmp/llama-apu-bench-builds/dspine-v2-custom/bin \
     /tmp/llama.cpp/build/bin \
@@ -91,8 +92,12 @@ if [[ -n "$MODEL_SRC" && -d "$MODEL_SRC" ]]; then
   done
 fi
 
-# Inkling fallback assets are external GGUFs; link them into /opt when present.
+# Uncensored fallback assets (Flint-40B-A2.5B-abliterated + DFlash2, plus Inkling if present); link into /opt when present.
 for src in \
+  "$MODEL_SRC/Flint-40B-A2.5B-abliterated.i1-IQ4_XS.gguf" \
+  "$MODEL_SRC/Flint-DFlash2-Q8_0.gguf" \
+  "$APU_ROOT/models/flint-abliterated/mrad-i1-IQ4_XS.gguf" \
+  "$APU_ROOT/models/Flint-DFlash2-Q8_0.gguf" \
   "$MODEL_SRC/Inkling-2-Mini-Uncensored-AD-Q4_K.gguf" \
   "$MODEL_SRC/mmproj-Inkling-2-Mini-Uncensored-F16.gguf" \
   "$MODEL_SRC/dspark-Inkling-2-Mini-Q8_0.gguf" \
@@ -100,7 +105,9 @@ for src in \
   "$APU_ROOT/models/mmproj-Inkling-2-Mini-Uncensored-F16.gguf" \
   "$APU_ROOT/models/dspark-Inkling-2-Mini-Q8_0.gguf"; do
   [[ -f "$src" ]] || continue
-  ln -sfn "$src" "$TARGET/models/$(basename "$src")"
+  base="$(basename "$src")"
+  [[ "$base" == "mrad-i1-IQ4_XS.gguf" ]] && base="Flint-40B-A2.5B-abliterated.i1-IQ4_XS.gguf"
+  ln -sfn "$src" "$TARGET/models/$base"
 done
 
 install -m 0755 "$REPO_ROOT/deploy/llama-server-run.sh" "$TARGET/run.sh"
@@ -131,7 +138,7 @@ else
   [[ -f "$CONF" ]] && cp -a "$CONF" "$CONF.bak.$(date +%Y%m%d-%H%M%S)"
   cat > "$CONF" <<EOF
 # llama-server settings (read by /opt/llama-server/run.sh). Re-run install-llama-server.sh to regenerate.
-# Verified Part B flags for Qwen3.6-35B-A3B + DFlash2 on Radeon 780M (gfx1103), exp-coalesced-dflash.
+# Patched b12217 (b2143c676) with fa-tile-dequant-on-load for Qwen3.6-35B-A3B + DFlash2 on Radeon 780M (gfx1103).
 
 # 0.0.0.0 so Docker containers reach it at host.docker.internal:${PORT}.
 # UFW + netguard.sh block it on LAN (eno1) and Tailscale; 127.0.0.1 and Docker bridges stay open.
@@ -143,18 +150,17 @@ LLAMA_MODEL=${DEFAULT_MODEL:-$TARGET/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf}
 LLAMA_ALIAS=${ALIAS}
 
 # DFlash2 draft. block_size = 8 in this GGUF, so n_max 7 is the real ceiling (12/16 were clamped).
-# p_min 0.55 + the gf_res_prev[10] graph cache: 33.2 -> 37.3 tok/s sustained, lossless.
 LLAMA_DRAFT_MODEL=${DRAFT_MODEL}
 LLAMA_DRAFT_N_MAX=7
 LLAMA_DRAFT_N_MIN=1
 LLAMA_DRAFT_P_MIN=0.55
 
-# Only 10/40 layers use KV (Gated DeltaNet) and DFlash2 has a fixed 2048 window:
-# Native f16 KV at 32K is only ~640 MiB and avoids per-step dequant / launch_fattn<256,4,8> faults on RDNA3.
-LLAMA_CTX=32768
-LLAMA_CACHE_K=
-LLAMA_CACHE_V=
-LLAMA_UBATCH=64
+# fa-tile-dequant-on-load makes q8_0 KV faster than f16 on RDNA3 (+35.5% at 24K, +59.5% at 56K)
+# and brings 256K GTT down to ~24.5 GiB (~11 GiB spare w/ a 4B model).
+LLAMA_CTX=262144
+LLAMA_CACHE_K=q8_0
+LLAMA_CACHE_V=q8_0
+LLAMA_UBATCH=256
 LLAMA_BATCH=512
 LLAMA_THREADS=12
 
@@ -164,7 +170,7 @@ LLAMA_GUARD_MAX_GTT_GB=14
 
 # Optional: run straight from the build dir instead of the /opt copy, or pass extra flags.
 #LLAMA_BIN=$APU_ROOT/build-dspine-v2/bin/llama-server
-#LLAMA_EXTRA_ARGS=
+LLAMA_EXTRA_ARGS="--cache-ram 2048"
 EOF
   echo "Wrote $CONF"
 fi
@@ -236,9 +242,24 @@ else
   echo "llama-server did not answer yet. Check: journalctl -u llama-server -n 50" >&2
 fi
 
-UNCENSORED_MODEL="$TARGET/models/Inkling-2-Mini-Uncensored-AD-Q4_K.gguf"
-UNCENSORED_MMPROJ="$TARGET/models/mmproj-Inkling-2-Mini-Uncensored-F16.gguf"
-UNCENSORED_DRAFT="$TARGET/models/dspark-Inkling-2-Mini-Q8_0.gguf"
+UNCENSORED_MODEL="$TARGET/models/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf"
+UNCENSORED_MMPROJ="$TARGET/models/mmproj-Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-f16.gguf"
+UNCENSORED_DRAFT="$TARGET/models/qwen36-35b-a3b-dflash-Q8_0.gguf"
+UNCENSORED_SPEC_TYPE=""
+UNCENSORED_N_MAX=7
+UNCENSORED_P_MIN=0.55
+UNCENSORED_ALIAS="qwen3.6-35b-a3b-uncensored"
+UNCENSORED_EXTRA="--cache-ram 2048"
+if [[ ! -f "$UNCENSORED_MODEL" && -f "$TARGET/models/Flint-40B-A2.5B-abliterated.i1-IQ4_XS.gguf" ]]; then
+  UNCENSORED_MODEL="$TARGET/models/Flint-40B-A2.5B-abliterated.i1-IQ4_XS.gguf"
+  UNCENSORED_MMPROJ=""
+  UNCENSORED_DRAFT="$TARGET/models/Flint-DFlash2-Q8_0.gguf"
+  UNCENSORED_SPEC_TYPE=""
+  UNCENSORED_N_MAX=6
+  UNCENSORED_P_MIN=0.65
+  UNCENSORED_ALIAS="flint-40b-abliterated"
+  UNCENSORED_EXTRA="--temp 0.65 --cache-ram 2048"
+fi
 if [[ -f "$UNCENSORED_MODEL" && -x "$TARGET/uncensored-bin/llama-server" ]]; then
   cat > /etc/default/llama-uncensored <<EOF
 # Automatic uncensored fallback for local-agent (llama-server on 8081).
@@ -248,20 +269,24 @@ LLAMA_UNCENSORED_BIN=$TARGET/uncensored-bin/llama-server
 LLAMA_UNCENSORED_MODEL=$UNCENSORED_MODEL
 LLAMA_UNCENSORED_MMPROJ=$UNCENSORED_MMPROJ
 LLAMA_UNCENSORED_DRAFT_MODEL=$UNCENSORED_DRAFT
-LLAMA_UNCENSORED_DRAFT_N_MAX=1
+LLAMA_UNCENSORED_SPEC_TYPE=$UNCENSORED_SPEC_TYPE
+LLAMA_UNCENSORED_DRAFT_N_MAX=$UNCENSORED_N_MAX
 LLAMA_UNCENSORED_DRAFT_N_MIN=1
-LLAMA_UNCENSORED_DRAFT_P_MIN=0.00
-LLAMA_UNCENSORED_CTX=32768
-LLAMA_UNCENSORED_UBATCH=512
+LLAMA_UNCENSORED_DRAFT_P_MIN=$UNCENSORED_P_MIN
+LLAMA_UNCENSORED_CTX=262144
+LLAMA_UNCENSORED_CACHE_K=q8_0
+LLAMA_UNCENSORED_CACHE_V=q8_0
+LLAMA_UNCENSORED_UBATCH=256
 LLAMA_UNCENSORED_BATCH=512
 LLAMA_UNCENSORED_THREADS=12
-LLAMA_UNCENSORED_ALIAS=inkling-2-mini-uncensored
+LLAMA_UNCENSORED_ALIAS=$UNCENSORED_ALIAS
+LLAMA_UNCENSORED_EXTRA_ARGS="$UNCENSORED_EXTRA"
 EOF
   systemctl daemon-reload
   systemctl disable llama-uncensored 2>/dev/null || true
   systemctl stop llama-uncensored 2>/dev/null || true
-  echo "Uncensored llama-server is installed but inactive; local-agent starts it only after a Qwen refusal."
+  echo "Uncensored llama-server is installed ($UNCENSORED_ALIAS) but inactive; local-agent starts it only after a Qwen refusal."
 else
-  echo "Uncensored fallback not installed: add the Inkling GGUF/MMProj/draft files to $TARGET/models." >&2
+  echo "Uncensored fallback not installed: add the Flint (or Inkling) GGUF/draft files to $TARGET/models." >&2
 fi
 echo "Config: $CONF | Logs: journalctl -u llama-server -f"

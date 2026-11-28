@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launcher for llama-server (exp-coalesced-dflash: ROCm HIP + DFlash2 + gf_res_prev[10] graph cache).
+# Launcher for llama-server (patched b12217 / b2143c676: ROCm HIP + DFlash2 + fa-tile-dequant-on-load q8_0 KV).
 # Settings come from /etc/default/llama-server (via systemd EnvironmentFile). Kept as a script so
 # systemd never has to expand ${VAR:-default} (it does not support that syntax).
 set -euo pipefail
@@ -23,20 +23,23 @@ if [[ -n "${LLAMA_DRAFT_MODEL:-}" ]]; then
 fi
 
 # -fit off -lm none: no double allocation in RAM/GTT, no KFD teardown at startup.
-# -ub 64: avoids RDNA3 MES watchdog resets on MoE MUL_MAT_ID. -t 12 leaves 4 threads for the OS/Docker/Tailscale.
-# Leave KV at native f16 by default: Qwen3.6-35B-A3B (head_dim=256, gqa_ratio=8) + DFlash2 dispatches
-# BEST_FATTN_KERNEL_MMA_F16 which needs F16 K/V (q8_0 forces per-step dequant and faults launch_fattn).
+# -ub 256 + -t 12: verified on RDNA3 without MES watchdog resets while leaving 4 threads for OS/Docker/Tailscale.
+# Patched b12217 (b2143c676) with fa-tile-dequant-on-load makes q8_0 KV faster than f16 on RDNA3
+# (+35.5% decode at 24K, +59.5% at 56K) and shrinks 256K GTT footprint to ~24.5 GiB.
 args+=(-ngl 999 -fit off -lm none -fa on
-       -ub "${LLAMA_UBATCH:-64}" -b "${LLAMA_BATCH:-512}" -t "${LLAMA_THREADS:-12}"
-       -c "${LLAMA_CTX:-32768}" -np "${LLAMA_SLOTS:-1}"
+       -ub "${LLAMA_UBATCH:-256}" -b "${LLAMA_BATCH:-512}" -t "${LLAMA_THREADS:-12}"
+       -c "${LLAMA_CTX:-262144}" -np "${LLAMA_SLOTS:-1}"
        --jinja
        --host "${LLAMA_HOST:-0.0.0.0}" --port "${LLAMA_PORT:-8080}")
-[[ -n "${LLAMA_CACHE_K:-}" ]] && args+=(-ctk "$LLAMA_CACHE_K")
-[[ -n "${LLAMA_CACHE_V:-}" ]] && args+=(-ctv "$LLAMA_CACHE_V")
+cache_k="${LLAMA_CACHE_K:-q8_0}"
+cache_v="${LLAMA_CACHE_V:-q8_0}"
+[[ -n "$cache_k" ]] && args+=(-ctk "$cache_k")
+[[ -n "$cache_v" ]] && args+=(-ctv "$cache_v")
 [[ -n "${LLAMA_ALIAS:-}" ]] && args+=(-a "$LLAMA_ALIAS")
-if [[ -n "${LLAMA_EXTRA_ARGS:-}" ]]; then
+extra_raw="${LLAMA_EXTRA_ARGS---cache-ram 2048}"
+if [[ -n "$extra_raw" ]]; then
   # shellcheck disable=SC2206
-  extra=($LLAMA_EXTRA_ARGS)
+  extra=($extra_raw)
   args+=("${extra[@]}")
 fi
 
