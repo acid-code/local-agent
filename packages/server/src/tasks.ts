@@ -8,7 +8,7 @@ import { readPlan, replacePlan, updatePlanItem } from './coding.js';
  * are marked blocked with a reason.
  */
 export const TASK_STATUSES = ['pending', 'doing', 'done', 'blocked'] as const;
-export const LONG_TASK_STEPS = 40;
+export const LONG_TASK_STEPS = 60;
 export const MAX_TASK_ROUNDS = 3;
 export const TASKS_HINT = '\n\nLong tasks: for multi-file coding, complex edits, or deep investigation, call enter_plan_mode first to lock into read-only research (with read_file, grep, glob, web_search, or research helpers), then call exit_plan_mode with concrete steps and acceptance checks to unlock editing. For ordinary 3+ step requests without plan mode, call tasks with action "set" (and optional checks) first, then work through them, marking each "doing" and then "done" with evidence from a tool result, or "blocked" with the reason. Do not give the final answer while any item is still pending or doing. When finishing, verify your checks, summarize what changed, and list key takeaways for the future.';
 

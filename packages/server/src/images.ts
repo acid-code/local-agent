@@ -244,15 +244,22 @@ export async function fetchWebImage(
   const candidates: Array<{ url: string; provider: string }> = [];
 
   // 1. Wikimedia Commons (high-res diagrams & photography, free, no API key)
+  const ALLOWED_WIKI_MIMES = new Set(['image/jpeg', 'image/png', 'image/svg+xml', 'image/webp']);
+  const BAD_MEDIA_RE = /\.(?:pdf|djvu|ogv|ogg|webm|mp4|tif|tiff)\b|\(IA_/i;
   try {
-    const wikiUrl = `https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrnamespace=6&gsrlimit=8&prop=imageinfo&iiprop=url|mime|size&iiurlwidth=1280&format=json&gsrsearch=${encodeURIComponent(query)}`;
+    const wikiQuery = `${query} filetype:bitmap|drawing`;
+    const wikiUrl = `https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrnamespace=6&gsrlimit=12&prop=imageinfo&iiprop=url|mime|size&iiurlwidth=1280&format=json&gsrsearch=${encodeURIComponent(wikiQuery)}`;
     const combined = input.signal ? AbortSignal.any([input.signal, AbortSignal.timeout(8_000)]) : AbortSignal.timeout(8_000);
     const res = await deps.fetchImpl(wikiUrl, { signal: combined, headers: { 'User-Agent': 'local-agent/0.1 (https://github.com/acid-code/local-agent)' } });
     if (res.ok) {
-      const data = await res.json() as { query?: { pages?: Record<string, { imageinfo?: Array<{ url?: string; thumburl?: string; mime?: string }> }> } };
-      for (const page of Object.values(data.query?.pages || {})) {
+      type WikiPage = { index?: number; title?: string; imageinfo?: Array<{ url?: string; thumburl?: string; mime?: string; width?: number; height?: number }> };
+      const data = await res.json() as { query?: { pages?: Record<string, WikiPage> } };
+      const pages = Object.values(data.query?.pages || {}).sort((a, b) => (a.index ?? 999) - (b.index ?? 999));
+      for (const page of pages) {
         const info = page.imageinfo?.[0];
-        if (!info) continue;
+        if (!info || !info.mime || !ALLOWED_WIKI_MIMES.has(info.mime)) continue;
+        if (BAD_MEDIA_RE.test(page.title || '') || BAD_MEDIA_RE.test(info.url || '')) continue;
+        if (info.mime !== 'image/svg+xml' && typeof info.width === 'number' && typeof info.height === 'number' && (info.width < 300 || info.height < 200)) continue;
         // Prefer thumburl (Wikimedia renders SVG/huge images to 1280px PNG/JPEG automatically!)
         const pick = info.thumburl || (info.mime === 'image/png' || info.mime === 'image/jpeg' ? info.url : undefined);
         if (pick) candidates.push({ url: pick, provider: 'Wikimedia Commons' });

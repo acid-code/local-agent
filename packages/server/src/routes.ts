@@ -207,7 +207,7 @@ export function registerRoutes(app: FastifyInstance, ctx: Ctx) {
       compactCodingPrompt: z.boolean().optional(),
       autoDiagnostics: z.boolean().optional(),
       sandbox: z.enum(['docker-or-host', 'docker-only', 'host']).optional(),
-      maxSteps: z.number().int().min(1).max(40).optional(),
+      maxSteps: z.number().int().min(1).max(100).optional(),
       outputReserveTokens: z.number().int().min(128).max(32000).optional(),
       ramBudgetGiB: z.number().min(2).max(1024).optional(),
       ramSystemReserveGiB: z.number().min(0).max(64).optional(),

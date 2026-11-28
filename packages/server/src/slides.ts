@@ -65,7 +65,7 @@ export function deckIsHebrew(spec: DeckSpec) {
 export function validateDeck(raw: unknown): DeckSpec {
   const spec = raw as DeckSpec;
   if (!spec || typeof spec !== 'object' || typeof spec.title !== 'string' || !Array.isArray(spec.slides) || !spec.slides.length) throw new Error('A deck needs a title and at least one slide.');
-  if (spec.slides.length > 24) throw new Error('Keep a deck to 24 slides or fewer.');
+  if (spec.slides.length > 40) throw new Error('Keep a deck to 40 slides or fewer.');
   for (const [index, slide] of spec.slides.entries()) {
     if (!slide || typeof slide.title !== 'string') throw new Error(`Slide ${index + 1} needs a title.`);
     slide.title = slide.title.trim().slice(0, 70);
@@ -103,7 +103,7 @@ export function lintDeck(input: DeckSpec, images: Map<number, Picture>): string[
   if (dense.length) warnings.push(`Slides ${dense.join(', ')} are text-heavy (more than 5 bullets or a bullet over 16 words). Cut to 3-4 short bullets, use layout "cards" or "stats", and move detail into notes.`);
   if (spec.slides.some((slide) => slide.title.length > 70)) warnings.push('Some titles are over 70 characters; make titles short noun phrases.');
   if (!spec.slides.some((slide) => slide.source)) warnings.push('No slide has a "source" line; add one under every slide that states facts or numbers.');
-  if (spec.slides.length > 16) warnings.push('This deck has more than 16 slides. Split it into a shorter executive narrative or a separate appendix.');
+  if (spec.slides.length > 28) warnings.push('This deck has more than 28 slides. Split it into a shorter executive narrative or a separate appendix.');
   const repeated = spec.slides.slice(1).filter((slide, index) => {
     const previous = spec.slides[index];
     const layout = slide.layout ?? (slide.chart ? 'chart' : slide.stats ? 'stats' : slide.image ? 'split' : 'bullets');
@@ -424,7 +424,7 @@ async function loadImages(store: Store, deps: SlideDeps, spec: DeckSpec, ctx: Im
 export function slidesTools(deps: SlideDeps): Tool[] {
   const make: Tool = {
     name: 'make_slides',
-    description: 'Create or revise a PowerPoint deck (.pptx) that looks designed, not like a text dump. Pass the whole deck as JSON: {title, lang:"he"|"en"|"auto", font:"Heebo"|"Assistant", theme:"clinical"|"ocean"|"light"|"dark"|"warm", slides:[{layout, title, kicker?, subtitle?, bullets?, stats?, chart?, image?, source?, notes?}]}. Layouts: "title" (hero, put image on it), "section" (big number divider), "split" (full-height picture on one half + 3-4 bullets), "image" (full-bleed picture with caption), "cards" (3-6 short points as numbered cards), "stats" (stats:[{value:"1 in 3", label:"..."}] big-number tiles, 2-4), "chart" (chart:{type:"bar"|"line"|"pie"|"doughnut", labels, series:[{name, values}], title?} + optional bullets), "quote", "bullets" (plain, use sparingly). DESIGN RULES: at least 60% of slides carry a real picture: image:{query:"short English photo search words, e.g. osteoclast bone resorption diagram"} finds a real photo/diagram (Wikimedia Commons), image:{prompt:"vivid scene, no text"} generates art, image:{fileId} reuses a file (fetch_image gives file ids); add image.caption. Vary layouts (never 3 identical in a row), 3-4 bullets of at most 12 words, one idea per slide, kicker = the section label above the title, source = the source line printed at the bottom, notes = 2-4 spoken sentences. Hebrew decks are right-to-left with an embedded Hebrew font. For an edit round call read_slides first, change the JSON, and pass revise_file_id so the new version is saved next to the old one. The result lists design problems (missing pictures, text-heavy slides): fix them and call make_slides again with revise_file_id before replying. Returns a [file:<id>] reference to put in the reply. BIG DECKS (more than ~6 slides, or long notes): build them slide by slide with slide_draft (start, then add one slide per call) and call make_slides with draft_id instead of deck, so no single call carries a huge JSON.',
+    description: 'Create or revise a PowerPoint deck (.pptx) directly in-process (never call localhost HTTP endpoints or write custom pptxgenjs shell scripts) that looks designed, not like a text dump. Pass the whole deck as JSON: {title, lang:"he"|"en"|"auto", font:"Heebo"|"Assistant", theme:"clinical"|"ocean"|"light"|"dark"|"warm", slides:[{layout, title, kicker?, subtitle?, bullets?, stats?, chart?, image?, source?, notes?}]}. Layouts: "title" (hero, put image on it), "section" (big number divider), "split" (full-height picture on one half + 3-4 bullets), "image" (full-bleed picture with caption), "cards" (3-6 short points as numbered cards), "stats" (stats:[{value:"1 in 3", label:"..."}] big-number tiles, 2-4), "chart" (chart:{type:"bar"|"line"|"pie"|"doughnut", labels, series:[{name, values}], title?} + optional bullets), "quote", "bullets" (plain, use sparingly). DESIGN RULES: at least 60% of slides carry a real picture: image:{query:"short English photo search words, e.g. osteoclast bone resorption diagram"} finds a real photo/diagram (Wikimedia Commons), image:{prompt:"vivid scene, no text"} generates art, image:{fileId} reuses a file (fetch_image gives file ids); add image.caption. Vary layouts (never 3 identical in a row), 3-4 bullets of at most 12 words, one idea per slide, kicker = the section label above the title, source = the source line printed at the bottom, notes = 2-4 spoken sentences. Hebrew decks are right-to-left with an embedded Hebrew font. For an edit round call read_slides first, change the JSON, and pass revise_file_id so the new version is saved next to the old one. The result lists design problems (missing pictures, text-heavy slides): fix them and call make_slides again with revise_file_id before replying. Returns a [file:<id>] reference to put in the reply. BIG DECKS (6+ slides, or long notes): build them with slide_draft (start, then add slides in batches of 3-5 via slides:[...], up to 40 slides total) and call make_slides with draft_id instead of deck, so no single call carries a huge JSON.',
     parameters: { type: 'object', properties: { deck: { type: 'object', description: 'The whole deck (omit when passing draft_id).' }, draft_id: { type: 'string', description: 'Build from a slide_draft instead of passing deck.' }, file_name: { type: 'string' }, revise_file_id: { type: 'string' } }, additionalProperties: false },
     mutates: () => false,
     approval: () => null,
@@ -474,7 +474,7 @@ export function slidesTools(deps: SlideDeps): Tool[] {
   };
   const draft: Tool = {
     name: 'slide_draft',
-    description: 'Build a deck one slide per call, then render it with make_slides {draft_id}. Actions: start {title, lang?, font?, theme?} returns draft_id; add {draft_id, slide} appends one slide (same slide fields as make_slides); replace {draft_id, index, slide} swaps slide N (1-based); remove {draft_id, index}; show {draft_id} lists the slides. Each slide is checked when added, so a mistake costs one slide, not the deck.',
+    description: 'Build a deck cleanly in batches (up to 40 slides), then render it in-process with make_slides {draft_id}. Actions: start {title, lang?, font?, theme?} returns draft_id; add {draft_id, slides} (recommended: array of 3-5 slides per call) or add {draft_id, slide} appends slides; replace {draft_id, index, slide} swaps slide N (1-based); remove {draft_id, index}; show {draft_id} lists the slides. Each slide is validated on add.',
     parameters: {
       type: 'object',
       properties: {
@@ -486,6 +486,7 @@ export function slidesTools(deps: SlideDeps): Tool[] {
         theme: { type: 'string' },
         index: { type: 'integer', description: '1-based slide number (replace, remove).' },
         slide: { type: 'object', description: 'One slide: {layout, title, kicker?, subtitle?, bullets?, stats?, chart?, image?, source?, notes?}.' },
+        slides: { type: 'array', items: { type: 'object' }, description: 'Batch of 1-6 slides to append in one call (recommended for 8+ slide decks so drafting finishes in 3-5 steps).' },
       },
       required: ['action'],
     },
@@ -499,7 +500,7 @@ export function slidesTools(deps: SlideDeps): Tool[] {
         if (!title) throw new Error('start needs a deck title.');
         const id = `draft_${crypto.randomBytes(6).toString('hex')}`;
         writeDraft(deps.dataDir, id, { ownerId, deck: { title, lang: args.lang, font: args.font, theme: args.theme, slides: [] } as unknown as DeckSpec });
-        return `Draft ${id} started for "${title}". Add slides one per call: slide_draft {action:"add", draft_id:"${id}", slide:{...}}. Then make_slides {draft_id:"${id}"}.`;
+        return `Draft ${id} started for "${title}". Add slides in batches of 3-5: slide_draft {action:"add", draft_id:"${id}", slides:[...]}. Then make_slides {draft_id:"${id}"}.`;
       }
       const id = String(args.draft_id || '');
       const deck = readDraft(deps.dataDir, id, ownerId);
@@ -514,8 +515,11 @@ export function slidesTools(deps: SlideDeps): Tool[] {
         return index - 1;
       };
       if (action === 'add') {
-        if (deck.slides.length >= 24) throw new Error('A deck holds at most 24 slides.');
-        deck.slides.push(checkSlide(args.slide));
+        const batch = Array.isArray(args.slides) && args.slides.length ? args.slides : args.slide !== undefined ? [args.slide] : [];
+        if (!batch.length) throw new Error('add needs slide or slides.');
+        if (batch.length > 6) throw new Error('Pass at most 6 slides per slide_draft add call.');
+        if (deck.slides.length + batch.length > 40) throw new Error('A deck holds at most 40 slides.');
+        for (const item of batch) deck.slides.push(checkSlide(item));
       } else if (action === 'replace') {
         deck.slides[at(args.index)] = checkSlide(args.slide);
       } else if (action === 'remove') {
@@ -525,7 +529,7 @@ export function slidesTools(deps: SlideDeps): Tool[] {
       }
       if (action !== 'show') writeDraft(deps.dataDir, id, { ownerId, deck });
       const list = deck.slides.map((slide, index) => `${index + 1}. [${slide.layout ?? 'auto'}] ${slide.title}${slide.image ? ' 🖼' : ''}`).join('\n');
-      return `${action === 'show' ? 'Draft' : `Saved (${action})`}: ${deck.slides.length} slide(s).\n${list || '(no slides yet)'}\nNext: add another slide, or make_slides {draft_id:"${id}"} to render.`;
+      return `${action === 'show' ? 'Draft' : `Saved (${action})`}: ${deck.slides.length} slide(s).\n${list || '(no slides yet)'}\nNext: add another slide batch, or make_slides {draft_id:"${id}"} to render.`;
     },
   };
   return [make, read, draft];

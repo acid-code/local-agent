@@ -196,4 +196,49 @@ describe('designed deck layouts', () => {
     expect(warnings.join(' ')).toMatch(/source/);
     expect(lintDeck(DESIGNED, new Map([[2, pic('b')], [5, pic('c')]])).join(' ')).not.toMatch(/Only/);
   });
+
+  it('supports batch slide_draft additions and up to 40 slides without premature warnings', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'la-slide-batch-'));
+    dirs.push(dir);
+    const { Store } = await import('../src/db.js');
+    const { ensureFilesTable } = await import('../src/files.js');
+    const store = new Store(path.join(dir, 'test.db'));
+    ensureFilesTable(store);
+    const tools = slidesTools({ dataDir: dir });
+    const makeTool = tools.find((t) => t.name === 'make_slides')!;
+    const draftTool = tools.find((t) => t.name === 'slide_draft')!;
+    const ctx = {
+      agent: { id: 'agt_1', ownerId: 'owner' } as ToolContext['agent'],
+      store,
+      sessionId: 'ses_1',
+    } as unknown as ToolContext;
+
+    const startOut = await draftTool.execute({ action: 'start', title: 'Course Deck', lang: 'en' }, ctx);
+    const draftId = /draft_[a-f0-9]+/.exec(startOut)![0];
+    const batch = [
+      { layout: 'title', title: 'Course Deck', subtitle: 'Overview', source: 'NIH' },
+      { layout: 'bullets', title: 'Slide 2', bullets: ['Point A', 'Point B'], source: 'NIH' },
+      { layout: 'bullets', title: 'Slide 3', bullets: ['Point C', 'Point D'], source: 'NIH' },
+    ];
+    const addOut = await draftTool.execute({ action: 'add', draft_id: draftId, slides: batch }, ctx);
+    expect(addOut).toContain('3 slide(s)');
+    const builtOut = await makeTool.execute({ draft_id: draftId }, ctx);
+    expect(builtOut).toContain('3 slides');
+
+    const deck25: DeckSpec = {
+      title: '25 Slide Course Presentation',
+      slides: [
+        { layout: 'title', title: 'Title', source: 'NEJM' },
+        ...Array.from({ length: 24 }, (_, i) => ({
+          layout: (i % 2 === 0 ? 'stats' : 'cards') as 'stats' | 'cards',
+          title: `Slide ${i + 2}`,
+          ...(i % 2 === 0 ? { stats: [{ value: '50%', label: 'metric' }, { value: '2x', label: 'rate' }] } : { bullets: ['A', 'B'] }),
+          source: 'NEJM',
+        })),
+      ],
+    };
+    const w25 = lintDeck(deck25, new Map());
+    expect(w25.join(' ')).not.toMatch(/more than 28 slides/);
+    store.close();
+  });
 });

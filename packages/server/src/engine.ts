@@ -888,13 +888,13 @@ export class Engine {
   /** Model turns allowed: generous locally so agents can loop, test, and double-check their own work. */
   private stepCap(cursor: RunCursor, sessionMode?: string) {
     const settings = this.store.getSettings();
-    const configured = Number.isFinite(settings.maxSteps) ? settings.maxSteps : 24;
-    if (cursor.maxSteps) return Math.min(cursor.maxSteps, cursor.longTask ? LONG_TASK_STEPS : 28);
-    if (cursor.longTask) return Math.max(configured, LONG_TASK_STEPS);
+    const configured = Number.isFinite(settings.maxSteps) ? settings.maxSteps : 36;
+    if (cursor.maxSteps) return Math.min(cursor.maxSteps, cursor.longTask ? LONG_TASK_STEPS : 36);
+    if (cursor.longTask) return Math.min(100, Math.max(configured, LONG_TASK_STEPS));
     if (cursor.stage === 'plan' || cursor.stage === 'implement' || sessionMode === 'code') {
-      return Math.max(configured, 28);
+      return Math.min(100, Math.max(configured, 40));
     }
-    return Math.max(16, Math.min(configured, 24));
+    return Math.min(100, Math.max(configured, 32));
   }
 
   private async stepModel(run: RunRow, signal: AbortSignal) {
@@ -1118,7 +1118,7 @@ export class Engine {
     // On llama-server (cacheFriendly), dropping `tools` to [] on `noTools` / `finalSynthesis` turns invalidates
     // token 0 of the entire KV cache (forcing a full 48K+ token re-prefill). Keep tool schemas stable for prefix reuse
     // and discard any returned tool calls below when `current.cursor.noTools` is set.
-    const toolless = (!cacheFriendly && Boolean(current.cursor.noTools)) || this.toolSupportOf(model) === false;
+    const toolless = Boolean(current.cursor.noTools && (!cacheFriendly || current.cursor.emptyRetry)) || this.toolSupportOf(model) === false;
     const compactCoding = this.isCompactCoding(agent, sessionForCtx?.mode, current, model, settings);
     const tools = toolless
       ? []
@@ -1806,7 +1806,11 @@ export class Engine {
       }
       const afterCall = this.store.getRun(run.id);
       if (call.name === 'plan' && Array.isArray(args.items) && args.items.length && (afterCall?.cursor.stage ?? run.cursor.stage) === 'plan' && !afterCall?.cursor.enteredPlanViaTool) handoff = true;
-      if (call.name === 'tasks' && args.action === 'set' && Array.isArray(args.items) && args.items.length >= 2) {
+      const promotesLongTask = (call.name === 'tasks' && args.action === 'set' && Array.isArray(args.items) && args.items.length >= 2)
+        || (call.name === 'plan' && Array.isArray(args.items) && args.items.length >= 2)
+        || call.name === 'exit_plan_mode'
+        || (call.name === 'slide_draft' && args.action === 'start');
+      if (promotesLongTask) {
         const live = this.store.getRun(run.id)!;
         if (!live.cursor.longTask) this.store.updateRun(run.id, { cursor: { ...live.cursor, longTask: true } });
       }
@@ -2699,9 +2703,17 @@ export class Engine {
 
   /** First step of a run: pre-load the few tools the request obviously needs, so it skips a find_tools round trip. */
   private seedTools(run: RunRow, discoverable: Tool[], servers: Map<string, string>) {
-    const user = run.cursor.userMessageId ? this.store.listMessages(run.sessionId).find((message) => message.id === run.cursor.userMessageId) : undefined;
+    const msgs = this.store.listMessages(run.sessionId);
+    const user = run.cursor.userMessageId ? msgs.find((message) => message.id === run.cursor.userMessageId) : undefined;
+    const session = this.store.getSession(run.sessionId);
+    const prevUser = [...msgs].reverse().find((m) => m.role === 'user' && m.id !== user?.id && m.content.trim());
+    const contextText = [
+      user?.content?.slice(0, 1200) || '',
+      session?.title && session.title !== 'New chat' ? session.title : '',
+      prevUser?.content?.slice(0, 400) || '',
+    ].filter(Boolean).join('\n');
     run.cursor.extraTools = [];
-    if (user?.content) this.seedToolsFromText(run, user.content, discoverable, servers);
+    if (contextText) this.seedToolsFromText(run, contextText, discoverable, servers);
   }
 
   /** Pre-load discoverable tools matching a request or steering text (append-only so prompt prefixes hold). */
@@ -2805,7 +2817,7 @@ export class Engine {
     if (helper) for (const name of HELPER_DENIED) names.delete(name);
     // Built-in connectors the owner switched off take their tools with them.
     for (const name of disabledConnectorTools(this.store)) names.delete(name);
-    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), setFocusTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), fetchImageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl }),     ...slidesTools({ dataDir: this.libraryDir, photo: async (query, ctx) => ({ fileId: (await fetchWebImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, searxngUrl: this.store.getSettings().searxngUrl || process.env.SEARXNG_URL || '' }, { query, ownerId: ctx.ownerId, sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal, primaryOnly: true })).file.id }), image: async (prompt, ctx) => { try { return { fileId: (await generateImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }, { prompt, ownerId: ctx.ownerId, shape: 'landscape', sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal })).file.id }; } catch { const searxngUrl = this.store.getSettings().searxngUrl || process.env.SEARXNG_URL || ''; return { fileId: (await fetchWebImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, searxngUrl }, { query: prompt, ownerId: ctx.ownerId, sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal, primaryOnly: true })).file.id }; } } }), ...this.autonomy.tools(), tasksTool(), enterPlanModeTool(), exitPlanModeTool(), memoryFileTool(), searchChatsTool(), proposeSkillTool(), ...CONNECTOR_TOOLS(), ...vercelTools(), ...(this.ocrReader ? [ocrTool(this.ocrReader)] : []), ...(this.imageAnalyzer ? [understandImageTool(this.imageAnalyzer)] : []), ...this.extraTools, ...mcp.map((row) => row.tool)];
+    const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), setFocusTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), fetchImageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl }),     ...slidesTools({ dataDir: this.libraryDir, photo: async (query, ctx) => ({ fileId: (await fetchWebImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, searxngUrl: this.store.getSettings().searxngUrl || process.env.SEARXNG_URL || '' }, { query, ownerId: ctx.ownerId, sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal })).file.id }), image: async (prompt, ctx) => { try { return { fileId: (await generateImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }, { prompt, ownerId: ctx.ownerId, shape: 'landscape', sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal })).file.id }; } catch { const searxngUrl = this.store.getSettings().searxngUrl || process.env.SEARXNG_URL || ''; return { fileId: (await fetchWebImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, searxngUrl }, { query: prompt, ownerId: ctx.ownerId, sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal })).file.id }; } } }), ...this.autonomy.tools(), tasksTool(), enterPlanModeTool(), exitPlanModeTool(), memoryFileTool(), searchChatsTool(), proposeSkillTool(), ...CONNECTOR_TOOLS(), ...vercelTools(), ...(this.ocrReader ? [ocrTool(this.ocrReader)] : []), ...(this.imageAnalyzer ? [understandImageTool(this.imageAnalyzer)] : []), ...this.extraTools, ...mcp.map((row) => row.tool)];
     const seen = new Set<string>();
     const vpnConfigured = Boolean(this.vpn?.isConfigured());
     const chosen = catalog.filter((tool) => {

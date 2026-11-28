@@ -7,6 +7,7 @@ import { buildApp } from '../src/app.js';
 import { checkOrRepair, normalizeToolArgs, toolArgumentsSchema } from '../src/contracts.js';
 import { Store } from '../src/db.js';
 import { ensureFilesTable, shareFileTool } from '../src/files.js';
+import { fetchWebImage, mockPng } from '../src/images.js';
 import type { ModelProvider } from '../src/providers.js';
 import { searxngQuery, type ToolContext } from '../src/tools.js';
 import { loadMasterKey, Vault } from '../src/vault.js';
@@ -189,5 +190,94 @@ describe('tool hygiene fixes', () => {
     if (!failed.ok) {
       expect(failed.error).toContain('query:');
     }
+  });
+
+  it('raises step caps, respects >24 settings, promotes slide_draft/exit_plan_mode to longTask, and seeds follow-up presentation turns', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'la-hygiene-caps-'));
+    dirs.push(dir);
+    const provider = new ScriptedMenuProvider();
+    const built = await buildApp({ dataDir: dir, startScheduler: false, serveWeb: false, providerOverride: () => provider });
+    const res = await built.app.inject({ method: 'POST', url: '/api/setup', payload: { username: 'owner', password: ['fixture', 'pass', '97'].join('-') } });
+    const cookies = { la_session: res.cookies.find((c) => c.name === 'la_session')!.value };
+    const agentRes = (await built.app.inject({
+      method: 'POST',
+      url: '/api/agents',
+      cookies,
+      payload: { name: 'Assistant', systemPrompt: 'help', toolAllowlist: ['read_file', 'shell'], modelId: 'model_rehearsal' },
+    })).json() as { agent: { id: string; ownerId: string } };
+
+    // Legacy maxSteps=12 still yields generous floors (>=32 chat, >=40 code/plan, >=60 longTask).
+    built.store.saveSettings({ ...built.store.getSettings(), maxSteps: 12 }, 'legacy 12', { maxSteps: 12 });
+    expect((built.engine as any).stepCap({}, 'chat')).toBeGreaterThanOrEqual(32);
+    expect((built.engine as any).stepCap({}, 'code')).toBeGreaterThanOrEqual(40);
+    expect((built.engine as any).stepCap({ stage: 'plan' }, 'chat')).toBeGreaterThanOrEqual(40);
+    expect((built.engine as any).stepCap({ longTask: true }, 'chat')).toBeGreaterThanOrEqual(60);
+
+    // Higher maxSteps=50 is NOT clamped to 24.
+    built.store.saveSettings({ ...built.store.getSettings(), maxSteps: 50 }, 'higher cap', { maxSteps: 50 });
+    expect((built.engine as any).stepCap({}, 'chat')).toBe(50);
+
+    // Calling slide_draft(start) promotes run.cursor.longTask to true, and a follow-up message in a presentation chat seeds make_slides.
+    const ses = built.store.createSession({ agentId: agentRes.agent.id, ownerId: agentRes.agent.ownerId, title: 'Presentation Creation' });
+    built.store.updateSession(ses.id, { mode: 'code' });
+    provider.steps = [
+      { toolCalls: [{ id: 'sd1', name: 'slide_draft', arguments: JSON.stringify({ action: 'start', title: 'Test Deck' }) }] },
+      { text: 'Draft started.' },
+    ];
+    const run = await built.engine.startTurn({ sessionId: ses.id, agentId: agentRes.agent.id, content: 'add real clinical data now' });
+    await waitForRun(built.store, run.id);
+    expect(provider.offeredTools[0]?.map((t) => t.name)).toContain('make_slides');
+    expect(built.store.getRun(run.id)?.cursor.longTask).toBe(true);
+
+    await built.app.close();
+  });
+
+  it('filters PDFs, videos, IA scans, and tiny icons in fetchWebImage and follows Wikimedia relevance order', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'la-hygiene-img-'));
+    dirs.push(dir);
+    const store = new Store(path.join(dir, 'test.db'));
+    ensureFilesTable(store);
+
+    const pngBytes = mockPng('clean diagram', 64, 64);
+    const requestedUrls: string[] = [];
+    const fakeFetch: typeof fetch = async (input) => {
+      const u = String(input);
+      requestedUrls.push(u);
+      if (u.includes('commons.wikimedia.org/w/api.php')) {
+        return new Response(JSON.stringify({
+          query: {
+            pages: {
+              '100': {
+                index: 2,
+                title: 'File:Old_Paper_(IA_doc123).pdf',
+                imageinfo: [{ mime: 'application/pdf', width: 960, height: 1200, url: 'https://upload.wikimedia.org/a.pdf', thumburl: 'https://thumb.wikimedia.org/pdf.jpg' }],
+              },
+              '200': {
+                index: 3,
+                title: 'File:Video_clip.ogv',
+                imageinfo: [{ mime: 'application/ogg', width: 800, height: 600, url: 'https://upload.wikimedia.org/v.ogv', thumburl: 'https://thumb.wikimedia.org/v.jpg' }],
+              },
+              '300': {
+                index: 4,
+                title: 'File:Tiny_icon.png',
+                imageinfo: [{ mime: 'image/png', width: 64, height: 64, url: 'https://upload.wikimedia.org/tiny.png' }],
+              },
+              '99999': {
+                index: 1,
+                title: 'File:Immunoglobulin_diagram.svg',
+                imageinfo: [{ mime: 'image/svg+xml', width: 512, height: 512, url: 'https://upload.wikimedia.org/antibody.svg', thumburl: 'https://thumb.wikimedia.org/1280px-antibody.png' }],
+              },
+            },
+          },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      expect(u).toBe('https://thumb.wikimedia.org/1280px-antibody.png');
+      return new Response(pngBytes, { status: 200, headers: { 'content-type': 'image/png' } });
+    };
+
+    const res = await fetchWebImage({ store, dataDir: dir, fetchImpl: fakeFetch }, { query: 'antibody structure', ownerId: 'owner' });
+    expect(requestedUrls[0]).toContain('filetype%3Abitmap%7Cdrawing');
+    expect(res.sourceUrl).toBe('https://thumb.wikimedia.org/1280px-antibody.png');
+    store.close();
   });
 });

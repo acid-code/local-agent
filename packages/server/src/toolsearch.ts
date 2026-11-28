@@ -33,7 +33,7 @@ const SYNONYMS: Record<string, string[]> = {
   email: ['gmail', 'mail', 'inbox', 'מייל', 'אימייל'],
   calendar: ['event', 'meeting', 'schedule', 'יומן', 'פגישה'],
   image: ['picture', 'photo', 'png', 'jpg', 'תמונה'],
-  slides: ['presentation', 'deck', 'pptx', 'מצגת'],
+  slides: ['presentation', 'presentations', 'deck', 'pptx', 'powerpoint', 'slide', 'מצגת', 'שקפים', 'שקופיות', 'שקף'],
   github: ['repo', 'repository', 'pull', 'pr', 'issue', 'commit'],
   deploy: ['vercel', 'deployment', 'hosting', 'domain'],
   remind: ['reminder', 'timer', 'alarm', 'תזכורת'],
