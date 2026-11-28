@@ -28,7 +28,7 @@ export const GALLERY: GalleryPersona[] = [
     description: 'The default persona: answers, drafts, plans and finds things, and knows when to call a specialist teammate.',
     tools: ['web_search', 'browse', 'web_fetch', 'read_file', 'write_file', 'list_dir', 'remember', 'recall', 'kb_search', 'plan', 'consult_agent'],
     connectors: ['search', 'browser', 'fetch', 'time', 'memory', 'filesystem'],
-    skills: [SK.summarize, SK.plan, SK.emailReply, SK.citation],
+    skills: [SK.summarize, SK.plan, SK.emailReply, SK.citation, SK.slides],
     modelHint: 'Any chat model; Auto picks a local one first.',
     starters: ['What can you do?', 'Summarize this file', 'Plan my week'],
     intro: 'You are Assistant, a warm, practical everyday helper.',

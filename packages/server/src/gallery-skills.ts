@@ -5,39 +5,53 @@ const s = (slug: string, name: string, description: string, body: string): Galle
 /** Skills shipped with the gallery. Several personas share some of them (they live in one catalog). */
 export const SK = {
   // ── Slides ──
-  slides: s('hebrew-slides', 'Slides (Hebrew and English)', 'Build a real .pptx deck with make_slides: outline first, one idea per slide, charts from real numbers, speaker notes, right-to-left Hebrew with an embedded Hebrew font, and edit rounds from the saved spec.', `
+  slides: s('hebrew-slides', 'Presentation Design (Hebrew & English)', 'Design executive, visually rich .pptx presentations and slide decks (מצגת / שקפים) with make_slides and slide_draft: storyboarding, themes, layout variety, real imagery, charts/tables/timelines, RTL Hebrew, and design QA.', `
 ## When
-The user asks for a presentation, deck, slides, a pitch, a lecture or a talk, in Hebrew or English.
+Use whenever the user asks for a presentation, slide deck, pitch, lecture, or PowerPoint (.pptx), in English or Hebrew (מצגת / שקפים).
 
-## Steps
-1. Ask at most two questions if they matter: audience and length (default 6–10 slides), language (default: the user's), any numbers or files to use.
-2. Write a one-line outline per slide in the chat and wait for an OK when the deck is longer than 6 slides. Otherwise build it right away.
-3. Call **make_slides** with the whole deck JSON. Make it look designed:
-   - theme "clinical" (medical/science), "ocean" (business), "warm", "dark" or "light". Add a "kicker" (section label above the title) and a "source" line to every fact slide.
-   - Slide 1 layout "title" WITH an image (hero). "section" to open a part (big number divider). "quote" for one strong sentence.
-   - Pictures on at least 60% of slides: layout "split" (full-height picture + 3-4 bullets) or "image" (full-bleed picture + caption). Use image {query: "short English photo search words"} for real photos/diagrams (Wikimedia Commons), image {prompt} for generated art (describe the scene, no text), image {fileId} to reuse a file (fetch_image returns ids). Add image.caption.
-   - Vary layouts: "cards" for 3-6 short points, "stats" ({value:"1 in 3", label}) for numbers, "chart" for real numbers only (one number per label). Plain "bullets" only now and then; never three identical layouts in a row.
-   - 3-4 bullets per slide, each under ~12 words. One idea per slide.
-   - speaker notes in "notes": 2-4 sentences the presenter can say, in the deck's language.
-   - lang "he" for Hebrew (right-to-left, embedded Heebo or Assistant font), "en" for English, or "auto".
-   - The tool result contains a DESIGN CHECK. If it lists problems (few pictures, text-heavy slides), fix them and call make_slides again with revise_file_id BEFORE replying.
-4. Reply with the [file:<id>] and a short list of the slides. Offer one round of changes.
+## Core Principle (No Text Dumps)
+Every slide should look like a magazine spread or keynote slide designed by a visual director — **35–45% clean whitespace**, clear visual hierarchy, and scannable phrasing. Put detailed narration in \`notes\`, NEVER on the slide canvas.
 
-## Hebrew
-- Natural Modern Hebrew, no English words except names, brands and technical terms. Keep gender consistent; address the audience in plural.
-- Numbers, dates and ₪ stay as digits. Do not translate product names.
-- Headline style: short noun phrases ("הכנסות לפי חודש"), not full sentences.
+## Step 1 — Storyboard & Palette
+1. For decks > 6 slides, propose a quick 1-line slide plan first if scope is ambiguous; otherwise build directly.
+2. Pick ONE theme tailored to the topic:
+   - **clinical**: Medicine, biotech, pharma, research (teal + deep navy).
+   - **ocean**: Business, SaaS, cloud, strategy (cyan + slate).
+   - **midnight**: Executive tech, AI, hardware, product launches (dark navy + sky blue).
+   - **editorial**: Magazine storytelling, culture, architecture, essays (warm cream + terracotta).
+   - **forest**: Sustainability, biology, climate, health (sage green + amber).
+   - **royal**: Finance, education, creative keynotes (deep indigo + violet/rose).
+   - **warm** / **dark** / **light**: General alternatives.
 
-## Edit rounds
-1. Call **read_slides** with the deck's file id to get its JSON.
-2. Change only what was asked (wording, order, a chart, add or drop a slide).
-3. Call make_slides with the new JSON and revise_file_id = the old file id. A new version (v2, v3…) is saved next to the old one.
-4. Say what changed in one or two lines.
+## Step 2 — Visual Rhythm & Layout Variety
+Never put 3 bullets-style slides in a row. Alternate purposefully across these 12 layouts:
+- **title**: Hero opening slide — ALWAYS include a striking background photo (\`image: { query: "..." }\` or \`prompt\`).
+- **section**: Bold numbered chapter divider to structure multi-part lectures cleanly.
+- **split**: Full-height photo/diagram on one half + 3–4 short bullets on the other (workhorse layout!).
+- **image**: Full-bleed photographic moment with headline overlay & bottom caption.
+- **stats**: 2–4 big-number KPI tiles (\`stats: [{ value: "35%", label: "..." }]\`) + 1–2 takeaway bullets max.
+- **comparison**: 2–3 side-by-side columns (\`columns: [{ heading, bullets, accent?: true }]\`) for pros/cons, before/after, or options.
+- **timeline**: 3–5 horizontal milestones (\`steps: [{ label?: "Q1", title, detail? }]\`) for roadmaps, mechanisms, or history.
+- **table**: Native styled table (\`table: { headers: [...], rows: [[...]] }\`) for specs, pricing, or structured matrices.
+- **cards**: 3–6 numbered cards — format each bullet as \`**Short Heading:** concise 6-10 word explanation\` so each card renders with a bold title + clean muted body.
+- **chart**: Native PowerPoint chart (\`bar\`, \`line\`, \`pie\`, \`doughnut\`) from REAL verified numbers only, paired with short takeaways.
+- **quote**: One powerful pull-quote or thesis statement.
+- **bullets**: Clean open-canvas bullets with a subtle accent rail — use sparingly when nothing more visual fits.
+
+## Step 3 — Typography & Image Craft
+- **Bullets**: Max **3–4 bullets per slide**, each **≤ 12 words**. Use bold lead-ins (\`**Key driver:** short fact\`) so a viewer grasps the point in 2 seconds.
+- **Headlines**: Short, active noun phrases or takeaways (≤ 60 chars). Add \`kicker\` (chapter label above the title) and \`source\` (citation line at the bottom of fact/data slides).
+- **Imagery**: At least **60%+ of content slides** should carry a real picture or structured graphic. Use short descriptive **English** keywords for \`image: { query: "semiconductor cleanroom wafer close up" }\` (even on Hebrew decks, because Wikimedia/SearXNG image search returns far better photos in English!), or \`image: { prompt: "..." }\` for conceptual illustrations (specify "no text"). Add \`image.caption\`.
+- **Hebrew**: Set \`lang: "he"\` (or \`"auto"\`). Keep modern natural Hebrew, plural audience address, digits for numbers/dates/₪, and right-to-left flow.
+- **Large decks (6+ slides)**: Call \`slide_draft\` (\`action: "start"\`, then \`action: "add"\` in batches of 3–5 slides via \`slides: [...]\`), then render once with \`make_slides({ draft_id })\`.
+
+## Step 4 — Mandatory Design QA Loop
+Read the \`DESIGN CHECK\` output returned by \`make_slides\`. If ANY slide is flagged bare, repetitive, text-heavy, or missing a picture, call \`read_slides\`, improve the weak slides (split dense points, swap \`bullets\` to \`split\`/\`comparison\`/\`timeline\`/\`cards\`/\`stats\`, add \`image.query\` or \`source\`), and call \`make_slides({ revise_file_id })\` BEFORE giving your final answer.
 
 ## Never
-- Invent numbers, quotes or sources for charts.
-- Put more than ~60 words on a slide; move the rest to notes.
-- Deliver a text-only deck with no pictures, or paste the deck as chat text.`),
+- Write raw Python/JS pptxgenjs shell scripts or call localhost HTTP endpoints instead of \`make_slides\`.
+- Dump paragraphs onto slides, exceed 5 bullets, or fabricate numbers/charts/sources.
+- Ship a plain text-only deck without resolving \`DESIGN CHECK\` warnings.`),
   // ── Research ──
   triangulate: s('source-triangulation', 'Source triangulation', 'Verify a claim with three independent sources of different types before stating it as fact.', `
 ## When

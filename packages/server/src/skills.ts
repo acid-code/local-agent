@@ -36,9 +36,12 @@ export function renderSkillMd(skill: { name: string; description: string; body: 
 
 const FIT_STOP = new Set(['when', 'user', 'asks', 'with', 'this', 'that', 'from', 'your', 'have', 'will', 'into', 'about', 'they', 'them', 'then', 'than', 'what', 'which', 'where', 'after', 'before', 'using']);
 
+const SLIDE_TRIGGER_WORDS = /(?:^|\P{L})(?:presentation|presentations|slides|deck|decks|pptx|powerpoint|keynote|מצגת|מצגות|שקפים|שקופיות|שקף|פאוורפוינט)(?:\P{L}|$)/iu;
+
 export function skillFit(description: string, text: string): number {
   const words = tokenize(description).filter((word) => word.length > 3 && !FIT_STOP.has(word));
   if (!words.length) return 0;
+  if (SLIDE_TRIGGER_WORDS.test(description) && SLIDE_TRIGGER_WORDS.test(text)) return 0.9;
   const hay = [...new Set(tokenize(text))];
   const hits = words.filter((word) => hay.some((item) => item === word || (word.length >= 5 && item.length >= 5 && (item.startsWith(word.slice(0, 5)) || word.startsWith(item.slice(0, 5)))))).length;
   return hits / words.length;

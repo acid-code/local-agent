@@ -7,7 +7,9 @@ import { buildApp } from '../src/app.js';
 import { filePath, saveFile } from '../src/files.js';
 import { mockPng } from '../src/images.js';
 import { GALLERY } from '../src/gallery.js';
-import { buildDeck, lintDeck, makeEot, readDeckSpec, readDeckText, slidesTools, type DeckSpec } from '../src/slides.js';
+import { buildDeck, lintDeck, makeEot, readDeckSpec, readDeckText, slidesTools, type DeckSpec, type DeckTheme } from '../src/slides.js';
+import { renderSkillMd, saveSkill, skillCatalog } from '../src/skills.js';
+import { SK } from '../src/gallery-skills.js';
 import type { ToolContext } from '../src/tools.js';
 
 const dirs: string[] = [];
@@ -240,5 +242,79 @@ describe('designed deck layouts', () => {
     const w25 = lintDeck(deck25, new Map());
     expect(w25.join(' ')).not.toMatch(/more than 28 slides/);
     store.close();
+  });
+
+  it('supports comparison, timeline, and table layouts, inline **bold** runs, card splitting, and modern themes', async () => {
+    for (const theme of ['midnight', 'editorial', 'forest', 'royal'] as DeckTheme[]) {
+      const deck: DeckSpec = {
+        title: 'אסטרטגיית 2026',
+        lang: 'he',
+        theme,
+        slides: [
+          { layout: 'title', title: 'מפת דרכים', subtitle: 'צוות מוצר', source: 'מקור: פנימי' },
+          { layout: 'cards', title: 'עקרונות', bullets: ['**מהירות:** קיצור זמן טעינה ב-40%', 'בהירות: סיפור אחד בכל שקף'], source: 'מקור: דוח' },
+          {
+            layout: 'comparison',
+            title: 'השוואת גישות',
+            columns: [
+              { heading: 'לפני', bullets: ['**איטי:** 45 שניות לשקף', 'עומס טקסט'] },
+              { heading: 'אחרי', bullets: ['**מהיר:** 8 שניות לשקף', 'פריסות מגוונות'], accent: true },
+            ],
+            source: 'מקור: מדידה',
+          },
+          {
+            layout: 'timeline',
+            title: 'אבני דרך',
+            steps: [
+              { label: 'Q1', title: 'תכנון', detail: 'אפיון קהל יעד ומסרים' },
+              { label: 'Q2', title: 'בנייה', detail: 'ייצור שקפים ואוטומציה' },
+              { label: 'Q3', title: 'השקה', detail: 'מדידה ושיפור ביצועים' },
+            ],
+            source: 'מקור: צוות',
+          },
+          {
+            layout: 'table',
+            title: 'מטריצת תוצאות',
+            table: {
+              headers: ['מדד', 'בסיס', 'יעד'],
+              rows: [['זמן', '45s', '8s'], ['תמונות', '10%', '75%']],
+            },
+            source: 'מקור: דוח',
+          },
+        ],
+      };
+      const bytes = await buildDeck(deck);
+      const { read, names } = await parts(bytes);
+      for (const name of names.filter((item) => item.endsWith('.xml') || item.endsWith('.rels'))) {
+        expect(duplicateAttributes(await read(name)), name).toEqual([]);
+      }
+      for (const name of names.filter((item) => /^ppt\/slides\/slide\d+\.xml$/.test(item))) {
+        const xml = await read(name);
+        expect(xml).not.toContain('**');
+        const runs = xml.match(/<a:rPr[^>]*\/>|<a:rPr[^>]*[^/]>[\s\S]*?<\/a:rPr>/g) ?? [];
+        expect(runs.length).toBeGreaterThan(0);
+        expect(runs.filter((run) => !run.includes('<a:cs typeface="Heebo" pitchFamily="2" charset="-79"/>'))).toEqual([]);
+      }
+      const s2 = await read('ppt/slides/slide2.xml');
+      expect(s2).toContain('מהירות');
+      expect(s2).toContain('קיצור זמן טעינה');
+      const s3 = await read('ppt/slides/slide3.xml');
+      expect(s3).toContain('השוואת גישות');
+      expect(s3).toMatch(/\bb="1"/);
+      expect(await read('ppt/slides/slide4.xml')).toContain('אבני דרך');
+      expect(await read('ppt/slides/slide5.xml')).toContain('מטריצת תוצאות');
+      expect(lintDeck(deck, new Map()).join(' ')).not.toMatch(/Only/);
+    }
+  });
+
+  it('auto-recommends the presentation design skill for both English and Hebrew slide requests', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'la-slide-skill-')); dirs.push(dir);
+    const built = await buildApp({ dataDir: dir, startScheduler: false, serveWeb: false });
+    await built.app.inject({ method: 'POST', url: '/api/setup', payload: { username: 'asaf', password: pw('owner') } });
+    const agent = built.store.listAgents()[0]!;
+    await saveSkill(built.store, dir, renderSkillMd(SK.slides), SK.slides.slug);
+    expect(skillCatalog(built.store, agent.id, 'make a presentation about AI')).toContain('The skill hebrew-slides fits this message. Call load_skill');
+    expect(skillCatalog(built.store, agent.id, 'תכין לי מצגת יפה על בינה מלאכותית')).toContain('The skill hebrew-slides fits this message. Call load_skill');
+    await built.app.close();
   });
 });
