@@ -65,6 +65,28 @@ describe('GTT admission', () => {
     expect(started).toBe(true);
   });
 
+  it('keeps 4 GiB default GTT headroom and enforces 4 GiB OS reserve on unified-memory GPUs', async () => {
+    // 30 GiB used + 4 GiB headroom leaves 6 GiB allocatable, so 7 GiB waits until GTT drops.
+    const { state, budget } = machine({ gtt: { usedBytes: 30 * GiB, totalBytes: 40 * GiB } });
+    expect(await budget.fitsNow({ kind: 'chat', label: 'mid', model: 'mid', bytes: 7 * GiB })).toBe(false);
+    state.gtt = { usedBytes: 28 * GiB, totalBytes: 40 * GiB };
+    expect(await budget.fitsNow({ kind: 'chat', label: 'mid', model: 'mid', bytes: 7 * GiB })).toBe(true);
+
+    // Even when systemReserveBytes is configured lower (e.g. 1.5 GiB), GPU-backed machines enforce >= 4 GiB OS reserve.
+    const lowRamProbe: MemoryProbe = {
+      loaded: async () => [],
+      shape: async () => null,
+      unload: async () => {},
+      serverRss: () => 0.5 * GiB,
+      pidRss: () => 0,
+      systemAvailable: () => 6 * GiB,
+      gtt: () => ({ usedBytes: 20 * GiB, totalBytes: 40 * GiB }),
+      externalResident: () => 1,
+    };
+    const strict = new MemoryBudget(lowRamProbe, () => ({ budgetBytes: 40 * GiB, systemReserveBytes: 1.5 * GiB }), undefined, 10);
+    expect(await strict.fitsNow({ kind: 'chat', label: 'small', model: 'small', bytes: 3 * GiB })).toBe(false);
+  });
+
   it('non-model jobs (the workbench) only need RAM', async () => {
     const { budget } = machine({ gtt: { usedBytes: 39 * GiB, totalBytes: 40 * GiB }, external: 2 });
     const lease = await budget.admit({ kind: 'background', label: 'workbench', bytes: 6 * GiB });

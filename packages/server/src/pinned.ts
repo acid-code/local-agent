@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { gttHeadroomBytes } from './memory.js';
 import { ollamaRoot } from './ollama.js';
 
 /**
@@ -35,12 +36,12 @@ function memAvailableBytes(): number {
 }
 
 const FOREVER_MS = 365 * 24 * 3600 * 1000;
-const HEADROOM = 6 * 1024 ** 3;
+const HEADROOM = 8 * 1024 ** 3;
 
 export interface PinResult { model: string; action: 'pinned' | 'repinned' | 'already' | 'missing' | 'no-slot' | 'low-ram' | 'error'; detail?: string }
 
 /** Make sure every pinned model is loaded with keep_alive -1. Safe to call often. */
-export async function ensurePinned(fetchImpl: typeof fetch, opts: { env?: NodeJS.ProcessEnv; available?: () => number; now?: () => number } = {}): Promise<PinResult[]> {
+export async function ensurePinned(fetchImpl: typeof fetch, opts: { env?: NodeJS.ProcessEnv; available?: () => number; gtt?: () => { usedBytes: number; totalBytes: number } | null; now?: () => number } = {}): Promise<PinResult[]> {
   const env = opts.env ?? process.env;
   const models = pinnedModels(env);
   if (!models.length) return [];
@@ -67,6 +68,11 @@ export async function ensurePinned(fetchImpl: typeof fetch, opts: { env?: NodeJS
       } else {
         if (loaded.length >= maxLoaded) { results.push({ model, action: 'no-slot' }); continue; }
         if (available() < installed.size + HEADROOM) { results.push({ model, action: 'low-ram' }); continue; }
+        const pool = opts.gtt?.();
+        if (pool && pool.totalBytes - pool.usedBytes < installed.size + Math.max(gttHeadroomBytes(), 4 * 1024 ** 3)) {
+          results.push({ model, action: 'low-ram', detail: 'GTT headroom too low' });
+          continue;
+        }
         action = 'pinned';
       }
       const response = await fetchImpl(`${base}/api/generate`, {

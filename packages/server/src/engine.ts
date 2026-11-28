@@ -1135,6 +1135,7 @@ export class Engine {
     const roleForCtx = current.cursor.autoRole || contractForAgent(agent.name)?.modelRole || 'main';
     const roleBudget = roleContextBudget(roleForCtx, model, { repoTask });
     let numCtx = model.local ? ollamaNumCtx(current.cursor.budgetOverride || roleBudget, settings.outputReserveTokens, model.contextWindow) : undefined;
+    if (numCtx && current.cursor.helperId && viaOllama) numCtx = Math.min(numCtx, 8192);
     // llama-server and other external servers keep their model loaded themselves: no RAM admission, no Ollama load.
     const admitted = model.local && numCtx && viaOllama ? await this.admitLocal(current, model, numCtx, signal) : { lease: null, numCtx };
     if ('switchTo' in admitted) {
@@ -1214,7 +1215,7 @@ export class Engine {
           model: model.apiName, messages: built.messages, tools, signal: streamAbort.signal,
           paceMs: model.profileId === 'rehearsal' && process.env.NODE_ENV !== 'test' ? 10 : 0,
           numCtx,
-          keepAlive: model.local ? keepAliveFor(model) : undefined,
+          keepAlive: model.local ? (current.cursor.helperId && viaOllama ? '3m' : keepAliveFor(model)) : undefined,
           think: (Boolean(current.cursor.reasoning) || autoEffort === 'high') && !current.cursor.noThink && sessionEffort !== 'off',
           noThink: Boolean(current.cursor.noThink),
           effort: sessionEffort,

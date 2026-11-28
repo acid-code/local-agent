@@ -23,6 +23,7 @@ export interface ParsedWireGuardConf {
   privateKey: string;
   addresses: string;
   dns: string | null;
+  mtu: number | null;
   publicKey: string;
   presharedKey: string | null;
   endpointIp: string;
@@ -91,6 +92,9 @@ export function parseWireGuardConf(raw: string): ParsedWireGuardConf {
   const privateKey = (iface.get('privatekey') ?? '').trim();
   const addresses = (iface.get('address') ?? '').split(',').map((s) => s.trim()).filter(Boolean).join(',');
   const dnsRaw = (iface.get('dns') ?? '').trim() || null;
+  const mtuRaw = (iface.get('mtu') ?? '').trim();
+  const mtuNum = mtuRaw ? Number(mtuRaw) : null;
+  const mtu = mtuNum !== null && Number.isInteger(mtuNum) && mtuNum > 0 ? mtuNum : null;
   const publicKey = (peer.get('publickey') ?? '').trim();
   const presharedKey = (peer.get('presharedkey') ?? '').trim() || null;
   const endpointRaw = (peer.get('endpoint') ?? '').trim();
@@ -105,11 +109,19 @@ export function parseWireGuardConf(raw: string): ParsedWireGuardConf {
     privateKey,
     addresses,
     dns: dnsRaw,
+    mtu,
     publicKey,
     presharedKey,
     endpointIp: host,
     endpointPort: port,
   };
+}
+
+/** Prefer IPv4 interface CIDRs for Gluetun so dual-stack configs (like WARP) work on IPv4-only Docker bridges. */
+export function wireGuardIpv4Addresses(addresses: string): string {
+  const parts = addresses.split(',').map((s) => s.trim()).filter(Boolean);
+  const v4 = parts.filter((cidr) => net.isIP(cidr.split('/')[0] ?? '') === 4);
+  return v4.length ? v4.join(',') : parts.join(',');
 }
 
 function isPrivateIpv4(ip: string): boolean {
@@ -310,8 +322,8 @@ function singleProxyFetch(
         const raw = await connectHttpTunnel(proxy, target, opts.timeoutMs, opts.signal);
         const tlsSock = await upgradeTlsSocket(raw, target.hostname, opts.timeoutMs);
         tunnelSock = tlsSock;
+        // Do not pass agent: false — Node's http.request ignores createConnection when agent is false.
         req = http.request({
-          agent: false,
           createConnection: () => tlsSock,
           hostname: target.hostname,
           port: Number(target.port || 443),
@@ -526,7 +538,7 @@ export class VpnManager {
 
     let endpointIp = parsed.endpointIp;
     if (net.isIP(endpointIp) === 0) {
-      const resolved = await dns.lookup(endpointIp);
+      const resolved = await dns.lookup(endpointIp, { family: 4 });
       endpointIp = resolved.address;
     }
 
@@ -541,7 +553,7 @@ export class VpnManager {
       'VPN_SERVICE_PROVIDER=custom',
       'VPN_TYPE=wireguard',
       `WIREGUARD_PRIVATE_KEY=${parsed.privateKey}`,
-      `WIREGUARD_ADDRESSES=${parsed.addresses}`,
+      `WIREGUARD_ADDRESSES=${wireGuardIpv4Addresses(parsed.addresses)}`,
       `WIREGUARD_PUBLIC_KEY=${parsed.publicKey}`,
       `WIREGUARD_ENDPOINT_IP=${endpointIp}`,
       `WIREGUARD_ENDPOINT_PORT=${parsed.endpointPort}`,
@@ -551,6 +563,7 @@ export class VpnManager {
       'FIREWALL_OUTBOUND_SUBNETS=172.16.0.0/12,192.168.0.0/16,10.0.0.0/8',
       'TZ=UTC',
     ];
+    if (parsed.mtu) env.push(`WIREGUARD_MTU=${parsed.mtu}`);
     if (parsed.presharedKey) env.push(`WIREGUARD_PRESHARED_KEY=${parsed.presharedKey}`);
 
     await this.docker.startDetached({

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Store } from '../src/db.js';
 import { loadMasterKey, Vault } from '../src/vault.js';
-import { fetchViaHttpProxy, isPrivateOrLocalHost, parseWireGuardConf } from '../src/vpn.js';
+import { fetchViaHttpProxy, isPrivateOrLocalHost, parseWireGuardConf, wireGuardIpv4Addresses } from '../src/vpn.js';
 
 const dirs: string[] = [];
 const servers: http.Server[] = [];
@@ -41,11 +41,28 @@ describe('VPN config, SSRF guard, proxy fetch, and vault isolation', () => {
       privateKey: privKey,
       addresses: '10.2.0.2/32,fd00::2/128',
       dns: '10.2.0.1',
+      mtu: null,
       publicKey: pubKey,
       presharedKey: pskKey,
       endpointIp: '185.159.158.10',
       endpointPort: 51820,
     });
+
+    const warpConf = parseWireGuardConf(`
+      [Interface]
+      PrivateKey = ${privKey}
+      Address = 172.16.0.2/32, 2606:4700:110:8a00::2/128
+      DNS = 1.1.1.1
+      MTU = 1280
+
+      [Peer]
+      PublicKey = ${pubKey}
+      Endpoint = engage.cloudflareclient.com:2408
+    `);
+    expect(warpConf.mtu).toBe(1280);
+    expect(warpConf.endpointIp).toBe('engage.cloudflareclient.com');
+    expect(warpConf.endpointPort).toBe(2408);
+    expect(wireGuardIpv4Addresses(warpConf.addresses)).toBe('172.16.0.2/32');
 
     const withoutPsk = parseWireGuardConf(`
       [Interface]

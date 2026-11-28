@@ -31,7 +31,7 @@ export interface MemoryProbe {
 }
 
 /** Headroom kept free in the GTT pool; overcommitting it froze the mini PC before. */
-export const gttHeadroomBytes = () => Math.max(0, Number(process.env.LA_GTT_HEADROOM_GIB ?? 2)) * GiB;
+export const gttHeadroomBytes = () => Math.max(0, Number(process.env.LA_GTT_HEADROOM_GIB ?? 4)) * GiB;
 /** Never more resident models than this (Ollama plus llama-server). A third model queues or falls back instead. */
 export const maxResidentModels = () => Math.max(1, Number(process.env.LA_MAX_RESIDENT_MODELS || 2));
 
@@ -184,11 +184,13 @@ export class MemoryBudget {
    */
   private fits(extra: number, used: number, systemAvailable: number, req?: JobRequest, loaded: LoadedInfo[] = this.lastLoaded) {
     const cfg = this.config();
-    if (used + extra > cfg.budgetBytes || extra > Math.max(0, systemAvailable - cfg.systemReserveBytes)) return false;
+    const gtt = this.probe.gtt?.();
+    // On unified-memory AMD iGPUs, TTM GTT pages aren't reclaimable by the OOM killer; keep at least 4 GiB OS headroom.
+    const effectiveReserve = gtt ? Math.max(cfg.systemReserveBytes, 4 * GiB) : cfg.systemReserveBytes;
+    if (used + extra > cfg.budgetBytes || extra > Math.max(0, systemAvailable - effectiveReserve)) return false;
     if (!req?.model) return true;
     const resident = this.residentNames(loaded);
     if (!resident.has(req.model) && resident.size + (this.probe.externalResident?.() ?? 0) >= maxResidentModels()) return false;
-    const gtt = this.probe.gtt?.();
     if (gtt && extra > Math.max(0, gtt.totalBytes - gtt.usedBytes - gttHeadroomBytes())) return false;
     return true;
   }
@@ -206,7 +208,8 @@ export class MemoryBudget {
     const gtt = this.probe.gtt?.();
     if (gtt && extra > Math.max(0, gtt.totalBytes - Math.max(0, gtt.usedBytes - freed) - gttHeadroomBytes())) return false;
     const cfg = this.config();
-    if (state.usedBytes - freed + extra > cfg.budgetBytes || extra > Math.max(0, state.systemAvailable + freed - cfg.systemReserveBytes)) return false;
+    const effectiveReserve = gtt ? Math.max(cfg.systemReserveBytes, 4 * GiB) : cfg.systemReserveBytes;
+    if (state.usedBytes - freed + extra > cfg.budgetBytes || extra > Math.max(0, state.systemAvailable + freed - effectiveReserve)) return false;
     if (!req.model) return true;
     const resident = this.residentNames(remaining);
     return resident.has(req.model) || resident.size + (this.probe.externalResident?.() ?? 0) < maxResidentModels();

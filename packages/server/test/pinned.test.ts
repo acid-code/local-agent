@@ -37,6 +37,13 @@ describe('pinned Ollama models', () => {
     const low = fakeOllama([]);
     expect(await ensurePinned(low.fetchImpl, { env: {}, available: () => 5 * GiB })).toEqual([{ model: 'gemma3:4b', action: 'low-ram' }]);
     expect(low.generated).toEqual([]);
+    const lowGtt = fakeOllama([]);
+    expect(await ensurePinned(lowGtt.fetchImpl, {
+      env: {},
+      available: () => 25 * GiB,
+      gtt: () => ({ usedBytes: 34 * GiB, totalBytes: 40 * GiB }),
+    })).toEqual([{ model: 'gemma3:4b', action: 'low-ram', detail: 'GTT headroom too low' }]);
+    expect(lowGtt.generated).toEqual([]);
   });
 
   it('re-pins a model a chat loaded with a short keep_alive, and leaves a pinned one alone', async () => {
