@@ -276,10 +276,26 @@ const { chromium } = require('playwright');
     const title = await page.title().catch(() => '');
     const href = page.url();
     const text = (await page.evaluate(() => document.body?.innerText || '').catch(() => '')).slice(0, 10000);
+    const elements = await page.evaluate(() => {
+      const seen = new Set();
+      const out = [];
+      for (const a of Array.from(document.querySelectorAll('a[href]'))) {
+        if (out.length >= 25) break;
+        const link = a.href;
+        if (!link || !/^https?:\/\//i.test(link) || seen.has(link)) continue;
+        const label = (a.innerText || a.getAttribute('aria-label') || a.getAttribute('title') || '').replace(/\\s+/g, ' ').trim();
+        if (label.length < 3) continue;
+        const rect = a.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) continue;
+        seen.add(link);
+        out.push(label.slice(0, 90) + ' -> ' + link.slice(0, 220));
+      }
+      return out;
+    }).catch(() => []);
     const loginDetected = await page.locator('input[type="password"]').count().then((n) => n > 0).catch(() => false);
     if (cfg.shotPath) await page.screenshot({ path: cfg.shotPath, type: 'png', timeout: 12000, animations: 'disabled' }).catch(() => {});
     await snapLive();
-    const resultJson = JSON.stringify({ title, href, text, elements: [], log, loginDetected });
+    const resultJson = JSON.stringify({ title, href, text, elements, log, loginDetected });
     if (cfg.resPath) fs.writeFileSync(cfg.resPath, resultJson, 'utf8');
     else process.stdout.write(resultJson);
   } finally {
@@ -553,6 +569,7 @@ export class ManagedBrowser {
           title: redactVaultValues(raw.title, secrets),
           href: redactVaultValues(raw.href, secrets),
           text: redactVaultValues(raw.text, secrets),
+          elements: raw.elements.map((entry) => redactVaultValues(entry, secrets)),
           log: raw.log.map((entry) => redactVaultValues(entry, secrets)),
         };
       } finally {

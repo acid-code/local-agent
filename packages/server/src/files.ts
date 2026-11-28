@@ -283,16 +283,37 @@ export function shareFileTool(dataDir: () => string): Tool {
   return {
     name: 'share_file',
     description: 'Show a file from the workspace or an open project to the owner in the chat, with a preview and a download button. Returns a [file:<id>] reference to put in the reply.',
-    parameters: { type: 'object', properties: { path: { type: 'string' }, name: { type: 'string' } }, required: ['path'], additionalProperties: false },
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Relative path in your workspace or attached project (e.g. "gta-game.html" or "project/report.pdf").' },
+        name: { type: 'string', description: 'Optional display filename including the file extension (e.g. "street-chaos.html"). Omit to keep the original filename.' },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    },
     mutates: () => false,
     approval: () => null,
     async execute(args, ctx) {
-      const hit = locatePath({ workspace: ctx.workspace, roots: ctx.roots, target: String(args.path || '') });
+      const rawTarget = String(args.path || '').trim();
+      const wsBase = path.basename(path.resolve(ctx.workspace));
+      const escapedWs = wsBase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const containerPrefixRe = new RegExp(`^\\/?(?:workspaces\\/${escapedWs}|workspace)\\/`, 'i');
+      const hit = locatePath({ workspace: ctx.workspace, roots: ctx.roots, target: rawTarget })
+        ?? (containerPrefixRe.test(rawTarget)
+          ? locatePath({ workspace: ctx.workspace, roots: ctx.roots, target: rawTarget.replace(containerPrefixRe, '') })
+          : null);
       if (!hit) throw new Error('That path is outside the workspace and the open projects.');
       const stat = fs.statSync(hit.full);
       if (!stat.isFile()) throw new Error('That is not a file.');
       if (stat.size > MAX_FILE_BYTES) throw new Error('That file is over 50 MB.');
-      const file = saveFile(ctx.store, dataDir(), { name: String(args.name || path.basename(hit.full)), bytes: fs.readFileSync(hit.full), sessionId: ctx.sessionId, agentId: ctx.agent.id, source: 'agent', ownerId: ctx.agent.ownerId || OWNER_ID });
+      const sourceBase = path.basename(hit.full);
+      const sourceExt = path.extname(sourceBase);
+      let shareName = String(args.name || '').trim() || sourceBase;
+      if (sourceExt && !/\.[a-z0-9]{1,8}$/i.test(shareName)) {
+        shareName = `${shareName}${sourceExt}`;
+      }
+      const file = saveFile(ctx.store, dataDir(), { name: shareName, bytes: fs.readFileSync(hit.full), sessionId: ctx.sessionId, agentId: ctx.agent.id, source: 'agent', ownerId: ctx.agent.ownerId || OWNER_ID });
       return `Shared [file:${file.id}] ${file.name} (${file.size} bytes). Mention [file:${file.id}] in the reply.`;
     },
   };

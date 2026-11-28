@@ -141,7 +141,7 @@ const toolSchemas: Record<string, z.ZodTypeAny> = {
     tools: z.array(z.string()).optional(),
     max_steps: z.coerce.number().optional(),
     timeout_minutes: z.coerce.number().optional(),
-    cli: z.string().optional(),
+    cli: z.string().optional().describe('Optional external coding CLI binary ONLY (claude | codex | gemini | aider | opencode). Omit for normal research/verify/coder helpers.'),
   }),
 };
 
@@ -248,15 +248,36 @@ export function pickAutoRole(text: string, opts?: { failures?: number; tooLong?:
   return { role: 'main', reason: 'Ordinary turns stay on the main model.' };
 }
 
+/** Normalize common small-model argument aliases (e.g. `pattern`/`q` -> `query` on web_search) before contract validation. */
+export function normalizeToolArgs(name: string, args: Record<string, unknown>): Record<string, unknown> {
+  const firstNonEmpty = (...keys: string[]) => {
+    for (const k of keys) {
+      const v = args[k];
+      if (typeof v === 'string' && v.trim()) return v;
+    }
+    return undefined;
+  };
+  if (name === 'web_search' && !(typeof args.query === 'string' && args.query.trim())) {
+    const query = firstNonEmpty('q', 'pattern', 'search', 'keywords');
+    if (query) return { ...args, query };
+  }
+  if ((name === 'web_fetch' || name === 'browse') && !(typeof args.url === 'string' && args.url.trim())) {
+    const url = firstNonEmpty('href', 'link', 'uri');
+    if (url) return { ...args, url };
+  }
+  return args;
+}
+
 export async function checkOrRepair<T>(schema: z.ZodType<T>, value: unknown, repair: (error: string) => Promise<unknown>): Promise<{ ok: true; value: T; repaired: boolean } | { ok: false; error: string }> {
+  const fmt = (issues: z.ZodIssue[]) => issues.map((issue) => (issue.path.length ? `${issue.path.join('.')}: ${issue.message}` : issue.message)).join('; ');
   const first = schema.safeParse(value);
   if (first.success) return { ok: true, value: first.data, repaired: false };
-  const message = first.error.issues.map((issue) => issue.message).join('; ') || 'does not match the contract';
+  const message = fmt(first.error.issues) || 'does not match the contract';
   try {
     const next = await repair(message);
     const second = schema.safeParse(next);
     if (second.success) return { ok: true, value: second.data, repaired: true };
-    const again = second.error.issues.map((issue) => issue.message).join('; ');
+    const again = fmt(second.error.issues);
     return { ok: false, error: `Contract mismatch after one repair: ${again}` };
   } catch (error) {
     return { ok: false, error: `Contract mismatch. Repair failed: ${error instanceof Error ? error.message : 'invalid JSON'}. ${message}` };

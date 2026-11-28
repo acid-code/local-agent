@@ -456,7 +456,7 @@ export function browseTool(): Tool {
     description: 'Open and surf a public web page in the live browser (visible in Live Computer). Preferred over web_fetch for websites, stores (AliExpress, Amazon, etc.), prices, product listings, JS apps, or interactive pages. Supports click/fill/select/hover/press/scroll/wait and screenshots ([file:<id>]). Keeps cookies 30m.',
     parameters: obj({
       url: { type: 'string', description: 'Public http(s) URL to open.' },
-      screenshot: { type: 'boolean', description: 'Capture PNG screenshot ([file:<id>]).' },
+      screenshot: { type: 'boolean', description: 'Optional (default false). Set true only when you need a PNG screenshot ([file:<id>]) to inspect visuals/layout with understand_image.' },
       actions: {
         type: 'array',
         description: 'Actions: navigate/reload/back/click/fill/select/hover/press/scroll/submit/wait (selector, text, value, key, y, ms).',
@@ -538,7 +538,8 @@ export function browseTool(): Tool {
               await ctx.computer.pauseForLogin(ctx.runId, ctx.agent.name, result.href || url, ctx.signal);
             }
             const loginHint = result.loginDetected ? '\n[Note: a password field is on this page. Owner took over to sign in and returned control.]' : '';
-            return `Title: ${result.title || '(untitled)'}\nURL: ${result.href || url}\n${fileRef}${actionSummary}\n${result.text || '(empty page)'}${loginHint}`;
+            const links = result.elements.length ? `\n\nLinks:\n${result.elements.slice(0, 20).map((e) => `- ${e}`).join('\n')}` : '';
+            return `Title: ${result.title || '(untitled)'}\nURL: ${result.href || url}\n${fileRef}${actionSummary}\n${result.text || '(empty page)'}${links}${loginHint}`;
           } catch (error) {
             if (isBrowserPolicyError(error)) throw error;
             const msg = ((error as Error).message || String(error)).replace(/\s+/g, ' ').slice(0, 600);

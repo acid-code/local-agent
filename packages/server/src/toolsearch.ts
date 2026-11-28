@@ -46,7 +46,7 @@ const SYNONYMS: Record<string, string[]> = {
   memory: ['remember', 'recall', 'note'],
   text: ['ocr', 'scan', 'receipt'],
   tweet: ['twitter', 'x', 'post'],
-  vpn: ['vpn', 'proxy', 'wireguard', 'ip', 'geoblock', 'region'],
+  vpn: ['vpn', 'proxy', 'wireguard', 'geoblock', 'region'],
   share: ['share_file', 'download', 'send', 'deliver', 'attach'],
 };
 

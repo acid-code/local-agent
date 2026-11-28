@@ -475,6 +475,11 @@ export class VpnManager {
     return mode === 'wireguard' || mode === 'proxy' ? mode : null;
   }
 
+  /** Fast synchronous check used when building tool menus so unconfigured VPN isn't advertised. */
+  isConfigured(): boolean {
+    return this.storedMode() !== null;
+  }
+
   async saveWireGuard(conf: string, actor: string): Promise<VpnStatus> {
     parseWireGuardConf(conf);
     this.vault.put({ name: KEY_WG_CONF, value: conf.trim(), scope: VPN_SCOPE, actor });

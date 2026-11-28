@@ -45,7 +45,7 @@ import { FENCED_EDIT_HINT, extractFencedEdits } from './fenced-edits.js';
 import { listSkills, runSkillScript, skillCatalog } from './skills.js';
 import { getWorkshop, workshopBrief } from './workshops.js';
 import { chatWorkspaceBrief, chatWorkspacePaths, getChatWorkspaces, setChatWorkspaces } from './chat-workspaces.js';
-import { checkOrRepair, contractForAgent, mergeToolParameters, pickAutoRole, toolArgumentsSchema } from './contracts.js';
+import { checkOrRepair, contractForAgent, mergeToolParameters, normalizeToolArgs, pickAutoRole, toolArgumentsSchema } from './contracts.js';
 import { addProjectNote, changesSince, ensureTaskBranch, isSmallEdit, listSharedRepos, matchRepos, refreshRepo, releaseRepoLocks, repoSyncTool, sharedRepoBrief, taskBranchName, tryLockRepo, type GitIdentity } from './repos.js';
 import { isMissingModelError, isToolUnsupportedError, ollamaCapabilities, ollamaRoot } from './ollama.js';
 import { scanMachine } from './discovery.js';
@@ -1544,9 +1544,12 @@ export class Engine {
       if (completed.has(call.id)) continue;
       await this.waitIfPaused(run.id, signal);
       if (signal.aborted) throw new StopError();
+      const stepAgent = this.store.getAgent(run.agentId)!;
+      const stepSessionMode = this.store.getSession(run.sessionId)?.mode;
       const stepModelRow = run.modelId ? this.store.getModel(run.modelId) : null;
       const stepStable = Boolean(stepModelRow && this.cacheFriendly(stepModelRow));
-      const tools = this.tools(this.store.getAgent(run.agentId)!, this.store.getSession(run.sessionId)?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId), run, true, stepStable);
+      const stepCompact = this.isCompactCoding(stepAgent, stepSessionMode, run, stepModelRow, this.store.getSettings());
+      const tools = this.tools(stepAgent, stepSessionMode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId), run, true, stepStable, stepCompact);
       const tool = tools.find((item) => item.name === call.name);
       // A permitted tool called before find_tools surfaced it still runs, and stays on the menu from now on.
       if (tool && run.cursor.extraTools !== undefined && call.name !== 'find_tools' && !run.cursor.extraTools.includes(call.name)) this.addRunTools(run, [call.name]);
@@ -1567,7 +1570,7 @@ export class Engine {
         this.bumpTools(run.id, completed);
         continue;
       }
-      let args = parseArgs(call.arguments);
+      let args = normalizeToolArgs(call.name, parseArgs(call.arguments));
       const speaker = this.store.getAgent(run.agentId);
       const contract = speaker ? contractForAgent(speaker.name) : null;
       if (contract && speaker && !contractAllows(contract, call.name, this.allowedTools(speaker, this.store.getSession(run.sessionId)?.mode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId)).servers)) {
@@ -2778,7 +2781,7 @@ export class Engine {
       names.add('create_project');
       names.add('vercel');
       names.add('turbo_inspect');
-      names.add('vpn');
+      if (this.vpn?.isConfigured()) names.add('vpn');
     }
     if (this.ocrReader) names.add('read_image_text');
     if (this.imageAnalyzer) names.add('understand_image');
@@ -2804,11 +2807,20 @@ export class Engine {
     for (const name of disabledConnectorTools(this.store)) names.delete(name);
     const catalog = [...toolsFor([...names]), ...CODING_TOOLS, requestSecretTool(), readOutputTool(), skillScriptTool(), kbSearchTool(), loadSkillTool(), setFocusTool(), repoSyncTool(), findContextTool(), shareFileTool(() => this.libraryDir), imageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }), fetchImageTool({ dataDir: this.libraryDir, fetchImpl: this.fetchImpl }),     ...slidesTools({ dataDir: this.libraryDir, photo: async (query, ctx) => ({ fileId: (await fetchWebImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, searxngUrl: this.store.getSettings().searxngUrl || process.env.SEARXNG_URL || '' }, { query, ownerId: ctx.ownerId, sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal, primaryOnly: true })).file.id }), image: async (prompt, ctx) => { try { return { fileId: (await generateImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, memory: this.memory }, { prompt, ownerId: ctx.ownerId, shape: 'landscape', sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal })).file.id }; } catch { const searxngUrl = this.store.getSettings().searxngUrl || process.env.SEARXNG_URL || ''; return { fileId: (await fetchWebImage({ store: this.store, dataDir: this.libraryDir, fetchImpl: this.fetchImpl, searxngUrl }, { query: prompt, ownerId: ctx.ownerId, sessionId: ctx.sessionId ?? null, agentId: ctx.agentId ?? null, signal: ctx.signal, primaryOnly: true })).file.id }; } } }), ...this.autonomy.tools(), tasksTool(), enterPlanModeTool(), exitPlanModeTool(), memoryFileTool(), searchChatsTool(), proposeSkillTool(), ...CONNECTOR_TOOLS(), ...vercelTools(), ...(this.ocrReader ? [ocrTool(this.ocrReader)] : []), ...(this.imageAnalyzer ? [understandImageTool(this.imageAnalyzer)] : []), ...this.extraTools, ...mcp.map((row) => row.tool)];
     const seen = new Set<string>();
+    const vpnConfigured = Boolean(this.vpn?.isConfigured());
     const chosen = catalog.filter((tool) => {
       if (!names.has(tool.name) || seen.has(tool.name)) return false;
       seen.add(tool.name);
       return true;
-    }).map((tool) => ({ ...tool, parameters: mergeToolParameters(tool.name, tool.parameters) }));
+    }).map((tool) => {
+      const merged = mergeToolParameters(tool.name, tool.parameters);
+      if (tool.name === 'shell' && !vpnConfigured) {
+        const props = { ...((merged.properties as Record<string, unknown> | undefined) ?? {}) };
+        delete props.use_vpn;
+        return { ...tool, parameters: { ...merged, properties: props } };
+      }
+      return { ...tool, parameters: merged };
+    });
     const servers = new Map(mcp.filter((row) => names.has(row.tool.name)).map((row) => [row.tool.name, row.serverName] as [string, string]));
     return { tools: names.has('run_tool_script') ? [...chosen, toolScript(chosen)] : chosen, servers };
   }

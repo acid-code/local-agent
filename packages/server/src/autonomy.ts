@@ -301,7 +301,8 @@ export class Autonomy {
     if (!agent || (agent.ownerId || OWNER_ID) !== owner) throw new Error(`No persona named ${input.persona}.`);
     if (this.runningCount('AND parent_session_id = ?', ctx.sessionId) >= HELPER_LIMITS.perChat) throw new Error(`This chat already has ${HELPER_LIMITS.perChat} helpers running. Wait for one, or stop one.`);
     if (this.runningCount('') >= HELPER_LIMITS.total) throw new Error(`${HELPER_LIMITS.total} helpers are already running on this machine. Wait for one to finish.`);
-    const cli = input.cli?.trim() || null;
+    const rawCli = input.cli?.trim() || '';
+    const cli = !rawCli || /^(false|none|null)$/i.test(rawCli) ? null : rawCli;
     if (cli && owner !== OWNER_ID) throw new Error('Coding CLIs are for the owner\'s personas.');
     if (cli && !/^(claude|codex|gemini|aider|opencode|qwen)(?:[-_\w.]*)?$/i.test(cli)) {
       throw new Error(`cli is only for coding CLIs (claude, codex, gemini, aider, opencode). To run "${cli.slice(0, 60)}", call the shell tool directly (or omit cli so the helper uses shell directly).`);
@@ -595,7 +596,7 @@ export class Autonomy {
           tools: { type: 'array', items: { type: 'string' } },
           max_steps: { type: 'number' },
           timeout_minutes: { type: 'number' },
-          cli: { type: 'string' },
+          cli: { type: 'string', description: 'Optional external coding CLI binary ONLY (claude | codex | gemini | aider | opencode). Omit for normal research/verify/coder helpers.' },
         }),
         mutates: () => false,
         approval: () => null,

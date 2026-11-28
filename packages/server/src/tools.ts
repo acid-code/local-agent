@@ -101,11 +101,23 @@ export async function searxngQuery(base: string, query: string, fetchImpl: typeo
     throw new Error(`SearXNG at ${root} did not return JSON. Check that the json format is on.`);
   }
   const unresponsive = (json.unresponsive_engines ?? []).map((item) => Array.isArray(item) ? `${item[0]}${item[1] ? ` (${item[1]})` : ''}` : String(item));
-  const hits = (json.results ?? []).slice(0, Math.max(1, limit)).map((result) => ({
-    title: result.title ?? '',
-    url: result.url ?? '',
-    content: result.content ?? '',
-  }));
+  const validUrl = (raw?: string) => {
+    if (!raw) return false;
+    try {
+      const u = new URL(raw);
+      return (u.protocol === 'http:' || u.protocol === 'https:') && Boolean(u.hostname) && u.hostname.includes('.');
+    } catch {
+      return false;
+    }
+  };
+  const hits = (json.results ?? [])
+    .filter((result) => validUrl(result.url))
+    .slice(0, Math.max(1, limit))
+    .map((result) => ({
+      title: result.title ?? '',
+      url: result.url ?? '',
+      content: result.content ?? '',
+    }));
   return { hits, unresponsive, partial: unresponsive.length > 0 };
 }
 
@@ -396,7 +408,7 @@ export const BUILTIN_TOOLS: Tool[] = [
     parameters: obj({
       command: { type: 'string' },
       cwd: { type: 'string', description: 'Project label when multiple projects are attached, or "workspace" for files in your own workspace.' },
-      use_vpn: { type: 'boolean', description: 'Route this command through the isolated VPN proxy (if configured in Settings -> VPN) without affecting local services.' },
+      use_vpn: { type: 'boolean', description: 'Optional (default false). ONLY set true when the user explicitly asks to route through VPN or a site is geo-blocked. Never enable for normal commands or web requests.' },
       why: { type: 'string', description: 'Optional 3-8 word intent shown in the step log.' },
     }, ['command']),
     mutates: (args) => assessCommand(String(args.command || '')) !== 'ok',
@@ -470,7 +482,7 @@ export const BUILTIN_TOOLS: Tool[] = [
   },
   {
     name: 'vpn',
-    description: 'Check the isolated VPN status/exit IP or fetch a public URL through the VPN sidecar without affecting local models, SearXNG, or LAN access.',
+    description: 'Optional isolated VPN tool — ONLY use when the user explicitly asks for VPN/proxy routing or a public site is geo-blocked. Never use for normal web lookups (use web_search, browse, or web_fetch instead).',
     parameters: obj({
       action: { type: 'string', enum: ['status', 'fetch'], description: 'status: check whether VPN is connected and show its exit IP; fetch: GET a public http/https URL through the VPN proxy.' },
       url: { type: 'string', description: 'Public http:// or https:// URL to fetch when action="fetch".' },
