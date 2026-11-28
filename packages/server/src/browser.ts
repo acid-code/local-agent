@@ -275,12 +275,40 @@ const { chromium } = require('playwright');
     }
     const title = await page.title().catch(() => '');
     const href = page.url();
-    const text = (await page.evaluate(() => document.body?.innerText || '').catch(() => '')).slice(0, 10000);
+    const text = await page.evaluate(() => {
+      const main = document.querySelector('main, [role="main"], article');
+      const mainText = main && main.innerText ? main.innerText.trim() : '';
+      let raw = '';
+      if (mainText.length >= 400) {
+        raw = mainText;
+      } else if (document.body) {
+        const clone = document.body.cloneNode(true);
+        for (const el of clone.querySelectorAll('nav, footer, aside, [role="navigation"], [role="banner"], [role="contentinfo"], [aria-hidden="true"], script, style, noscript')) {
+          el.remove();
+        }
+        const cleaned = (clone.innerText || clone.textContent || '').trim();
+        raw = cleaned.length >= 200 ? cleaned : (document.body.innerText || '');
+      }
+      const lines = raw.split(/\\n/);
+      const compact = [];
+      let prev = '';
+      for (const line of lines) {
+        const trimmed = line.replace(/[ \\t\\f\\v\\r]+/g, ' ').trim();
+        if (!trimmed) {
+          if (compact.length && compact[compact.length - 1] !== '') compact.push('');
+          continue;
+        }
+        if (trimmed === prev) continue;
+        compact.push(trimmed);
+        prev = trimmed;
+      }
+      return compact.join('\\n').replace(/\\n{3,}/g, '\\n\\n').trim().slice(0, 5500);
+    }).catch(() => '');
     const elements = await page.evaluate(() => {
       const seen = new Set();
       const out = [];
       for (const a of Array.from(document.querySelectorAll('a[href]'))) {
-        if (out.length >= 25) break;
+        if (out.length >= 18) break;
         const link = a.href;
         if (!link || !/^https?:\/\//i.test(link) || seen.has(link)) continue;
         const label = (a.innerText || a.getAttribute('aria-label') || a.getAttribute('title') || '').replace(/\\s+/g, ' ').trim();
@@ -288,7 +316,7 @@ const { chromium } = require('playwright');
         const rect = a.getBoundingClientRect();
         if (rect.width === 0 && rect.height === 0) continue;
         seen.add(link);
-        out.push(label.slice(0, 90) + ' -> ' + link.slice(0, 220));
+        out.push(label.slice(0, 70) + ' -> ' + link.slice(0, 180));
       }
       return out;
     }).catch(() => []);

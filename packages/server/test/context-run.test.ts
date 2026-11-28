@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { digestToolOutput, planContext, type ContextSourceMessage, type ChatMessage, type ToolCall } from '@local-agent/shared';
+import { digestToolOutput, planContext, type ContextSourceMessage, type ChatMessage, type ToolCall, type ToolDefinition } from '@local-agent/shared';
 import { buildApp } from '../src/app.js';
 import type { ModelProvider } from '../src/providers.js';
 
@@ -85,11 +85,16 @@ describe('run-aware context planning', () => {
 });
 
 class Recorder implements ModelProvider {
-  steps: { text?: string; toolCalls?: ToolCall[]; thinking?: string }[] = [];
+  steps: ({ text?: string; toolCalls?: ToolCall[]; thinking?: string; onCall?: () => void } | ((callIndex: number) => { text?: string; toolCalls?: ToolCall[]; thinking?: string }))[] = [];
   calls: ChatMessage[][] = [];
-  async *complete(req: { messages: ChatMessage[] }) {
+  tools: string[][] = [];
+  async *complete(req: { messages: ChatMessage[]; tools?: ToolDefinition[] }) {
+    const idx = this.calls.length;
     this.calls.push(JSON.parse(JSON.stringify(req.messages)));
-    const step = this.steps.shift() ?? { text: 'ok' };
+    this.tools.push((req.tools ?? []).map((t) => t.name));
+    const entry = this.steps.shift();
+    const step = typeof entry === 'function' ? entry(idx) : (entry ?? { text: 'ok' });
+    if (typeof entry !== 'function') entry?.onCall?.();
     if (step.thinking) yield { type: 'thinking' as const, text: step.thinking };
     if (step.text) yield { type: 'token' as const, text: step.text };
     yield { type: 'done' as const, finishReason: step.toolCalls?.length ? 'tool_calls' : 'stop', toolCalls: step.toolCalls, usage: { inputTokens: 5, outputTokens: 5 } };
@@ -140,6 +145,94 @@ describe('append-only prompt for cache-friendly models', () => {
     const last = calls.at(-1)!;
     expect(last.filter((m) => /CHECK BEFORE ANSWERING/.test(m.content)).length).toBe(1);
     expect(last.find((m) => m.role === 'assistant' && m.toolCalls?.[0]?.id === 'c1')!.reasoning).toBe('Read notes first.');
+    await built.app.close();
+  });
+
+  it('preserves prefix, reasoning, and tools when mid-run steering arrives on cache-friendly models', async () => {
+    const built = await setup();
+    const read = (id: string, file: string): ToolCall => ({ id, name: 'read_file', arguments: JSON.stringify({ path: file }) });
+    let activeRunId = '';
+    let steered = false;
+    built.provider.steps = [
+      {
+        thinking: 'Checking notes first.',
+        toolCalls: [read('c1', 'notes.txt')],
+        onCall: () => {
+          if (steered) return;
+          steered = true;
+          const active = built.store.listSessionRuns(built.session.id, 4).find((r) => ['running', 'paused'].includes(r.status));
+          if (active) {
+            activeRunId = active.id;
+            built.engine.steer(active.id, 'make a slides presentation — actually it is a mini pc');
+          }
+        },
+      },
+      { text: 'Understood, it is a mini PC.' },
+    ];
+    const row = await built.engine.startTurn({ sessionId: built.session.id, agentId: built.agent.id, content: 'check notes.txt' });
+    await waitFor(() => ['completed', 'failed'].includes(built.store.getRun(row.id)?.status ?? ''));
+    expect(built.store.getRun(row.id)!.status).toBe('completed');
+    expect(activeRunId).toBe(row.id);
+    expect(built.provider.calls.length).toBe(2);
+    // Token-0 tools list must stay identical (no mid-run seedTools mutation).
+    expect(built.provider.tools[1]).toEqual(built.provider.tools[0]);
+    // Prefix from Turn 0 must remain byte-identical at the front of Turn 1.
+    const prev = built.provider.calls[0]!;
+    const cur = built.provider.calls[1]!;
+    expect(cur.slice(0, prev.length)).toEqual(prev);
+    // Prior assistant reasoning stays intact and steering arrives once via <note>, not as a mid-run user turn.
+    const priorAssistant = cur.find((m) => m.role === 'assistant' && m.toolCalls?.[0]?.id === 'c1')!;
+    expect(priorAssistant.reasoning).toBe('Checking notes first.');
+    const userMessagesInPrompt = cur.filter((m) => m.role === 'user');
+    expect(userMessagesInPrompt.length).toBe(1);
+    const steerNotes = cur.filter((m) => m.content.includes('actually it is a mini pc'));
+    expect(steerNotes.length).toBe(1);
+    expect(steerNotes[0]!.role).toBe('tool');
+    expect(steerNotes[0]!.content).toContain('<note>');
+    // The UI/DB still preserves the user's steering message.
+    const dbSteer = built.store.listMessages(built.session.id).find((m) => m.routingNote === 'Steering');
+    expect(dbSteer?.content).toBe('make a slides presentation — actually it is a mini pc');
+    await built.app.close();
+  });
+
+  it('keeps summarized-chat historyFloorId pinned across Turn 0 and Turn 1', async () => {
+    const built = await setup();
+    const m1 = built.store.insertMessage({ sessionId: built.session.id, role: 'user', content: 'old q1', toolCallId: null, toolName: null, toolCalls: null, agentId: built.agent.id, runId: null, imageUrl: null, routingNote: null });
+    const m2 = built.store.insertMessage({ sessionId: built.session.id, role: 'assistant', content: 'old a1', toolCallId: null, toolName: null, toolCalls: null, agentId: built.agent.id, runId: null, imageUrl: null, routingNote: null });
+    const m3 = built.store.insertMessage({ sessionId: built.session.id, role: 'user', content: 'old q2', toolCallId: null, toolName: null, toolCalls: null, agentId: built.agent.id, runId: null, imageUrl: null, routingNote: null });
+    const m4 = built.store.insertMessage({ sessionId: built.session.id, role: 'assistant', content: 'old a2', toolCallId: null, toolName: null, toolCalls: null, agentId: built.agent.id, runId: null, imageUrl: null, routingNote: null });
+    const m5 = built.store.insertMessage({ sessionId: built.session.id, role: 'user', content: 'old q3', toolCallId: null, toolName: null, toolCalls: null, agentId: built.agent.id, runId: null, imageUrl: null, routingNote: null });
+    built.store.insertMessage({ sessionId: built.session.id, role: 'assistant', content: 'old a3', toolCallId: null, toolName: null, toolCalls: null, agentId: built.agent.id, runId: null, imageUrl: null, routingNote: null });
+    // Cover m1..m4 so Turn 0's tailStart (last 4 messages) starts inside the covered range (at m4).
+    built.store.addSummary({ sessionId: built.session.id, level: 2, version: 1, content: 'Prior summary', covers: [m1.id, m2.id, m3.id, m4.id], foldedInto: null, tokenEstimate: 10 });
+    void m5;
+    const read = (id: string, file: string): ToolCall => ({ id, name: 'read_file', arguments: JSON.stringify({ path: file }) });
+    built.provider.steps = [
+      { thinking: 'Read notes.', toolCalls: [read('c1', 'notes.txt')] },
+      { text: 'All done.' },
+    ];
+    const row = await built.engine.startTurn({ sessionId: built.session.id, agentId: built.agent.id, content: 'read notes again' });
+    await waitFor(() => ['completed', 'failed'].includes(built.store.getRun(row.id)?.status ?? ''));
+    expect(built.store.getRun(row.id)!.status).toBe('completed');
+    expect(built.provider.calls.length).toBe(2);
+    const prev = built.provider.calls[0]!;
+    const cur = built.provider.calls[1]!;
+    expect(cur[1]!.content).toBe(prev[1]!.content);
+    expect(cur.slice(0, prev.length)).toEqual(prev);
+    await built.app.close();
+  });
+
+  it('keeps the token-0 tool menu identical across consecutive runs in a cache-friendly session', async () => {
+    const built = await setup();
+    built.provider.steps = [{ text: 'First answer.' }, { text: 'Second answer.' }];
+    const r1 = await built.engine.startTurn({ sessionId: built.session.id, agentId: built.agent.id, content: 'check prices online' });
+    await waitFor(() => ['completed', 'failed'].includes(built.store.getRun(r1.id)?.status ?? ''));
+    const r2 = await built.engine.startTurn({ sessionId: built.session.id, agentId: built.agent.id, content: 'make a slides presentation with fetch_image and shell' });
+    await waitFor(() => ['completed', 'failed'].includes(built.store.getRun(r2.id)?.status ?? ''));
+    expect(built.provider.tools.length).toBe(2);
+    expect(built.provider.tools[1]).toEqual(built.provider.tools[0]);
+    expect(built.provider.tools[0]).not.toContain('find_tools');
+    expect(built.provider.tools[0]).toContain('make_slides');
     await built.app.close();
   });
 });

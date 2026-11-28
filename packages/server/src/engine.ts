@@ -31,7 +31,7 @@ import {
 } from '@local-agent/shared';
 import { Bus } from './bus.js';
 import { vercelTools } from './vercel.js';
-import type { Agent, ModelRow, ProviderRow, RunRow, Store } from './db.js';
+import type { Agent, Message, ModelRow, ProviderRow, RunRow, Store } from './db.js';
 import { dispatchPersonaMessage } from './persona-messaging.js';
 import type { DockerCtl } from './docker.js';
 import { indexText, retrieve, type VectorIndex } from './embeddings.js';
@@ -40,7 +40,7 @@ import type { Settings } from './settings.js';
 import { CODING_TOOLS, readPlan, replacePlan } from './coding.js';
 import { formatCitations, searchKnowledge } from './kb.js';
 import { kbSearchTool, loadSkillTool, setFocusTool, toolsFor, type Tool, type ToolContext } from './tools.js';
-import { COMPACT_CODING_TOOLS, CORE_TOOLS, LEAN_MIN_TOOLS, SEED_TOOLS, findToolsTool, leanMenuEnabled, rankTools } from './toolsearch.js';
+import { COMPACT_CODING_TOOLS, CORE_TOOLS, LEAN_MIN_TOOLS, SEED_TOOLS, STABLE_FULL_MENU_MAX, findToolsTool, leanMenuEnabled, rankTools } from './toolsearch.js';
 import { FENCED_EDIT_HINT, extractFencedEdits } from './fenced-edits.js';
 import { listSkills, runSkillScript, skillCatalog } from './skills.js';
 import { getWorkshop, workshopBrief } from './workshops.js';
@@ -422,12 +422,14 @@ export class Engine {
     return plan.breakdown;
   }
 
-  /** Skip older messages already covered by any summary (including older summaries already folded into the root), always keeping the latest 4 messages. */
-  private uncoveredMessages<T extends { id: string }>(messages: T[], summaries: { level: number; covers: string[]; foldedInto: string | null }[]): T[] {
+  /** Skip older messages already covered by any summary (including older summaries already folded into the root), always keeping the latest 4 messages and never dropping below floorId once fixed. */
+  private uncoveredMessages<T extends { id: string }>(messages: T[], summaries: { level: number; covers: string[]; foldedInto: string | null }[], floorId?: string): T[] {
     const covered = new Set(summaries.flatMap((s) => s.covers));
     if (!covered.size || messages.length <= 4) return messages;
     const tailStart = Math.max(0, messages.length - 4);
-    return messages.filter((m, idx) => idx >= tailStart || !covered.has(m.id));
+    const floorIdx = floorId ? messages.findIndex((m) => m.id === floorId) : -1;
+    const keepFrom = floorIdx >= 0 ? Math.min(tailStart, floorIdx) : tailStart;
+    return messages.filter((m, idx) => idx >= keepFrom || !covered.has(m.id));
   }
 
   /** Pick a fast lightweight model (e.g. gemma3:4b) for compaction/handoff so it finishes in ~3-5s without evicting llama-server's KV prefix cache. */
@@ -920,14 +922,16 @@ export class Engine {
       if (steeringAgent && !current.cursor.helperId) {
         const steerModel = current.modelId ? this.store.getModel(current.modelId) : null;
         const steerStable = Boolean(steerModel && this.cacheFriendly(steerModel));
-        const steerCompact = this.isCompactCoding(steeringAgent, sessionMode, current, steerModel, settings);
-        const offered = this.tools(steeringAgent, sessionMode, current.cursor.stage, current.cursor.toolSubset, false, current, false, steerStable, steerCompact);
-        const offeredNames = new Set(offered.map((t) => t.name));
-        const contract = contractForAgent(steeringAgent.name);
-        const { tools: allPermitted, servers } = this.allowedTools(steeringAgent, sessionMode, current.cursor.stage, current.cursor.toolSubset, false, steerStable);
-        const discoverable = allPermitted.filter((t) => contractAllows(contract, t.name, servers) && !offeredNames.has(t.name));
-        this.seedToolsFromText(current, steering.content, discoverable, servers);
-        current = this.store.getRun(run.id) ?? current;
+        if (!steerStable) {
+          const steerCompact = this.isCompactCoding(steeringAgent, sessionMode, current, steerModel, settings);
+          const offered = this.tools(steeringAgent, sessionMode, current.cursor.stage, current.cursor.toolSubset, false, current, false, steerStable, steerCompact);
+          const offeredNames = new Set(offered.map((t) => t.name));
+          const contract = contractForAgent(steeringAgent.name);
+          const { tools: allPermitted, servers } = this.allowedTools(steeringAgent, sessionMode, current.cursor.stage, current.cursor.toolSubset, false, steerStable);
+          const discoverable = allPermitted.filter((t) => contractAllows(contract, t.name, servers) && !offeredNames.has(t.name));
+          this.seedToolsFromText(current, steering.content, discoverable, servers);
+          current = this.store.getRun(run.id) ?? current;
+        }
       }
       this.bus.publish({ type: 'steering', runId: run.id, messageId: steering.id, status: 'applied' });
     }
@@ -1113,8 +1117,10 @@ export class Engine {
       : explicitEffort
         ? true
         : (Boolean(current.cursor.reasoning) || autoEffort === 'high' || autoEffort === 'medium' || Boolean(providerRow && (isLlamaServerProvider(providerRow) || isUncensoredProvider(providerRow))));
-    const nativeThinking = thinkingOn || (/(?:qwen3|flint|deepseek[-_]?r1|qwq|\bo[134]\b)/i.test(`${model.apiName} ${model.name}`) && !/-instruct\b/i.test(model.apiName));
+    const staticNativeThinking = /(?:qwen3|flint|deepseek[-_]?r1|qwq|\bo[134]\b)/i.test(`${model.apiName} ${model.name}`) && !/-instruct\b/i.test(model.apiName);
+    const nativeThinking = thinkingOn || staticNativeThinking;
     const cacheFriendly = this.cacheFriendly(model);
+    const stripThinkTool = cacheFriendly ? staticNativeThinking : nativeThinking;
     // On llama-server (cacheFriendly), dropping `tools` to [] on `noTools` / `finalSynthesis` turns invalidates
     // token 0 of the entire KV cache (forcing a full 48K+ token re-prefill). Keep tool schemas stable for prefix reuse
     // and discard any returned tool calls below when `current.cursor.noTools` is set.
@@ -1123,7 +1129,7 @@ export class Engine {
     const tools = toolless
       ? []
       : this.tools(agent, sessionForCtx?.mode, current.cursor.stage, current.cursor.toolSubset, Boolean(current.cursor.helperId), current, false, cacheFriendly, compactCoding)
-          .filter((tool) => !(nativeThinking && tool.name === 'think'))
+          .filter((tool) => !(stripThinkTool && tool.name === 'think'))
           .map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
     const repoTask = Boolean(sessionForCtx?.mode === 'code' || sessionForCtx?.workshopId || current.cursor.stage || turnRoots(this.store, current, this.libraryDir).length > 0);
     const roleForCtx = current.cursor.autoRole || contractForAgent(agent.name)?.modelRole || 'main';
@@ -1551,8 +1557,11 @@ export class Engine {
       const stepCompact = this.isCompactCoding(stepAgent, stepSessionMode, run, stepModelRow, this.store.getSettings());
       const tools = this.tools(stepAgent, stepSessionMode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId), run, true, stepStable, stepCompact);
       const tool = tools.find((item) => item.name === call.name);
-      // A permitted tool called before find_tools surfaced it still runs, and stays on the menu from now on.
-      if (tool && run.cursor.extraTools !== undefined && call.name !== 'find_tools' && !run.cursor.extraTools.includes(call.name)) this.addRunTools(run, [call.name]);
+      // A permitted tool called before find_tools surfaced it still runs, and stays on the menu for non-cached providers.
+      if (tool && !stepStable && run.cursor.extraTools !== undefined && call.name !== 'find_tools') {
+        const offered = this.tools(stepAgent, stepSessionMode, run.cursor.stage, run.cursor.toolSubset, Boolean(run.cursor.helperId), run, false, stepStable, stepCompact);
+        if (!offered.some((item) => item.name === call.name)) this.addRunTools(run, [call.name]);
+      }
       // Malformed arguments go back to the model as a fixable error instead of running the tool with {}.
       const badAttempt = (this.store.getRun(run.id)?.cursor.badArgs ?? 0) + 1;
       const badJson = argumentsError(call.name, call.arguments, badAttempt);
@@ -2195,10 +2204,14 @@ export class Engine {
       }
     }
     // Pin new notes once (split on blank lines so a growing recovery note does not repeat its earlier paragraphs).
+    // For cache-friendly models, deliver mid-run steering via a pinned <note> at the tail instead of a new user turn
+    // (a mid-run user turn strips <think> from earlier steps in Qwen's Jinja template and shifts the KV prefix).
+    const isMidRunSteering = (m: Message) =>
+      cacheFriendly && m.role === 'user' && m.runId === run.id && m.routingNote === 'Steering' && m.id !== user?.id;
     const pinnedNotes = [...(run.cursor.notes ?? [])];
     if (cacheFriendly) {
       const seen = new Set(pinnedNotes.map((note) => note.text));
-      const anchorId = messages.at(-1)?.id ?? user?.id ?? '';
+      const anchorId = [...messages].reverse().find((m) => !isMidRunSteering(m))?.id ?? user?.id ?? '';
       for (const piece of [stageNote, roleNote, nudge, recoveryNote].flatMap((text) => text.split(/\n{2,}/)).map((text) => text.trim()).filter(Boolean)) {
         if (seen.has(piece)) continue;
         seen.add(piece);
@@ -2207,7 +2220,7 @@ export class Engine {
     }
     const notesTokens = pinnedNotes.reduce((sum, note) => sum + estimateTokens(note.text, tok) + 8, 0);
     const turnContextTokens = turnContext ? estimateTokens(turnContext, tok) + 16 : 0;
-    const runMessageIds = messages.filter((message) => message.runId === run.id || message.id === user?.id).map((message) => message.id);
+    const runMessageIds = messages.filter((message) => !isMidRunSteering(message) && (message.runId === run.id || message.id === user?.id)).map((message) => message.id);
     const fullBudget = run.cursor.budgetOverride || budget;
     const toolDeduction = toolSchemaTokens <= fullBudget * 0.35 ? toolSchemaTokens : 0;
     const plan = planContext({
@@ -2215,7 +2228,7 @@ export class Engine {
       system, optional: cacheFriendly ? [] : optionalParts,
       pinned: notes.filter((note) => note.pinned).map((note) => note.content),
       summaries, retrieved, tokenizer: tok,
-      messages: this.uncoveredMessages(messages, summaries).map((message) => ({ id: message.id, role: message.role as 'user', content: message.content })),
+      messages: this.uncoveredMessages(messages.filter((message) => !isMidRunSteering(message)), summaries, run.cursor.historyFloorId).map((message) => ({ id: message.id, role: message.role as 'user', content: message.content })),
       run: { messageIds: runMessageIds, digestIds: run.cursor.digestIds, historyFloorId: run.cursor.historyFloorId },
       breakdownHints: {
         systemPrompt: estimateTokens(`${citeHint}${HONESTY_RULE}${run.cursor.helperId ? '' : TASKS_HINT}${fencedHint}${searchFirstNote}${languageNote}${stageNote}${roleNote}${recoveryNote}`, tok),
@@ -2670,7 +2683,9 @@ export class Engine {
     const hideDuplicateTasks = (list: Tool[]) => list.some((tool) => tool.name === 'plan') && !agent.toolAllowlist.includes('tasks')
       ? list.filter((tool) => tool.name !== 'tasks')
       : list;
-    if (!leanMenuEnabled() || permitted.length <= LEAN_MIN_TOOLS) return all ? permitted : hideDuplicateTasks(permitted);
+    if (!leanMenuEnabled() || permitted.length <= LEAN_MIN_TOOLS || (stablePrefix && !compactCoding && permitted.length <= STABLE_FULL_MENU_MAX)) {
+      return all ? permitted : hideDuplicateTasks(permitted);
+    }
     const core = compactCoding
       ? new Set<string>(COMPACT_CODING_TOOLS)
       : new Set<string>([...agent.toolAllowlist, ...CORE_TOOLS]);
@@ -2689,7 +2704,21 @@ export class Engine {
     const baseNames = new Set(base.map((tool) => tool.name));
     const discoverable = permitted.filter((tool) => !baseNames.has(tool.name));
     if (!discoverable.length) return permitted;
-    if (run && run.cursor.extraTools === undefined) this.seedTools(run, discoverable, servers);
+    if (run && run.cursor.extraTools === undefined) {
+      const prev = stablePrefix
+        ? this.store.listSessionRuns(run.sessionId, 8).find((r) => r.id !== run.id && r.agentId === agent.id && r.cursor.extraTools !== undefined)
+        : undefined;
+      if (prev?.cursor.extraTools) {
+        const inherited = prev.cursor.extraTools.filter((name) => discoverable.some((tool) => tool.name === name));
+        run.cursor.extraTools = inherited;
+        const stored = this.store.getRun(run.id);
+        if (stored && stored.cursor.extraTools === undefined) {
+          this.store.updateRun(run.id, { cursor: { ...stored.cursor, extraTools: inherited } });
+        }
+      } else {
+        this.seedTools(run, discoverable, servers);
+      }
+    }
     const extras = (run?.cursor.extraTools ?? []).map((name) => discoverable.find((tool) => tool.name === name)).filter((tool): tool is Tool => Boolean(tool));
     const finder = findToolsTool({
       discoverable, servers,

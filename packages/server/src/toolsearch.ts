@@ -21,6 +21,8 @@ export const COMPACT_CODING_TOOLS = [
 
 /** Below this many allowed tools the whole list is offered and find_tools is not needed. */
 export const LEAN_MIN_TOOLS = 18;
+/** Cache-friendly models keep their full permitted menu fixed up to this cap so token-0 tools never shift mid-chat. */
+export const STABLE_FULL_MENU_MAX = 60;
 /** Tools pre-loaded from the request text at the start of a run, so obvious needs skip a find_tools round trip. */
 export const SEED_TOOLS = 4;
 

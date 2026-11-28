@@ -191,7 +191,7 @@ export async function fetchPublicText(
     .replace(/\n{3,}/g, '\n\n')
     .trim();
   if (!text) return '(empty page)';
-  if (text.length > 48_000) return `${text.slice(0, 48_000)}\n…[truncated at 48,000 of ${text.length} characters]`;
+  if (text.length > 14_000) return `${text.slice(0, 14_000)}\n…[truncated at 14,000 of ${text.length} characters]`;
   return text;
 }
 
