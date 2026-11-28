@@ -53,6 +53,14 @@ describe('risk tiers', () => {
     expect(needsApproval('medium', 'x', 'autonomous')).toBe(false);
     expect(needsApproval('high', null, 'autonomous')).toBe(true);
     expect(needsApproval('safe', null, 'cautious')).toBe(false);
+    // Normal web surfing is safe (no approval); payment/checkout submit stays high risk.
+    const surf = riskOf('browse', { url: 'https://www.aliexpress.com/w/ssd.html', actions: [{ type: 'click', selector: 'a.item' }, { type: 'fill', selector: 'input[name=q]', value: '1tb ssd' }] }, null);
+    expect(surf.tier).toBe('safe');
+    expect(needsApproval(surf.tier, null, 'cautious')).toBe(false);
+    expect(needsApproval(surf.tier, null, 'balanced')).toBe(false);
+    const pay = riskOf('browse', { url: 'https://shop.example.com/checkout', actions: [{ type: 'click', text: 'Buy now' }] }, null);
+    expect(pay.tier).toBe('high');
+    expect(needsApproval(pay.tier, null, 'autonomous')).toBe(true);
   });
 });
 

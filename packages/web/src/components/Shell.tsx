@@ -6,6 +6,7 @@ import { LayoutGrid, Plus, Search, Star, Activity, Bell, BellOff, Info, MessageS
 import { Menu } from './ui';
 import { Toaster } from './Toaster';
 import { api, post } from '../lib/api';
+import { desktopNotifyEnabled, sendDesktopNotification, shouldSendNotification } from '../lib/notifications';
 import { Face, type FaceAgent } from './Face';
 import { t, fmt } from '../i18n';
 
@@ -101,6 +102,17 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
   useEffect(() => { if (!chatRoute) setCodeMode(false); }, [chatRoute]);
   // The chat page reports whose chat is open, so that persona's row reads as selected.
   const [activePersona, setActivePersona] = useState<string | null>(null);
+  const personasRef = useRef<Persona[]>([]);
+  personasRef.current = personas;
+  const activePersonaRef = useRef<string | null>(null);
+  activePersonaRef.current = activePersona;
+  useEffect(() => {
+    const goTo = (route?: string) => { if (route && route.startsWith('/')) navigate(route); };
+    const offNative = (window as unknown as { localAgent?: { onNotificationClick?: (cb: (p: { route?: string }) => void) => () => void } }).localAgent?.onNotificationClick?.((p) => goTo(p?.route));
+    const onWebNav = (event: Event) => goTo((event as CustomEvent<string>).detail);
+    window.addEventListener('la:navigate', onWebNav);
+    return () => { offNative?.(); window.removeEventListener('la:navigate', onWebNav); };
+  }, [navigate]);
   useEffect(() => {
     const onActive = (event: Event) => setActivePersona((event as CustomEvent<string | null>).detail ?? null);
     const onOpen = () => setOpen(true);
@@ -169,6 +181,48 @@ export function Shell({ username, role = 'owner', onLogout, children }: { userna
         const data = JSON.parse(event.data);
         // A run ending can expire its requests on the server; refresh the notice at once.
         if (data.type === 'secret' || data.type === 'approval' || data.type === 'done') tick();
+        const enabled = desktopNotifyEnabled();
+        const focused = typeof document.hasFocus === 'function' ? document.hasFocus() : true;
+        const hidden = Boolean(document.hidden);
+        if (data.type === 'approval' && data.approval?.status === 'pending') {
+          const aid = data.agentId as string | undefined;
+          const p = aid ? personasRef.current.find((row) => row.id === aid) : undefined;
+          if (shouldSendNotification({ kind: 'approval', focused, hidden, muted: p?.notify === 'mute', enabled, samePersona: Boolean(aid && activePersonaRef.current === aid) })) {
+            void sendDesktopNotification({
+              title: `${p?.name || t('Agent')} — ${t('Approval needed')}`,
+              body: String(data.approval.reason || data.approval.toolName || ''),
+              route: aid ? `/?persona=${aid}` : '/',
+              tag: `approval:${data.approval.id}`,
+              urgent: true,
+            });
+          }
+        } else if (data.type === 'secret' && data.request) {
+          const aid = data.agentId as string | undefined;
+          const p = aid ? personasRef.current.find((row) => row.id === aid) : undefined;
+          if (shouldSendNotification({ kind: 'secret', focused, hidden, muted: p?.notify === 'mute', enabled, samePersona: Boolean(aid && activePersonaRef.current === aid) })) {
+            void sendDesktopNotification({
+              title: `${p?.name || t('Agent')} — ${t('Secret needed')}`,
+              body: `${data.request.name}: ${String(data.request.reason || '')}`.trim(),
+              route: '/settings#vault',
+              tag: `secret:${data.request.id}`,
+              urgent: true,
+            });
+          }
+        } else if (data.type === 'done' && data.run && !data.run.parentRunId && !data.run.cursor?.helperId) {
+          const aid = data.run.agentId as string | undefined;
+          const p = aid ? personasRef.current.find((row) => row.id === aid) : undefined;
+          if (shouldSendNotification({ kind: 'done', status: data.run.status, focused, hidden, muted: p?.notify === 'mute', enabled })) {
+            const failed = data.run.status === 'failed';
+            const chatTitle = p?.chat?.title && p.chat.title !== 'New chat' ? p.chat.title : '';
+            void sendDesktopNotification({
+              title: `${p?.name || t('Agent')} — ${failed ? t('Run failed') : t('Finished')}`,
+              body: failed ? String(data.run.error || t('Check the chat for details.')) : (chatTitle || t('Reply is ready.')),
+              route: aid ? `/?persona=${aid}` : '/',
+              tag: `done:${data.runId}`,
+              urgent: false,
+            });
+          }
+        }
         // Pages listen for runs starting in the chat they show (the server only sends this account's runs).
         window.dispatchEvent(new CustomEvent('la:live', { detail: data }));
       };

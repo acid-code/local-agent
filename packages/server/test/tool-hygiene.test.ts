@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { ToolCall } from '@local-agent/shared';
 import { buildApp } from '../src/app.js';
 import { checkOrRepair, normalizeToolArgs, toolArgumentsSchema } from '../src/contracts.js';
+import { browseTool } from '../src/connectors.js';
 import { Store } from '../src/db.js';
 import { ensureFilesTable, shareFileTool } from '../src/files.js';
 import { fetchWebImage, mockPng } from '../src/images.js';
@@ -279,5 +280,21 @@ describe('tool hygiene fixes', () => {
     expect(requestedUrls[0]).toContain('filetype%3Abitmap%7Cdrawing');
     expect(res.sourceUrl).toBe('https://thumb.wikimedia.org/1280px-antibody.png');
     store.close();
+  });
+
+  it('browseTool skips approval for normal surfing actions while guarding payment actions', () => {
+    const tool = browseTool();
+    expect(tool.approval({
+      url: 'https://www.aliexpress.com/w/ssd.html',
+      actions: [
+        { type: 'click', selector: 'a.product' },
+        { type: 'fill', selector: 'input[name=q]', value: '1tb ssd' },
+        { type: 'scroll', y: 400 },
+      ],
+    })).toBeNull();
+    expect(tool.approval({
+      url: 'https://shop.example.com/checkout',
+      actions: [{ type: 'click', text: 'Buy now' }],
+    })).toMatch(/Payment or purchase action/i);
   });
 });

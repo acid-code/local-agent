@@ -4,6 +4,7 @@ import { Link, useLocation } from 'react-router-dom';
 import { api, post } from '../lib/api';
 import { errorText, toast } from '../lib/toast';
 import { Appearance } from '../components/Appearance';
+import { desktopNotifyEnabled, requestNotificationPermission, sendDesktopNotification, setDesktopNotifyEnabled } from '../lib/notifications';
 import { AccountCard, People, QuotaCard } from '../components/People';
 import { ImageRole } from '../components/ImageRole';
 import { PullModel } from '../components/PullModel';
@@ -36,7 +37,7 @@ function autoRoleLabel(role: string) {
 interface Def { id: string; label: string; icon: LucideIcon; blurb: string; words: string; owner?: boolean; group: 'General' | 'Admin' }
 /** One page, in this order. Old deep links (#models, #setup, #vault, #policy, #backups…) land on the matching section. */
 const SECTIONS: Def[] = [
-  { id: 'appearance', group: 'General', label: tr('Appearance'), icon: Palette, blurb: tr('Theme, font, bubbles and wallpaper for your account.'), words: 'theme dark light font wallpaper color bubbles density accent' },
+  { id: 'appearance', group: 'General', label: tr('Appearance'), icon: Palette, blurb: tr('Theme, font, bubbles and wallpaper for your account.'), words: 'theme dark light font wallpaper color bubbles density accent notifications notify windows alert toast' },
   { id: 'language', group: 'General', label: tr('Language'), icon: Languages, blurb: tr('Interface language and Hebrew polishing.'), words: 'language hebrew עברית english rtl locale translate' },
   { id: 'system', group: 'General', label: tr('System'), icon: Cpu, blurb: tr('Models, Ollama pulls, llama-server, SearXNG web search, and image generation.'), words: 'system models ollama llama-server pull refresh searxng search url gemini image limits quota tier setup auto roles fast coder main' },
   { id: 'personas', group: 'General', label: tr('Personas'), icon: Bot, blurb: tr('Who you talk to. Edit one from the chat with its name.'), words: 'personas agents prompt instructions tools skills face voice' },
@@ -484,7 +485,7 @@ export function Settings({ role = 'owner' }: { role?: 'owner' | 'member' }) {
     return (
       <SettingsPage owner={false}>
         {(show) => <>
-          {show('appearance') && <Block id="appearance"><Appearance /></Block>}
+          {show('appearance') && <Block id="appearance"><Appearance /><NotificationsCard /></Block>}
           {show('language') && <Block id="language"><LanguageSettings /></Block>}
           {show('system') && <Block id="system"><SystemBlock owner={false} settings={null} /></Block>}
           {show('personas') && <Block id="personas"><PersonasBlock /></Block>}
@@ -496,6 +497,53 @@ export function Settings({ role = 'owner' }: { role?: 'owner' | 'member' }) {
     );
   }
   return <OwnerSettings />;
+}
+
+function NotificationsCard() {
+  const [enabled, setEnabled] = useState(() => desktopNotifyEnabled());
+  return (
+    <div className="card">
+      <h3>{tr('Desktop notifications')}</h3>
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={async (e) => {
+            const on = e.target.checked;
+            setEnabled(on);
+            setDesktopNotifyEnabled(on);
+            if (on) {
+              const perm = await requestNotificationPermission();
+              if (perm === 'denied') toast(tr('Notifications are blocked in browser settings.'), 'error');
+            }
+          }}
+        />
+        <span>{tr('Notify on Windows when an agent needs approval or finishes running.')}</span>
+      </label>
+      <div className="row" style={{ marginTop: 8 }}>
+        <button
+          type="button"
+          className="btn ghost small"
+          onClick={async () => {
+            const perm = await requestNotificationPermission();
+            if (perm === 'denied') {
+              toast(tr('Notifications are blocked in browser settings.'), 'error');
+              return;
+            }
+            const ok = await sendDesktopNotification({
+              title: tr('local-agent'),
+              body: tr('Notifications work! You will see alerts when an agent needs approval or finishes.'),
+              route: '/',
+              urgent: true,
+            });
+            toast(ok ? tr('Test sent.') : tr('Notifications are blocked in browser settings.'), ok ? 'ok' : 'error');
+          }}
+        >
+          {tr('Test notification')}
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function OwnerSettings() {
@@ -555,7 +603,7 @@ function OwnerSettings() {
   return (
     <SettingsPage owner>
       {(show, track) => { trackRef.current = track; return <>
-      {show('appearance') && <Block id="appearance"><Appearance /></Block>}
+      {show('appearance') && <Block id="appearance"><Appearance /><NotificationsCard /></Block>}
           {show('language') && <Block id="language"><LanguageSettings /></Block>}
       {show('system') && <Block id="system"><SystemBlock owner settings={settings} patchSettings={patchSettings} /></Block>}
       {show('personas') && <Block id="personas"><PersonasBlock /></Block>}

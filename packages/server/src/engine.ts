@@ -1736,7 +1736,7 @@ export class Engine {
         const waiting = { ...this.store.getRun(run.id)!.cursor, approvalId: approval.id, completedToolIds: [...completed] };
         this.store.updateRun(run.id, { status: 'awaiting_approval', cursor: waiting });
         this.checkpoint(run.id, waiting, 'Waiting for approval');
-        this.bus.publish({ type: 'approval', runId: run.id, approval });
+        this.bus.publish({ type: 'approval', runId: run.id, sessionId: run.sessionId, agentId: run.agentId, approval });
         if (approval.status === 'pending') await this.waitApproval(approval.id, run.id, signal);
         approval = this.store.getApproval(approval.id)!;
         this.store.updateRun(run.id, { status: 'running' });
@@ -1828,7 +1828,7 @@ export class Engine {
       const waiting = { ...latest.cursor, phase: 'tools' as const, stage: 'plan' as const, approvalId: approval.id };
       this.store.updateRun(run.id, { status: 'awaiting_approval', cursor: waiting });
       this.checkpoint(run.id, waiting, 'Waiting for the plan');
-      this.bus.publish({ type: 'approval', runId: run.id, approval });
+      this.bus.publish({ type: 'approval', runId: run.id, sessionId: run.sessionId, agentId: run.agentId, approval });
       await this.waitApproval(approval.id, run.id, signal);
       const decided = this.store.getApproval(approval.id);
       next = decided?.status === 'approved'
@@ -2965,7 +2965,7 @@ export class Engine {
     const waiting = { ...this.store.getRun(run.id)!.cursor, completedToolIds: [...completed] };
     this.store.updateRun(run.id, { status: 'awaiting_secret', cursor: waiting });
     this.checkpoint(run.id, waiting, `Waiting for secret ${request.name}`);
-    this.bus.publish({ type: 'secret', runId: run.id, request });
+    this.bus.publish({ type: 'secret', runId: run.id, sessionId: run.sessionId, agentId: run.agentId, request });
     const decision = await this.waitSecret(request.id, run.id, signal);
     this.store.updateRun(run.id, { status: 'running' });
     const handle = decision === 'provided' ? this.vault.active(name, agent.id)?.handle : null;

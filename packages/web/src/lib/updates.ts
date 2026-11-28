@@ -8,6 +8,8 @@ export interface DesktopBridge {
   getUpdateStatus?: () => Promise<UpdateStatus>;
   installUpdate?: () => Promise<{ ok: boolean }>;
   openReleasePage?: () => Promise<unknown>;
+  notify?: (payload: { title: string; body: string; route?: string; flash?: boolean; silent?: boolean }) => Promise<{ ok?: boolean }>;
+  onNotificationClick?: (callback: (payload: { route?: string }) => void) => () => void;
   onUpdateStatus?: (callback: (status: UpdateStatus) => void) => () => void;
 }
 

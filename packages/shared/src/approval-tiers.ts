@@ -45,6 +45,7 @@ export function riskOf(tool: string, args: Record<string, unknown>, declared: st
       return false;
     });
     if (isPaySubmit) return { tier: 'high', why: 'Submit or purchase action on a payment/checkout page' };
+    return { tier: 'safe', why: 'browse (surf public web)' };
   }
   // Skills keep their last versions and can be deleted, so text-only skills are reversible: a new one is low, an update
   // medium. A skill that ships a script runs code for every persona, so it always asks.

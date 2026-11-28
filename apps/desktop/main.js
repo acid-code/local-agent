@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, MenuItem, dialog, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, Menu, MenuItem, Notification, dialog, ipcMain, shell } = require('electron');
 // Downloads (Save in the file viewer) ask where to put the file with the native save dialog.
 const fs = require('fs');
 const path = require('path');
@@ -163,6 +163,10 @@ function createWindow() {
     showSetup(win, `Could not open ${url} (${description}).`);
   });
 
+  win.on('focus', () => {
+    try { win.flashFrame(false); } catch { /* ignore */ }
+  });
+
   const saved = readUrl();
   if (saved) void openServer(win, saved);
   else void showSetup(win);
@@ -233,6 +237,27 @@ ipcMain.handle('check-for-updates', async () => {
 });
 ipcMain.handle('install-update', () => ({ ok: updates.install() }));
 ipcMain.handle('open-release-page', () => { updates.openReleasePage(); return { ok: true }; });
+
+ipcMain.handle('show-notification', (event, payload) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const title = String(payload?.title || 'local-agent').slice(0, 120);
+  const body = String(payload?.body || '').slice(0, 240);
+  const route = typeof payload?.route === 'string' && payload.route.startsWith('/') ? payload.route : '/';
+  if (win && !win.isFocused() && payload?.flash !== false) {
+    try { win.flashFrame(true); } catch { /* ignore */ }
+  }
+  if (!Notification.isSupported()) return { ok: false, unsupported: true };
+  const notif = new Notification({ title, body, silent: Boolean(payload?.silent) });
+  notif.on('click', () => {
+    if (!win) return;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+    win.webContents.send('notification-click', { route });
+  });
+  notif.show();
+  return { ok: true };
+});
 
 ipcMain.handle('open-setup', (event, message) => {
   const win = BrowserWindow.fromWebContents(event.sender);

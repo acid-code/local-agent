@@ -10,6 +10,12 @@ contextBridge.exposeInMainWorld('localAgent', {
   getUpdateStatus: () => ipcRenderer.invoke('get-update-status'),
   installUpdate: () => ipcRenderer.invoke('install-update'),
   openReleasePage: () => ipcRenderer.invoke('open-release-page'),
+  notify: (payload) => ipcRenderer.invoke('show-notification', payload),
+  onNotificationClick: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('notification-click', listener);
+    return () => ipcRenderer.removeListener('notification-click', listener);
+  },
   onUpdateStatus: (callback) => {
     const listener = (_event, status) => callback(status);
     ipcRenderer.on('update-status', listener);

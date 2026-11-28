@@ -473,9 +473,7 @@ export function browseTool(): Tool {
       if (isPaymentAction(url, actions as unknown as BrowserAction[])) {
         return `Payment or purchase action on ${url.slice(0, 120)} requires your approval.`;
       }
-      const interactive = actions.filter((a) => ['navigate', 'click', 'fill', 'select', 'press', 'submit'].includes(actionKind(a)));
-      if (!interactive.length) return null;
-      return `Interact with web page ${url.slice(0, 120)} (${interactive.map((a) => `${actionKind(a)} ${a.selector || a.text || a.key || ''}`.trim()).join(', ').slice(0, 140)})`;
+      return null;
     },
     async execute(args, ctx) {
       if (ctx.agent.ownerId !== OWNER_ID) throw new Error('The browser is only available to the owner.');
